@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" class="stop-bg2"/>
+      <stop offset="1" class="stop-bg"/>
+    </linearGradient>
+    <radialGradient id="knobGrad" cx="0.4" cy="0.35" r="0.75">
+      <stop offset="0" class="stop-edge"/>
+      <stop offset="1" class="stop-panel"/>
+    </radialGradient>
+    <radialGradient id="glowGrad" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" class="stop-accent" stop-opacity="0.9"/>
+      <stop offset="1" class="stop-accent" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="2"/>
+    </filter>
+  </defs>
+
+  <rect width="640" height="360" fill="url(#bgGrad)"/>
+  <rect x="8" y="8" width="624" height="344" rx="14" fill="none" class="stroke-edge" stroke-width="1.5"/>
+
+  <text x="28" y="40" class="fill-text" font-family="sans-serif" font-size="20" font-weight="bold" letter-spacing="4">TAPE GLOW</text>
+  <text x="28" y="58" class="fill-dim" font-family="sans-serif" font-size="10" letter-spacing="2">SCRIPTED PRESET · RESVG</text>
+
+  <!-- tape reels -->
+  <path d="M 70 172 L 290 172" class="stroke-dim" stroke-width="2" fill="none"/>
+  <g id="reel_l">
+    <circle cx="110" cy="125" r="50" class="fill-panel stroke-edge" stroke-width="2"/>
+    <circle cx="110" cy="95" r="10" class="fill-bg"/>
+    <circle cx="136" cy="140" r="10" class="fill-bg"/>
+    <circle cx="84" cy="140" r="10" class="fill-bg"/>
+    <circle cx="110" cy="125" r="8" class="fill-dim"/>
+  </g>
+  <g id="reel_r">
+    <circle cx="250" cy="125" r="50" class="fill-panel stroke-edge" stroke-width="2"/>
+    <circle cx="250" cy="95" r="10" class="fill-bg"/>
+    <circle cx="276" cy="140" r="10" class="fill-bg"/>
+    <circle cx="224" cy="140" r="10" class="fill-bg"/>
+    <circle cx="250" cy="125" r="8" class="fill-dim"/>
+  </g>
+
+  <!-- character readout -->
+  <text x="232" y="40" class="fill-dim" font-family="sans-serif" font-size="10" letter-spacing="2">CHARACTER</text>
+  <text id="character_value" x="314" y="40" class="fill-accent" font-family="sans-serif" font-size="11" font-weight="bold">0%</text>
+
+  <!-- wow knob (free param, UI-only) -->
+  <g font-family="sans-serif" text-anchor="middle">
+    <text x="350" y="98" class="fill-dim" font-size="9" letter-spacing="2">WOW</text>
+    <circle id="wow_knob" cx="350" cy="125" r="16" fill="url(#knobGrad)" class="stroke-edge" stroke-width="1.5"/>
+    <g id="wow_pointer"><path d="M 350 119 L 350 111" class="stroke-accent" stroke-width="2.5" stroke-linecap="round"/></g>
+    <text id="wow_value" x="350" y="158" class="fill-text" font-size="10">0</text>
+  </g>
+
+  <!-- VU meter -->
+  <circle id="glow" cx="500" cy="125" r="110" fill="url(#glowGrad)" opacity="0.3"/>
+  <rect x="400" y="62" width="200" height="124" rx="10" class="fill-text stroke-edge" stroke-width="3" fill-opacity="0.92"/>
+  <path d="M 435 115 A 85 85 0 0 1 565 115" fill="none" stroke="#3b3036" stroke-width="2"/>
+  <path d="M 540 98 A 85 85 0 0 1 565 115" fill="none" class="stroke-accent" stroke-width="4"/>
+  <text x="430" y="170" fill="#3b3036" font-family="sans-serif" font-size="11">-60</text>
+  <text x="552" y="170" fill="#3b3036" font-family="sans-serif" font-size="11">0</text>
+  <text x="500" y="150" text-anchor="middle" fill="#3b3036" font-family="sans-serif" font-size="12" letter-spacing="3">VU</text>
+  <g id="vu_needle">
+    <path d="M 500 172 L 500 92" stroke="#1c1418" stroke-width="2" stroke-linecap="round"/>
+  </g>
+  <circle cx="500" cy="172" r="6" fill="#1c1418"/>
+
+  <!-- saturation LED -->
+  <circle id="sat_led" cx="420" cy="214" r="6" fill="#2a211c" filter="url(#soft)"/>
+  <circle cx="420" cy="214" r="6" fill="none" class="stroke-edge" stroke-width="1"/>
+  <text id="sat_text" x="434" y="218" class="fill-dim" font-family="sans-serif" font-size="11" letter-spacing="1">SAT 0%</text>
+
+  <!-- knobs -->
+  <g font-family="sans-serif" text-anchor="middle">
+    <text x="110" y="232" class="fill-dim" font-size="11" letter-spacing="2">DRIVE</text>
+    <circle cx="110" cy="280" r="40" fill="none" class="stroke-panel" stroke-width="3" stroke-dasharray="4 4"/>
+    <circle id="drive_knob" cx="110" cy="280" r="32" fill="url(#knobGrad)" class="stroke-edge" stroke-width="2"/>
+    <g id="drive_pointer"><path d="M 110 268 L 110 254" class="stroke-accent" stroke-width="4" stroke-linecap="round"/></g>
+    <text id="drive_value" x="110" y="340" class="fill-text" font-size="13">0</text>
+
+    <text x="250" y="232" class="fill-dim" font-size="11" letter-spacing="2">TONE</text>
+    <circle cx="250" cy="280" r="40" fill="none" class="stroke-panel" stroke-width="3" stroke-dasharray="4 4"/>
+    <circle id="tone_knob" cx="250" cy="280" r="32" fill="url(#knobGrad)" class="stroke-edge" stroke-width="2"/>
+    <g id="tone_pointer"><path d="M 250 268 L 250 254" class="stroke-accent" stroke-width="4" stroke-linecap="round"/></g>
+    <text id="tone_value" x="250" y="340" class="fill-text" font-size="13">0</text>
+
+    <text x="530" y="232" class="fill-dim" font-size="11" letter-spacing="2">MIX</text>
+    <circle cx="530" cy="280" r="40" fill="none" class="stroke-panel" stroke-width="3" stroke-dasharray="4 4"/>
+    <circle id="mix_knob" cx="530" cy="280" r="32" fill="url(#knobGrad)" class="stroke-edge" stroke-width="2"/>
+    <g id="mix_pointer"><path d="M 530 268 L 530 254" class="stroke-accent" stroke-width="4" stroke-linecap="round"/></g>
+    <text id="mix_value" x="530" y="340" class="fill-text" font-size="13">0</text>
+
+    <text x="390" y="262" class="fill-dim" font-size="11" letter-spacing="2">OUTPUT</text>
+    <circle cx="390" cy="300" r="30" fill="none" class="stroke-panel" stroke-width="3" stroke-dasharray="4 4"/>
+    <circle id="output_knob" cx="390" cy="300" r="24" fill="url(#knobGrad)" class="stroke-edge" stroke-width="2"/>
+    <g id="output_pointer"><path d="M 390 291 L 390 280" class="stroke-accent" stroke-width="3" stroke-linecap="round"/></g>
+    <text id="output_value" x="390" y="345" class="fill-text" font-size="12">0</text>
+  </g>
+</svg>

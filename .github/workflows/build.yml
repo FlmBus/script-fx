@@ -1,0 +1,83 @@
+name: Build plugin
+
+on:
+  push:
+    branches: ['**']
+    tags: ['*']
+  pull_request:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libgl-dev libjack-dev libx11-xcb-dev libxcb1-dev \
+            libxcb-dri2-0-dev libxcb-icccm4-dev libxcursor-dev libxkbcommon-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p preset -p ui-svg
+
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64,    os: ubuntu-22.04 }
+          - { name: windows-x86_64,  os: windows-latest }
+          # Apple Silicon runner builds both arm64 and x86_64 and merges them (lipo).
+          - { name: macos-universal, os: macos-latest, targets: 'aarch64-apple-darwin,x86_64-apple-darwin' }
+    name: Package ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libgl-dev libjack-dev libx11-xcb-dev libxcb1-dev \
+            libxcb-dri2-0-dev libxcb-icccm4-dev libxcursor-dev libxkbcommon-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - name: Bundle VST3 + CLAP
+        run: |
+          if [[ "${{ matrix.name }}" == macos-universal ]]; then
+            export MACOSX_DEPLOYMENT_TARGET=11.0
+            cargo xtask bundle-universal scriptfx --release
+          else
+            cargo xtask bundle scriptfx --release
+          fi
+
+      - name: Ad-hoc sign (macOS)
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          for b in target/bundled/*.vst3 target/bundled/*.clap; do
+            codesign --force --deep --sign - "$b"
+          done
+
+      - name: Collect artifact
+        run: |
+          out="ScriptFX-${{ matrix.name }}"
+          mkdir -p "$out"
+          cp -R target/bundled/ScriptFX.vst3 target/bundled/ScriptFX.clap "$out/"
+          cp ".github/install/README-${{ runner.os }}.txt" "$out/README.txt"
+          echo "ARTIFACT=$out" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: ${{ env.ARTIFACT }}
