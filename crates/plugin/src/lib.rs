@@ -28,16 +28,21 @@ static BUNDLED_PRESETS: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../presets");
 /// `$SCRIPTFX_PRESETS`, else `<user data dir>/ScriptFX/presets`
 /// (Linux `~/.local/share`, macOS `~/Library/Application Support`, Windows `%APPDATA%`).
 /// Bundled presets are copied there if missing; existing files are never overwritten.
+/// Resolved (and installed) once per process.
 pub fn presets_root() -> PathBuf {
-    if let Some(p) = std::env::var_os("SCRIPTFX_PRESETS") {
-        return PathBuf::from(p);
-    }
-    let root = dirs::data_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("ScriptFX")
-        .join("presets");
-    install_bundled_presets(&root);
-    root
+    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        if let Some(p) = std::env::var_os("SCRIPTFX_PRESETS") {
+            return PathBuf::from(p);
+        }
+        let root = dirs::data_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("ScriptFX")
+            .join("presets");
+        install_bundled_presets(&root);
+        root
+    })
+    .clone()
 }
 
 fn install_bundled_presets(root: &Path) {

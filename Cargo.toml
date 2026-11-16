@@ -5,3 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 edition = "2024"
 rust-version = "1.89"
+
+# Patched copies of git dependencies (see vendor/*/PATCHES.md).
+[patch."https://github.com/RustAudio/baseview.git"]
+baseview = { path = "vendor/baseview" }

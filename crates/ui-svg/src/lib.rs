@@ -333,6 +333,13 @@ impl SvgPanel {
         })
     }
 
+    /// Forces the next [`update`](Self::update) to render (e.g. after the
+    /// texture holding the last render was lost).
+    pub fn invalidate(&mut self) {
+        self.last_inputs.clear();
+        self.last_px = (0, 0);
+    }
+
     /// Re-renders if any bound input or the target pixel size changed.
     /// Returns true when the pixmap was updated.
     pub fn update(&mut self, values: &Values, px_w: u32, px_h: u32) -> bool {

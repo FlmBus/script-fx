@@ -19,7 +19,9 @@ pub fn create(params: Arc<FxParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
     create_egui_editor(
         params.editor_state.clone(),
         EditorState::new(),
-        |_, _| {},
+        // Called on every window open. The editor state outlives the window, but each
+        // window gets a fresh egui context: textures and visuals must be re-created.
+        |ctx, state| state.on_window_open(ctx),
         move |ctx, setter, state| state.frame(ctx, setter, &params, &shared),
     )
 }
@@ -87,6 +89,17 @@ impl EditorState {
             drag: None,
             prompt: String::new(),
             lua_us: 0.0,
+        }
+    }
+
+    fn on_window_open(&mut self, ctx: &egui::Context) {
+        self.drag = None;
+        if let Some(cur) = &mut self.current {
+            cur.texture = None;
+            if let Some(panel) = &mut cur.panel {
+                panel.invalidate();
+            }
+            ctx.set_visuals(theme_visuals(&cur.preset.theme));
         }
     }
 
