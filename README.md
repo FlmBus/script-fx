@@ -5,6 +5,7 @@ UI declaratively, and native Rust does the DSP and rendering.
 
 ```
 crates/preset   preset model (params + macros), sandboxed Lua loader, animate() hook
+crates/analysis offline analysis of a capture → LLM-friendly JSON (loudness/LUFS, spectrum, dynamics, stereo, pitch)
 crates/dsp      native DSP: compiles a preset's `chain` into a graph (no alloc/locks/Lua on the audio thread)
 crates/ui-svg   PoC #1: preset panel via resvg/usvg ("patch & reparse")
 crates/plugin   package `scriptfx`: nih-plug plugin (VST3/CLAP/standalone), egui chrome + preset panel + mock DSP
@@ -38,6 +39,15 @@ cargo run --release -p ui-svg --example render -- presets/tape-glow /tmp/out.png
 presets are compiled in and copied there on first run; existing files are never overwritten.
 For preset development, point `SCRIPTFX_PRESETS` at this repo's `presets/`. Hot reload picks up
 edits, errors show in the footer, and the last good preset keeps running.
+
+**Listen** (footer, 🎧): waits for signal, records N seconds of the chain's input *and* output
+(silence skipped), analyses both off the audio thread, shows the result and can attach it to the
+prompt. Saved to `<data dir>/ScriptFX/captures/capture-<time>/` (`analysis.json`, `input.wav`, `output.wav`).
+Loudness verified against ffmpeg's `ebur128` (identical LUFS, ±0.1 dB true peak / LRA).
+`cargo run --release -p analysis --example analyze -- file.wav` analyses a WAV from the command line.
+
+Dev aids for the standalone: `SCRIPTFX_TEST_INPUT=file.wav` (float WAV at the host rate, looped as
+input), `SCRIPTFX_DEV_AUTOLISTEN=10` (start a 10 s listen when the editor opens).
 
 **CI** (`.github/workflows/build.yml`): tests, then VST3 + CLAP bundles for Linux x86_64,
 Windows x86_64 and macOS universal (arm64 + x86_64, ad-hoc signed, not notarized → remove
@@ -173,6 +183,7 @@ What it took / what's missing:
 
 ## Next
 
+- [ ] Passive mode (master instance) + pulling the master capture into a track's listen
 - [ ] Macro targets on block settings directly (less param boilerplate)
 - [ ] Crossfade on graph swap
 - [ ] Verify host name updates: Reaper (VST3 + CLAP), Carla, Studio One 6 (mac), Fender Studio (win)

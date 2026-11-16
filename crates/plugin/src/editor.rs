@@ -65,6 +65,8 @@ struct EditorState {
     drag: Option<DragState>,
     prompt: String,
     lua_us: f32,
+    listen: crate::listen::Listen,
+    autolisten: Option<f32>,
 }
 
 enum Action {
@@ -89,11 +91,17 @@ impl EditorState {
             drag: None,
             prompt: String::new(),
             lua_us: 0.0,
+            listen: crate::listen::Listen::new(),
+            autolisten: None,
         }
     }
 
     fn on_window_open(&mut self, ctx: &egui::Context) {
         self.drag = None;
+        // Dev aid: start listening right away (see README).
+        if let Some(s) = std::env::var("SCRIPTFX_DEV_AUTOLISTEN").ok().and_then(|s| s.parse::<f32>().ok()) {
+            self.autolisten = Some(s);
+        }
         if let Some(cur) = &mut self.current {
             cur.texture = None;
             if let Some(panel) = &mut cur.panel {
@@ -117,6 +125,10 @@ impl EditorState {
             self.load(ctx, setter, params, shared, &name, fresh);
         }
         self.poll_hot_reload(ctx, setter, params, shared);
+        if let Some(s) = self.autolisten.take() {
+            shared.start_listen(s);
+        }
+        self.listen.poll(shared);
 
         // Gather values for this frame.
         for i in 0..MACRO_SLOTS {
@@ -142,7 +154,7 @@ impl EditorState {
 
         let mut action = None;
         self.header(ctx, &mut action);
-        self.footer(ctx);
+        self.footer(ctx, shared);
         self.sidebar(ctx, setter, params, shared);
         self.preset_panel(ctx, setter, params, shared);
 
@@ -291,10 +303,12 @@ impl EditorState {
         });
     }
 
-    fn footer(&mut self, ctx: &egui::Context) {
+    fn footer(&mut self, ctx: &egui::Context, shared: &Shared) {
         egui::TopBottomPanel::bottom("footer").show(ctx, |ui| {
             ui.add_space(4.0);
+            self.listen.chip(ui);
             ui.horizontal(|ui| {
+                self.listen.button(ui, shared);
                 let w = ui.available_width() - 90.0;
                 ui.add(
                     egui::TextEdit::singleline(&mut self.prompt)
@@ -430,6 +444,11 @@ impl EditorState {
     }
 
     fn preset_panel(&mut self, ctx: &egui::Context, setter: &ParamSetter, params: &FxParams, shared: &Shared) {
+        if self.listen.overlay_active(shared) {
+            let meter_in = self.values.meter_in;
+            egui::CentralPanel::default().show(ctx, |ui| self.listen.overlay(ui, shared, meter_in));
+            return;
+        }
         let mut free_change: Option<(usize, f32)> = None;
         egui::CentralPanel::default().show(ctx, |ui| {
             let avail = ui.available_rect_before_wrap();

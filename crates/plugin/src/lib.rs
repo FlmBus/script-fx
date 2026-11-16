@@ -14,6 +14,26 @@ use nih_plug_egui::EguiState;
 use preset::{MACRO_SLOTS, Preset};
 
 mod editor;
+mod listen;
+
+/// Listen/capture states (`Shared::listen_state`).
+pub const LISTEN_IDLE: u8 = 0;
+/// Waiting for the first signal above [`ARM_THRESHOLD`].
+pub const LISTEN_ARMED: u8 = 1;
+pub const LISTEN_RECORDING: u8 = 2;
+pub const LISTEN_DONE: u8 = 3;
+const ARM_THRESHOLD: f32 = 0.003_16; // -50 dBFS
+/// Blocks quieter than this aren't recorded (skips gaps between takes/sections).
+const SIGNAL_THRESHOLD: f32 = 0.001; // -60 dBFS
+pub const MAX_CAPTURE_SECONDS: f32 = 30.0;
+
+/// Pre-allocated capture of the chain's input and output.
+pub struct CaptureBuf {
+    pub input: Vec<Frame>,
+    pub output: Vec<Frame>,
+    pub len: usize,
+    pub target: usize,
+}
 
 pub const DEFAULT_PRESET: &str = "tape-glow";
 const PEAK_DECAY_MS: f32 = 300.0;
@@ -118,9 +138,75 @@ pub struct Shared {
     /// Replaced graphs ← audio thread (dropped here, never on the audio thread).
     garbage_rx: Mutex<rtrb::Consumer<Box<Graph>>>,
     live: Mutex<Option<Live>>,
+    pub listen_state: std::sync::atomic::AtomicU8,
+    pub listen_progress: std::sync::atomic::AtomicUsize,
+    /// Audio thread only ever `try_lock`s this (never blocks).
+    pub capture: Mutex<CaptureBuf>,
 }
 
 impl Shared {
+    pub fn sample_rate(&self) -> f32 {
+        self.sample_rate.load(Ordering::Relaxed)
+    }
+
+    /// Arms a capture of `seconds` of signal (input + output of the chain).
+    pub fn start_listen(&self, seconds: f32) {
+        let mut cap = self.capture.lock().unwrap();
+        cap.len = 0;
+        cap.target = ((seconds * self.sample_rate()) as usize).min(cap.input.len());
+        self.listen_progress.store(0, Ordering::Relaxed);
+        self.listen_state.store(LISTEN_ARMED, Ordering::Release);
+    }
+
+    pub fn cancel_listen(&self) {
+        self.listen_state.store(LISTEN_IDLE, Ordering::Release);
+    }
+
+    /// Takes the finished capture (input, output) and returns to idle.
+    pub fn take_capture(&self) -> Option<(Vec<Frame>, Vec<Frame>)> {
+        if self.listen_state.load(Ordering::Acquire) != LISTEN_DONE {
+            return None;
+        }
+        let cap = self.capture.lock().unwrap();
+        let out = (cap.input[..cap.len].to_vec(), cap.output[..cap.len].to_vec());
+        self.listen_state.store(LISTEN_IDLE, Ordering::Release);
+        Some(out)
+    }
+
+    /// Called from `initialize()` (not the audio thread).
+    fn allocate_capture(&self, sample_rate: f32) {
+        let n = (MAX_CAPTURE_SECONDS * sample_rate) as usize;
+        let mut cap = self.capture.lock().unwrap();
+        if cap.input.len() != n {
+            *cap = CaptureBuf { input: vec![[0.0; 2]; n], output: vec![[0.0; 2]; n], len: 0, target: 0 };
+        }
+    }
+
+    /// Audio thread: records one sub-block if listening. Never blocks or allocates.
+    fn capture_block(&self, input: &[Frame], output: &[Frame]) {
+        let mut state = self.listen_state.load(Ordering::Acquire);
+        if state != LISTEN_ARMED && state != LISTEN_RECORDING {
+            return;
+        }
+        let peak = input.iter().fold(0.0f32, |p, f| p.max(f[0].abs()).max(f[1].abs()));
+        if state == LISTEN_ARMED && peak > ARM_THRESHOLD {
+            state = LISTEN_RECORDING;
+            self.listen_state.store(state, Ordering::Release);
+        }
+        if state != LISTEN_RECORDING || peak < SIGNAL_THRESHOLD {
+            return;
+        }
+        let Ok(mut cap) = self.capture.try_lock() else { return };
+        let start = cap.len;
+        let k = input.len().min(cap.target.saturating_sub(start));
+        cap.input[start..start + k].copy_from_slice(&input[..k]);
+        cap.output[start..start + k].copy_from_slice(&output[..k]);
+        cap.len += k;
+        self.listen_progress.store(cap.len, Ordering::Relaxed);
+        if cap.len >= cap.target {
+            self.listen_state.store(LISTEN_DONE, Ordering::Release);
+        }
+    }
     /// Compiles the preset's chain and hands it to the audio thread. Non-audio threads only.
     pub fn publish(&self, preset: &Preset, free: &[f32]) {
         let graph = Box::new(Graph::build(preset, self.sample_rate.load(Ordering::Relaxed), free));
@@ -227,6 +313,8 @@ pub struct ScriptFx {
     graph_rx: rtrb::Consumer<Box<Graph>>,
     garbage_tx: rtrb::Producer<Box<Graph>>,
     peak_decay: f32,
+    /// Dev aid: `SCRIPTFX_TEST_INPUT=file.wav` replaces the input with this (looped).
+    test_input: Option<(Vec<Frame>, usize)>,
 }
 
 impl Default for ScriptFx {
@@ -242,11 +330,15 @@ impl Default for ScriptFx {
                 graph_tx: Mutex::new(graph_tx),
                 garbage_rx: Mutex::new(garbage_rx),
                 live: Mutex::new(None),
+                listen_state: std::sync::atomic::AtomicU8::new(LISTEN_IDLE),
+                listen_progress: std::sync::atomic::AtomicUsize::new(0),
+                capture: Mutex::new(CaptureBuf { input: Vec::new(), output: Vec::new(), len: 0, target: 0 }),
             }),
             graph: None,
             graph_rx,
             garbage_tx,
             peak_decay: 0.999,
+            test_input: None,
         }
     }
 }
@@ -283,6 +375,19 @@ impl Plugin for ScriptFx {
     ) -> bool {
         let sr = buffer_config.sample_rate;
         self.shared.sample_rate.store(sr, Ordering::Relaxed);
+        self.shared.allocate_capture(sr);
+        if let Some(path) = std::env::var_os("SCRIPTFX_TEST_INPUT") {
+            match hound::WavReader::open(&path) {
+                Ok(mut r) if r.spec().sample_format == hound::SampleFormat::Float => {
+                    let ch = r.spec().channels as usize;
+                    let s: Vec<f32> = r.samples::<f32>().filter_map(Result::ok).collect();
+                    let frames: Vec<Frame> = s.chunks(ch).map(|c| [c[0], c[ch.min(2) - 1]]).collect();
+                    nih_log!("test input: {} frames from {:?}", frames.len(), path);
+                    self.test_input = Some((frames, 0));
+                }
+                _ => nih_log!("SCRIPTFX_TEST_INPUT: need a float WAV at the host sample rate"),
+            }
+        }
         self.peak_decay = 0.25f32.powf((sr * PEAK_DECAY_MS / 1000.0).recip());
         // Not the audio thread: safe to load Lua and build the graph here, so audio
         // and host names are right even when the editor is never opened.
@@ -339,9 +444,18 @@ impl Plugin for ScriptFx {
                     }
                 }
             }
+            if let Some((test, pos)) = &mut self.test_input {
+                for f in frames[..n].iter_mut() {
+                    *f = test[*pos];
+                    *pos = (*pos + 1) % test.len();
+                }
+                peak_in = frames[..n].iter().fold(peak_in, |p, f| p.max(f[0].abs()));
+            }
+            let input = frames;
             if let Some(g) = &mut self.graph {
                 g.process(&macros, &mut frames[..n]);
             }
+            self.shared.capture_block(&input[..n], &frames[..n]);
             for ch in 0..2 {
                 if let Some(s) = block.get_mut(ch) {
                     for (f, x) in frames.iter().zip(s.iter_mut()) {
