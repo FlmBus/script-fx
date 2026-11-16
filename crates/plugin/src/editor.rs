@@ -129,6 +129,7 @@ impl EditorState {
         let level = |g: f32| ((util::gain_to_db(g) + 60.0) / 60.0).clamp(0.0, 1.0);
         self.values.meter_in = level(shared.meter_in.load(std::sync::atomic::Ordering::Relaxed));
         self.values.meter_out = level(shared.meter_out.load(std::sync::atomic::Ordering::Relaxed));
+        shared.block_meters(&mut self.values.blocks);
         self.values.time = (now - self.start).as_secs_f32();
         if let (Some(cur), None) = (&self.current, &self.anim_error) {
             let t = Instant::now();
@@ -206,7 +207,7 @@ impl EditorState {
             }
         }
         self.free = params.free_values(&preset);
-        shared.apply_routing(&preset, &self.free);
+        shared.publish(&preset, &self.free);
         params.set_macro_names(&preset);
         setter.raw_context.rescan_param_info();
         ctx.set_visuals(theme_visuals(&preset.theme));
@@ -230,7 +231,7 @@ impl EditorState {
     fn set_free_param(&mut self, params: &FxParams, shared: &Shared, index: usize, plain: f32) {
         let Some(cur) = &self.current else { return };
         self.free[index] = plain;
-        shared.set_free(&cur.preset, index, plain);
+        shared.set_free(index, plain);
         params
             .param_values
             .write()

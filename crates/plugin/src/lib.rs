@@ -1,34 +1,32 @@
-//! ScriptFX mock plugin: fixed mock DSP + 16 generic macro slots. A Lua preset
-//! decides what the macros mean (and are called), which params they drive and
-//! how the panel looks.
+//! ScriptFX PoC plugin: 16 generic macro slots + a native DSP graph compiled from
+//! the preset's declarative `chain`. A Lua preset decides what the macros mean (and
+//! are called), which params they drive, the chain and how the panel looks.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, RwLock};
 
+use dsp::{Atomics, Frame, Graph, SUB_BLOCK};
 use include_dir::{Dir, include_dir};
 use nih_plug::prelude::*;
 use nih_plug_egui::EguiState;
-use preset::{Control, Curve, MACRO_SLOTS, Preset};
+use preset::{MACRO_SLOTS, Preset};
 
 mod editor;
 
-/// Controls of the mock DSP a preset param can drive (`dsp = "..."` in Lua),
-/// with the value used when no param drives them.
-pub const DSP_TARGETS: [(&str, f32); 4] =
-    [("drive", 0.0), ("tone", 20_000.0), ("mix", 100.0), ("output", 0.0)];
 pub const DEFAULT_PRESET: &str = "tape-glow";
 const PEAK_DECAY_MS: f32 = 300.0;
-const DSP_SMOOTHING_MS: f32 = 15.0;
+const GRAPH_QUEUE: usize = 16;
 
-/// Default presets, compiled in so release builds work anywhere.
+/// Factory presets, compiled in so release builds work anywhere.
 static BUNDLED_PRESETS: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../presets");
+const FACTORY_MANIFEST: &str = ".factory-manifest";
 
 /// `$SCRIPTFX_PRESETS`, else `<user data dir>/ScriptFX/presets`
 /// (Linux `~/.local/share`, macOS `~/Library/Application Support`, Windows `%APPDATA%`).
-/// Bundled presets are copied there if missing; existing files are never overwritten.
-/// Resolved (and installed) once per process.
+/// Factory presets are installed/updated there (see [`install_factory_presets`]).
+/// Resolved once per process.
 pub fn presets_root() -> PathBuf {
     static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     ROOT.get_or_init(|| {
@@ -39,119 +37,114 @@ pub fn presets_root() -> PathBuf {
             .unwrap_or_else(std::env::temp_dir)
             .join("ScriptFX")
             .join("presets");
-        install_bundled_presets(&root);
+        install_factory_presets(&root);
         root
     })
     .clone()
 }
 
-fn install_bundled_presets(root: &Path) {
-    fn write_missing(dir: &Dir, root: &Path) {
-        for f in dir.files() {
-            let path = root.join(f.path());
-            if !path.exists() {
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let _ = std::fs::write(&path, f.contents());
-            }
-        }
+/// FNV-1a, stable across builds (unlike `DefaultHasher`).
+fn fnv(data: &[u8]) -> u64 {
+    data.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ *b as u64).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// Writes missing factory files and updates factory files the user hasn't changed.
+/// `.factory-manifest` remembers the hash of what was installed last time; a file
+/// whose current hash differs from that was edited by the user and is left alone.
+fn install_factory_presets(root: &Path) {
+    let manifest_path = root.join(FACTORY_MANIFEST);
+    let installed: HashMap<String, u64> = std::fs::read_to_string(&manifest_path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let (h, p) = l.split_once(' ')?;
+            Some((p.to_string(), u64::from_str_radix(h, 16).ok()?))
+        })
+        .collect();
+    let mut manifest = String::new();
+
+    fn files<'a>(dir: &'a Dir<'a>, out: &mut Vec<&'a include_dir::File<'a>>) {
+        out.extend(dir.files());
         for d in dir.dirs() {
-            write_missing(d, root);
+            files(d, out);
         }
     }
-    write_missing(&BUNDLED_PRESETS, root);
-}
+    let mut all = Vec::new();
+    files(&BUNDLED_PRESETS, &mut all);
 
-/// Per DSP target: where its value comes from. Written by non-audio threads on
-/// preset (re)load, read lock-free by the audio thread.
-///
-/// PoC caveat: fields are updated individually, so a preset switch can tear for
-/// one block. The real engine should swap an immutable routing/graph snapshot.
-struct DspRoute {
-    /// 0 = unrouted (neutral value), 1 = macro, 2 = free param value.
-    mode: AtomicU8,
-    slot: AtomicU8,
-    from: AtomicF32,
-    to: AtomicF32,
-    exp: AtomicU8,
-    value: AtomicF32,
-}
-
-impl DspRoute {
-    fn new() -> Self {
-        Self {
-            mode: AtomicU8::new(0),
-            slot: AtomicU8::new(0),
-            from: AtomicF32::new(0.0),
-            to: AtomicF32::new(1.0),
-            exp: AtomicU8::new(0),
-            value: AtomicF32::new(0.0),
+    for f in all {
+        let rel = f.path().to_string_lossy().replace('\\', "/");
+        let path = root.join(f.path());
+        let factory_hash = fnv(f.contents());
+        let current = std::fs::read(&path).ok().map(|c| fnv(&c));
+        let user_modified = match (current, installed.get(&rel)) {
+            (None, _) => false,
+            (Some(cur), Some(prev)) => cur != *prev && cur != factory_hash,
+            // Existing file without a manifest entry: only replace if identical.
+            (Some(cur), None) => cur != factory_hash,
+        };
+        if user_modified {
+            nih_log!("keeping user-modified preset file {rel}");
+            if let Some(prev) = installed.get(&rel) {
+                manifest.push_str(&format!("{prev:016x} {rel}\n"));
+            }
+            continue;
         }
+        if current != Some(factory_hash) {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&path, f.contents());
+        }
+        manifest.push_str(&format!("{factory_hash:016x} {rel}\n"));
     }
+    let _ = std::fs::create_dir_all(root);
+    let _ = std::fs::write(manifest_path, manifest);
 }
 
-/// State shared between audio thread, editor and `initialize()`. Lock-free only.
+/// Arrays of the graph currently playing, for the editor.
+struct Live {
+    free: Atomics,
+    meters: Atomics,
+}
+
+/// State shared between audio thread, editor and `initialize()`.
 pub struct Shared {
     pub meter_in: AtomicF32,
     pub meter_out: AtomicF32,
-    routes: [DspRoute; 4],
-}
-
-impl Default for Shared {
-    fn default() -> Self {
-        Self {
-            meter_in: AtomicF32::new(util::MINUS_INFINITY_DB),
-            meter_out: AtomicF32::new(util::MINUS_INFINITY_DB),
-            routes: std::array::from_fn(|_| DspRoute::new()),
-        }
-    }
+    sample_rate: AtomicF32,
+    /// New graphs → audio thread.
+    graph_tx: Mutex<rtrb::Producer<Box<Graph>>>,
+    /// Replaced graphs ← audio thread (dropped here, never on the audio thread).
+    garbage_rx: Mutex<rtrb::Consumer<Box<Graph>>>,
+    live: Mutex<Option<Live>>,
 }
 
 impl Shared {
-    /// `free` = plain values of all params (only free ones are used).
-    pub fn apply_routing(&self, preset: &Preset, free: &[f32]) {
-        for (t, (name, _)) in DSP_TARGETS.iter().enumerate() {
-            let route = &self.routes[t];
-            let Some(i) = preset.params.iter().position(|p| p.dsp.as_deref() == Some(name)) else {
-                route.mode.store(0, Ordering::Release);
-                continue;
-            };
-            match preset.controls[i] {
-                Control::Macro { slot, from, to, curve } => {
-                    route.slot.store(slot as u8, Ordering::Relaxed);
-                    route.from.store(from, Ordering::Relaxed);
-                    route.to.store(to, Ordering::Relaxed);
-                    route.exp.store((curve == Curve::Exp) as u8, Ordering::Relaxed);
-                    route.mode.store(1, Ordering::Release);
-                }
-                Control::Free => {
-                    route.value.store(free[i], Ordering::Relaxed);
-                    route.mode.store(2, Ordering::Release);
-                }
+    /// Compiles the preset's chain and hands it to the audio thread. Non-audio threads only.
+    pub fn publish(&self, preset: &Preset, free: &[f32]) {
+        let graph = Box::new(Graph::build(preset, self.sample_rate.load(Ordering::Relaxed), free));
+        *self.live.lock().unwrap() = Some(Live { free: graph.free_values(), meters: graph.meters() });
+        while self.garbage_rx.lock().unwrap().pop().is_ok() {}
+        if self.graph_tx.lock().unwrap().push(graph).is_err() {
+            nih_log!("graph queue full, dropping update");
+        }
+    }
+
+    /// A free param changed (editor): lock-free write into the playing graph.
+    pub fn set_free(&self, param: usize, plain: f32) {
+        if let Some(live) = &*self.live.lock().unwrap() {
+            if let Some(v) = live.free.get(param) {
+                v.store(plain, Ordering::Relaxed);
             }
         }
     }
 
-    /// A free param changed (editor).
-    pub fn set_free(&self, preset: &Preset, param: usize, plain: f32) {
-        if let Some(dsp) = &preset.params[param].dsp {
-            if let Some(t) = DSP_TARGETS.iter().position(|(n, _)| n == dsp) {
-                self.routes[t].value.store(plain, Ordering::Relaxed);
-            }
-        }
-    }
-
-    fn target_value(&self, t: usize, macros: &[f32; MACRO_SLOTS]) -> f32 {
-        let r = &self.routes[t];
-        match r.mode.load(Ordering::Acquire) {
-            1 => {
-                let curve = if r.exp.load(Ordering::Relaxed) == 1 { Curve::Exp } else { Curve::Lin };
-                let m = macros[r.slot.load(Ordering::Relaxed) as usize];
-                curve.apply(r.from.load(Ordering::Relaxed), r.to.load(Ordering::Relaxed), m)
-            }
-            2 => r.value.load(Ordering::Relaxed),
-            _ => DSP_TARGETS[t].1,
+    /// Current block meter values (index = `Preset::meters`).
+    pub fn block_meters(&self, out: &mut Vec<f32>) {
+        out.clear();
+        if let Some(live) = &*self.live.lock().unwrap() {
+            out.extend(live.meters.iter().map(|m| m.load(Ordering::Relaxed)));
         }
     }
 }
@@ -190,7 +183,7 @@ impl Default for FxParams {
     fn default() -> Self {
         let macro_names: [Arc<RwLock<String>>; MACRO_SLOTS] = std::array::from_fn(|_| Arc::default());
         Self {
-            editor_state: EguiState::from_size(980, 600),
+            editor_state: EguiState::from_size(1040, 640),
             preset_name: RwLock::new(String::new()),
             param_values: RwLock::new(HashMap::new()),
             macros: std::array::from_fn(|i| MacroParams {
@@ -230,23 +223,30 @@ impl FxParams {
 pub struct ScriptFx {
     params: Arc<FxParams>,
     shared: Arc<Shared>,
-    sample_rate: f32,
+    graph: Option<Box<Graph>>,
+    graph_rx: rtrb::Consumer<Box<Graph>>,
+    garbage_tx: rtrb::Producer<Box<Graph>>,
     peak_decay: f32,
-    smoothing: f32,
-    targets: [f32; 4],
-    lowpass: [f32; 2],
 }
 
 impl Default for ScriptFx {
     fn default() -> Self {
+        let (graph_tx, graph_rx) = rtrb::RingBuffer::new(GRAPH_QUEUE);
+        let (garbage_tx, garbage_rx) = rtrb::RingBuffer::new(GRAPH_QUEUE);
         Self {
             params: Arc::new(FxParams::default()),
-            shared: Arc::new(Shared::default()),
-            sample_rate: 48_000.0,
+            shared: Arc::new(Shared {
+                meter_in: AtomicF32::new(0.0),
+                meter_out: AtomicF32::new(0.0),
+                sample_rate: AtomicF32::new(48_000.0),
+                graph_tx: Mutex::new(graph_tx),
+                garbage_rx: Mutex::new(garbage_rx),
+                live: Mutex::new(None),
+            }),
+            graph: None,
+            graph_rx,
+            garbage_tx,
             peak_decay: 0.999,
-            smoothing: 0.01,
-            targets: DSP_TARGETS.map(|(_, v)| v),
-            lowpass: [0.0; 2],
         }
     }
 }
@@ -281,18 +281,22 @@ impl Plugin for ScriptFx {
         buffer_config: &BufferConfig,
         context: &mut impl InitContext<Self>,
     ) -> bool {
-        self.sample_rate = buffer_config.sample_rate;
-        self.peak_decay = 0.25f32.powf((self.sample_rate * PEAK_DECAY_MS / 1000.0).recip());
-        self.smoothing = 1.0 - (-1.0 / (DSP_SMOOTHING_MS / 1000.0 * self.sample_rate)).exp();
-        // Not the audio thread: safe to load Lua here so routing and host names
-        // are right even when the editor is never opened (e.g. state restore).
+        let sr = buffer_config.sample_rate;
+        self.shared.sample_rate.store(sr, Ordering::Relaxed);
+        self.peak_decay = 0.25f32.powf((sr * PEAK_DECAY_MS / 1000.0).recip());
+        // Not the audio thread: safe to load Lua and build the graph here, so audio
+        // and host names are right even when the editor is never opened.
+        while self.graph_rx.pop().is_ok() {} // drop graphs built for an old sample rate
         let mut name = self.params.preset_name.read().unwrap().clone();
         if name.is_empty() {
             name = DEFAULT_PRESET.into();
         }
         match Preset::load(presets_root().join(&name)) {
             Ok(p) => {
-                self.shared.apply_routing(&p, &self.params.free_values(&p));
+                let graph = Box::new(Graph::build(&p, sr, &self.params.free_values(&p)));
+                *self.shared.live.lock().unwrap() =
+                    Some(Live { free: graph.free_values(), meters: graph.meters() });
+                self.graph = Some(graph);
                 self.params.set_macro_names(&p);
                 context.rescan_param_info();
             }
@@ -301,52 +305,58 @@ impl Plugin for ScriptFx {
         true
     }
 
-    fn reset(&mut self) {
-        self.lowpass = [0.0; 2];
-    }
-
     fn process(
         &mut self,
         buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        let shared = &self.shared;
-        let mut peak_in = shared.meter_in.load(Ordering::Relaxed);
-        let mut peak_out = shared.meter_out.load(Ordering::Relaxed);
-
-        for mut frame in buffer.iter_samples() {
-            let macros: [f32; MACRO_SLOTS] =
-                std::array::from_fn(|i| self.params.macros[i].value.smoothed.next());
-            for t in 0..4 {
-                let target = shared.target_value(t, &macros);
-                self.targets[t] += self.smoothing * (target - self.targets[t]);
+        // Swap in newly published graphs; old ones go back to be dropped elsewhere.
+        while let Ok(next) = self.graph_rx.pop() {
+            if let Some(old) = self.graph.replace(next) {
+                if let Err(rtrb::PushError::Full(old)) = self.garbage_tx.push(old) {
+                    std::mem::forget(old); // never free on the audio thread
+                }
             }
-            let [drive_db, tone_hz, mix_pct, out_db] = self.targets;
-            let drive = util::db_to_gain(drive_db);
-            let mix = (mix_pct / 100.0).clamp(0.0, 1.0);
-            let out_gain = util::db_to_gain(out_db);
-            let a = 1.0
-                - (-std::f32::consts::TAU * tone_hz.clamp(20.0, self.sample_rate * 0.45)
-                    / self.sample_rate)
-                    .exp();
-
-            for (ch, sample) in frame.iter_mut().enumerate() {
-                let x = *sample;
-                peak_in = peak_in.max(x.abs());
-                let shaped = (x * drive).tanh() / drive.sqrt();
-                let lp = &mut self.lowpass[ch.min(1)];
-                *lp += a * (shaped - *lp);
-                let y = (x * (1.0 - mix) + *lp * mix) * out_gain;
-                peak_out = peak_out.max(y.abs());
-                *sample = y;
-            }
-            peak_in *= self.peak_decay;
-            peak_out *= self.peak_decay;
         }
 
-        shared.meter_in.store(peak_in, Ordering::Relaxed);
-        shared.meter_out.store(peak_out, Ordering::Relaxed);
+        let mut peak_in = self.shared.meter_in.load(Ordering::Relaxed);
+        let mut peak_out = self.shared.meter_out.load(Ordering::Relaxed);
+        let decay_per_block = |n: usize, d: f32| d.powi(n as i32);
+
+        for (_, mut block) in buffer.iter_blocks(SUB_BLOCK) {
+            let n = block.samples();
+            let mut macros = [0.0; MACRO_SLOTS];
+            for (m, p) in macros.iter_mut().zip(&self.params.macros) {
+                *m = p.value.smoothed.next_step(n as u32);
+            }
+            let mut frames: [Frame; SUB_BLOCK] = [[0.0; 2]; SUB_BLOCK];
+            for ch in 0..2 {
+                if let Some(s) = block.get_mut(ch) {
+                    for (f, x) in frames.iter_mut().zip(s.iter()) {
+                        f[ch] = *x;
+                        peak_in = peak_in.max(x.abs());
+                    }
+                }
+            }
+            if let Some(g) = &mut self.graph {
+                g.process(&macros, &mut frames[..n]);
+            }
+            for ch in 0..2 {
+                if let Some(s) = block.get_mut(ch) {
+                    for (f, x) in frames.iter().zip(s.iter_mut()) {
+                        *x = f[ch];
+                        peak_out = peak_out.max(x.abs());
+                    }
+                }
+            }
+            let d = decay_per_block(n, self.peak_decay);
+            peak_in *= d;
+            peak_out *= d;
+        }
+
+        self.shared.meter_in.store(peak_in, Ordering::Relaxed);
+        self.shared.meter_out.store(peak_out, Ordering::Relaxed);
         ProcessStatus::Normal
     }
 }
@@ -362,7 +372,7 @@ impl ClapPlugin for ScriptFx {
 impl Vst3Plugin for ScriptFx {
     const VST3_CLASS_ID: [u8; 16] = *b"ScriptFxPoC00001";
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
-        &[Vst3SubCategory::Fx, Vst3SubCategory::Distortion];
+        &[Vst3SubCategory::Fx, Vst3SubCategory::Dynamics];
 }
 
 nih_export_clap!(ScriptFx);

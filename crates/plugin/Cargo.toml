@@ -6,10 +6,12 @@ rust-version.workspace = true
 
 [dependencies]
 dirs = "7.0.0"
+dsp = { version = "0.1.0", path = "../dsp" }
 include_dir = "0.7.4"
 nih_plug = { path = "../../vendor/nih-plug", features = ["standalone", "assert_process_allocs"] }
 nih_plug_egui = { path = "../../vendor/nih-plug/nih_plug_egui" }
 preset = { version = "0.1.0", path = "../preset" }
+rtrb = "0.4.1"
 ui-svg = { version = "0.1.0", path = "../ui-svg" }
 
 [lib]

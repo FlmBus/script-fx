@@ -5,11 +5,15 @@ return {
   author = "sandbox",
 
   params = {
-    { id = "gain", name = "Gain", min = -24, max = 12, default = 0, unit = " dB", decimals = 1, dsp = "output" },
+    { id = "gain", name = "Gain", min = -24, max = 12, default = 0, unit = " dB", decimals = 1 },
   },
 
   macros = {
     { id = "gain", name = "Gain", targets = { { param = "gain" } } },
+  },
+
+  chain = {
+    gain("out", { db = "param.gain" }),
   },
 
   theme = {

@@ -1,0 +1,12 @@
+[package]
+name = "dsp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+atomic_float = "1.1.0"
+preset = { version = "0.1.0", path = "../preset" }
+
+[dev-dependencies]
+assert_no_alloc = "1.1.2"

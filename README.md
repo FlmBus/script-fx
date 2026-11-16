@@ -5,11 +5,13 @@ UI declaratively, and native Rust does the DSP and rendering.
 
 ```
 crates/preset   preset model (params + macros), sandboxed Lua loader, animate() hook
+crates/dsp      native DSP: compiles a preset's `chain` into a graph (no alloc/locks/Lua on the audio thread)
 crates/ui-svg   PoC #1: preset panel via resvg/usvg ("patch & reparse")
 crates/plugin   package `scriptfx`: nih-plug plugin (VST3/CLAP/standalone), egui chrome + preset panel + mock DSP
 crates/xtask    `cargo xtask bundle` (nih_plug_xtask)
 vendor/nih-plug patched nih-plug (runtime parameter names), see vendor/nih-plug/PATCHES.md
-presets/        tape-glow (multi-target macro, free param, animate()), clean-gain (pure declarative)
+presets/        tape-glow (multi-target macro, free param, animate()), clean-gain (minimal),
+                bass-helper (punch → FET → opto → split: ride / grit → EQ; 7 macros, live block meters)
 presets/.types  LuaLS stubs → autocomplete in presets; doubles as API spec for an LLM
 ```
 
@@ -75,7 +77,10 @@ return {
   macro** (locked). Dragging a driven param's knob moves its macro.
 - Host slots stay fixed ("Macro 1..16" IDs); the preset decides their names and meaning.
   Automation stays on the slot across preset changes (same contract as e.g. Serum's macros).
-- Sources: `macro.<id>`, `param.<id>`, `meter.in|out`, `time`, `var.<name>` (from `animate`).
+- Sources: `macro.<id>`, `param.<id>`, `meter.in|out`, `meter.<block id>`, `time`, `var.<name>` (from `animate`).
+- `chain`: blocks `gain eq drive comp(fet|opto|clean) rider transient split(low, high)`. Settings
+  are constants or `"param.<id>"` (plain value, units must match). Unknown fields are errors
+  (catches typos, important for LLM-written presets). Full reference: `presets/.types/scriptfx.lua`.
 - Bindings: `rotate translate scale opacity fill text drag`.
 
 ## Findings: resvg/usvg (PoC #1)
@@ -116,6 +121,32 @@ return {
 **Fonts:** `load_system_fonts()` took **7.5 s cold** (73 ms warm). That's unacceptable in a DAW and
 also makes rendering differ between machines. Now the plugin bundles Noto Sans (≈2 ms) and presets can ship `fonts/`.
 
+## Findings: declarative chains (bass-helper)
+
+Engine: preset `chain` → `dsp::Graph` built off the audio thread → handed over through a
+lock-free queue (`rtrb`); replaced graphs travel back and are freed off the audio thread.
+32-sample sub-blocks, settings smoothed. Verified allocation-free (`assert_no_alloc` test over all presets).
+
+| preset | blocks | CPU (stereo 48 kHz, one core) |
+|---|---|---|
+| bass-helper | 11 (incl. split, 2 comps, rider, transient, drive, 4 EQ) | **0.7 %** |
+| tape-glow | 3 | 0.1 % |
+
+Macro sweeps on a synthetic bass line (`cargo run --release -p dsp --example bench`) show each
+macro does what it says (Transients: crest 10 → 19 dB; Stabilize: crest 13 → 10 dB at constant
+RMS; Drive: darker + denser; Boom/Click: band lifts).
+
+What it took / what's missing:
+- **Boilerplate**: every block setting a macro touches needs its own param
+  (bass-helper: 16 params for 7 macros). Idea: let macro targets address block settings
+  directly (`{ block = "fet", setting = "threshold", from = -4, to = -30 }`).
+- Settings are plain linear values: no expressions (e.g. "threshold relative to input level").
+  Auto-makeup had to become a block feature (static formula over-compensated by ~8 dB on quiet input).
+- Topology: serial + 2-band split (nestable). Missing: parallel chains / sub-chain dry-wet,
+  sidechain (e.g. low band keying the comp), modulators (LFO/envelope as sources), lookahead.
+- Graph swap resets DSP state → a click on preset switch / hot reload (needs a crossfade).
+- Drive isn't oversampled (aliasing at high settings).
+
 ## Integration findings (nih-plug + egui)
 
 - resvg pixmap → `egui::TextureHandle` → painted in the CentralPanel works; egui widgets around it.
@@ -142,6 +173,8 @@ also makes rendering differ between machines. Now the plugin bundles Noto Sans (
 
 ## Next
 
+- [ ] Macro targets on block settings directly (less param boilerplate)
+- [ ] Crossfade on graph swap
 - [ ] Verify host name updates: Reaper (VST3 + CLAP), Carla, Studio One 6 (mac), Fender Studio (win)
 - [ ] Static/dynamic layer caching in `ui-svg` (or try vello) and re-measure @2x
 - [ ] PoC #2: same `preset` crate → egui-native panel (JSON theme), compare authoring DX

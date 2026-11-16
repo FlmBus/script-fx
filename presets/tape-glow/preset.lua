@@ -8,12 +8,12 @@ return {
   name = "Tape Glow",
   author = "sandbox",
 
-  -- Internal controls (unlimited). `dsp` = which mock-DSP control it drives.
+  -- Internal controls (unlimited). Chain blocks and UI bindings refer to them as "param.<id>".
   params = {
-    { id = "drive",  name = "Drive",  min = 0,   max = 24,    default = 6,    unit = " dB", decimals = 1, dsp = "drive" },
-    { id = "tone",   name = "Tone",   min = 500, max = 20000, default = 8000, unit = " Hz", decimals = 0, dsp = "tone" },
-    { id = "mix",    name = "Mix",    min = 0,   max = 100,   default = 100,  unit = "%",   decimals = 0, dsp = "mix" },
-    { id = "output", name = "Output", min = -24, max = 12,    default = 0,    unit = " dB", decimals = 1, dsp = "output" },
+    { id = "drive",  name = "Drive",  min = 0,   max = 24,    default = 6,    unit = " dB", decimals = 1 },
+    { id = "tone",   name = "Tone",   min = 500, max = 20000, default = 8000, unit = " Hz", decimals = 0 },
+    { id = "mix",    name = "Mix",    min = 0,   max = 100,   default = 100,  unit = "%",   decimals = 0 },
+    { id = "output", name = "Output", min = -24, max = 12,    default = 0,    unit = " dB", decimals = 1 },
     { id = "wow",    name = "Wow",    min = 0,   max = 100,   default = 25,   unit = "%",   decimals = 0 },
   },
 
@@ -26,6 +26,14 @@ return {
     } },
     { id = "mix",    name = "Mix",    targets = { { param = "mix" } } },
     { id = "output", name = "Output", targets = { { param = "output" } } },
+  },
+
+  -- The effect chain: plain data, compiled to native DSP. "param.<id>" values use the
+  -- param's plain value, so units must match (dB, Hz, %).
+  chain = {
+    drive("tape",  { amount = "param.drive", mix = "param.mix" }),
+    eq("tone",     { type = "lowpass", freq = "param.tone", q = 0.707 }),
+    gain("output", { db = "param.output" }),
   },
 
   -- Keys become CSS classes in the SVG (.fill-accent, .stroke-accent, .stop-accent)

@@ -8,6 +8,8 @@
 //!   or more params, each with its own range and curve (Ableton-rack style).
 //!   A param driven by a macro is "locked" to it; all others are free and keep
 //!   their own value (persisted with the host project, but not automatable).
+//! - `chain`: the effect chain as data (blocks + band splits, see [`chain`]).
+//!   Compiled to native DSP by the `dsp` crate; Lua never runs on the audio thread.
 //! - `theme` and declarative `ui` bindings.
 //!
 //! The one exception is the optional `ui.animate(state)` function, which runs once
@@ -17,6 +19,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+
+pub mod chain;
+pub use chain::BlockSpec;
 
 use mlua::{Function, HookTriggers, Lua, LuaOptions, LuaSerdeExt, StdLib, Table, VmState};
 use serde::Deserialize;
@@ -44,6 +49,7 @@ fn invalid(msg: impl Into<String>) -> PresetError {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ParamSpec {
     pub id: String,
     pub name: String,
@@ -57,9 +63,6 @@ pub struct ParamSpec {
     pub unit: String,
     #[serde(default = "two")]
     pub decimals: usize,
-    /// Which control of the (mock) DSP this param drives: drive|tone|mix|output.
-    /// Stand-in for the real declarative chain, which is out of scope here.
-    pub dsp: Option<String>,
 }
 
 fn one() -> f32 {
@@ -116,6 +119,7 @@ impl Curve {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MacroTarget {
     pub param: String,
     /// Plain value at macro = 0 (defaults to the param's min).
@@ -127,12 +131,14 @@ pub struct MacroTarget {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MacroSpec {
     pub id: String,
     pub name: String,
     /// Normalized 0..1. If omitted: derived from the first target's default
     /// (inverting the curve), else 0.
     pub default: Option<f32>,
+    #[serde(deserialize_with = "list")]
     pub targets: Vec<MacroTarget>,
 }
 
@@ -155,6 +161,9 @@ pub enum Source {
     /// Output/input level mapped from -60..0 dBFS to 0..1.
     MeterIn,
     MeterOut,
+    /// Meter of a chain block (index into [`Preset::meters`]), 0..1:
+    /// comp = gain reduction 0..24 dB; rider/transient = gain, 0.5 = unity.
+    Block(usize),
     /// Seconds since the editor opened.
     Time,
     /// Value returned by the preset's `ui.animate` function.
@@ -180,7 +189,7 @@ pub enum Axis {
 
 /// Declarative UI bindings. `from`/`to` are what a source value of 0 and 1 map to.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Binding {
     Rotate {
         id: String,
@@ -297,6 +306,8 @@ pub struct Values {
     pub params: Vec<f32>,
     pub meter_in: f32,
     pub meter_out: f32,
+    /// Block meters, index = [`Preset::meters`].
+    pub blocks: Vec<f32>,
     pub time: f32,
     pub vars: HashMap<String, f32>,
 }
@@ -308,6 +319,7 @@ impl Values {
             Source::Param(i) => self.params.get(*i).copied().unwrap_or(0.0),
             Source::MeterIn => self.meter_in,
             Source::MeterOut => self.meter_out,
+            Source::Block(i) => self.blocks.get(*i).copied().unwrap_or(0.0),
             Source::Time => self.time,
             Source::Var(name) => self.vars.get(name).copied().unwrap_or(0.0),
         }
@@ -322,6 +334,9 @@ pub struct Preset {
     pub macros: Vec<MacroSpec>,
     /// One entry per param.
     pub controls: Vec<Control>,
+    pub chain: Vec<BlockSpec>,
+    /// Ids of metered chain blocks (comp/rider/transient), in DSP meter-slot order.
+    pub meters: Vec<String>,
     pub theme: Theme,
     pub ui: Option<UiSpec>,
     animator: Option<Animator>,
@@ -349,6 +364,15 @@ opacity   = binding("opacity")
 fill      = binding("fill")
 text      = binding("text")
 drag      = binding("drag")
+
+-- chain blocks
+gain      = binding("gain")
+eq        = binding("eq")
+drive     = binding("drive")
+comp      = binding("comp")
+rider     = binding("rider")
+transient = binding("transient")
+split     = binding("split")
 "#;
 
 impl Preset {
@@ -381,6 +405,8 @@ impl Preset {
         };
 
         let controls = resolve_controls(&params, &macros)?;
+        let chain: Vec<BlockSpec> = opt_from_lua(&lua, root.get("chain")?)?;
+        let meters = chain::validate(&chain, &params)?;
         let preset = Preset {
             name,
             author,
@@ -388,6 +414,8 @@ impl Preset {
             params,
             macros,
             controls,
+            chain,
+            meters,
             theme,
             ui,
             animator: animator.map(|func| Animator { lua, func, used }),
@@ -427,6 +455,7 @@ impl Preset {
             Some(("param", id)) => Source::Param(self.param_index(id).ok_or_else(unknown)?),
             Some(("meter", "in")) => Source::MeterIn,
             Some(("meter", "out")) => Source::MeterOut,
+            Some(("meter", id)) => Source::Block(self.meters.iter().position(|m| m == id).ok_or_else(unknown)?),
             Some(("var", name)) => Source::Var(name.to_string()),
             None if s == "time" => Source::Time,
             _ => return Err(unknown()),
@@ -515,6 +544,9 @@ impl Preset {
         let meter = lua.create_table()?;
         meter.set("in", values.meter_in)?;
         meter.set("out", values.meter_out)?;
+        for (i, id) in self.meters.iter().enumerate() {
+            meter.set(id.as_str(), values.blocks.get(i).copied().unwrap_or(0.0))?;
+        }
         state.set("meter", meter)?;
 
         anim.used.store(0, Ordering::Relaxed);
@@ -536,8 +568,29 @@ fn opt_from_lua<T: serde::de::DeserializeOwned + Default>(
 ) -> Result<T, PresetError> {
     Ok(match v {
         mlua::Value::Nil => T::default(),
+        // `{}` is ambiguous in Lua (empty list or empty map): treat as "nothing".
+        mlua::Value::Table(t) if t.is_empty() => T::default(),
         v => lua.from_value(v)?,
     })
+}
+
+/// Deserializes a list, also accepting `{}` (an empty Lua table looks like a map).
+pub(crate) fn list<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Either<T> {
+        Seq(Vec<T>),
+        Map(BTreeMap<String, serde::de::IgnoredAny>),
+    }
+    match Either::deserialize(d)? {
+        Either::Seq(v) => Ok(v),
+        Either::Map(m) if m.is_empty() => Ok(Vec::new()),
+        Either::Map(_) => Err(serde::de::Error::custom("expected a list")),
+    }
 }
 
 fn resolve_controls(params: &[ParamSpec], macros: &[MacroSpec]) -> Result<Vec<Control>, PresetError> {
@@ -551,12 +604,6 @@ fn resolve_controls(params: &[ParamSpec], macros: &[MacroSpec]) -> Result<Vec<Co
         }
         if p.max == p.min {
             return Err(invalid(format!("param '{}' has min == max", p.id)));
-        }
-    }
-    let mut dsp_seen = std::collections::HashSet::new();
-    for p in params.iter().filter_map(|p| p.dsp.as_deref()) {
-        if !dsp_seen.insert(p) {
-            return Err(invalid(format!("more than one param drives dsp '{p}'")));
         }
     }
 
@@ -720,6 +767,14 @@ mod tests {
             { id = "drv", name = "Drv", targets = { { param = "free", from = 0, to = 10 } } },
           },
           theme = { accent = "#ff0000" },
+          chain = {
+            comp("c1", { style = "fet", threshold = "param.drive", ratio = 4 }),
+            split("s", { freq = 250,
+              low  = { rider("r", { target = -18, range = 6 }) },
+              high = { drive("d", { amount = "param.drive" }) },
+            }),
+            eq("e", { type = "peak", freq = 100, gain = "param.free" }),
+          },
           ui = {
             svg = "panel.svg",
             bindings = {
@@ -739,6 +794,9 @@ mod tests {
     fn macros_drive_params_with_ranges_and_curves() {
         let d = TempDir::with_preset(BASE);
         let p = Preset::load(&d.0).unwrap();
+        assert_eq!(p.meters, vec!["c1", "r"]);
+        assert_eq!(p.resolve_source("meter.r").unwrap(), Source::Block(1));
+        assert_eq!(p.chain.len(), 3);
         assert_eq!(p.controls[2], Control::Macro { slot: 1, from: 0.0, to: 10.0, curve: Curve::Lin });
         let mut macros = [0.0; MACRO_SLOTS];
         macros[0] = 0.5;
@@ -768,6 +826,11 @@ mod tests {
             BASE.replace(r#"target = "macro.character""#, r#"target = "meter.out""#),
             BASE.replace(r#"from = 16000, to = 1000"#, r#"from = 0, to = 1000"#),
             BASE.replace(r#"svg = "panel.svg""#, r#"svg = "../../etc/passwd""#),
+            BASE.replace(r#"amount = "param.drive""#, r#"amount = "param.nope""#),
+            BASE.replace(r#"rider("r""#, r#"rider("c1""#),
+            BASE.replace(r#"type = "peak""#, r#"type = "bandwobble""#),
+            BASE.replace(r#"ratio = 4 }"#, r#"ratio = 4, treshold = 3 }"#),
+            BASE.replace(r#"unit = " dB", decimals = 1"#, r#"unit = " dB", decimls = 1"#),
             BASE.replace(
                 r#"{ param = "tone""#,
                 r#"{ param = "drive" }, { param = "tone""#,
