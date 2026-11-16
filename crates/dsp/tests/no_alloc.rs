@@ -1,3 +1,4 @@
+#![cfg(debug_assertions)] // assert_no_alloc only checks in debug builds
 //! The audio path must not allocate or free: run every bundled preset under
 //! assert_no_alloc (aborts the test on any allocation inside the closure).
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
