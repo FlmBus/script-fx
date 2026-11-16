@@ -48,7 +48,7 @@ return {
     dim    = "#8c7f94",
   },
 
-  ui = {
+  control_panel = {
     svg = "panel.svg",
 
     bindings = {

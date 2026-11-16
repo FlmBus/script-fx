@@ -6,7 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 atomic_float = "1.1.0"
-preset = { version = "0.1.0", path = "../preset" }
+patch = { version = "0.1.0", path = "../patch" }
 
 [dev-dependencies]
 assert_no_alloc = "1.1.2"

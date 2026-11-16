@@ -1,5 +1,5 @@
 //! ScriptFX PoC plugin: 16 generic macro slots + a native DSP graph compiled from
-//! the preset's declarative `chain`. A Lua preset decides what the macros mean (and
+//! the patch's declarative `chain`. A Lua patch decides what the macros mean (and
 //! are called), which params they drive, the chain and how the panel looks.
 
 use std::collections::HashMap;
@@ -11,9 +11,9 @@ use dsp::{Atomics, Frame, Graph, SUB_BLOCK};
 use include_dir::{Dir, include_dir};
 use nih_plug::prelude::*;
 use nih_plug_egui::EguiState;
-use preset::{MACRO_SLOTS, Preset};
+use patch::{MACRO_SLOTS, Patch};
 
-mod editor;
+mod shell;
 mod listen;
 
 /// Listen/capture states (`Shared::listen_state`).
@@ -35,29 +35,29 @@ pub struct CaptureBuf {
     pub target: usize,
 }
 
-pub const DEFAULT_PRESET: &str = "tape-glow";
+pub const DEFAULT_PATCH: &str = "tape-glow";
 const PEAK_DECAY_MS: f32 = 300.0;
 const GRAPH_QUEUE: usize = 16;
 
-/// Factory presets, compiled in so release builds work anywhere.
-static BUNDLED_PRESETS: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../presets");
+/// Factory patches, compiled in so release builds work anywhere.
+static BUNDLED_PATCHES: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../patches");
 const FACTORY_MANIFEST: &str = ".factory-manifest";
 
-/// `$SCRIPTFX_PRESETS`, else `<user data dir>/ScriptFX/presets`
+/// `$SCRIPTFX_PATCHES`, else `<user data dir>/ScriptFX/patches`
 /// (Linux `~/.local/share`, macOS `~/Library/Application Support`, Windows `%APPDATA%`).
-/// Factory presets are installed/updated there (see [`install_factory_presets`]).
+/// Factory patches are installed/updated there (see [`install_factory_patches`]).
 /// Resolved once per process.
-pub fn presets_root() -> PathBuf {
+pub fn patches_root() -> PathBuf {
     static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     ROOT.get_or_init(|| {
-        if let Some(p) = std::env::var_os("SCRIPTFX_PRESETS") {
+        if let Some(p) = std::env::var_os("SCRIPTFX_PATCHES") {
             return PathBuf::from(p);
         }
         let root = dirs::data_dir()
             .unwrap_or_else(std::env::temp_dir)
             .join("ScriptFX")
-            .join("presets");
-        install_factory_presets(&root);
+            .join("patches");
+        install_factory_patches(&root);
         root
     })
     .clone()
@@ -71,7 +71,7 @@ fn fnv(data: &[u8]) -> u64 {
 /// Writes missing factory files and updates factory files the user hasn't changed.
 /// `.factory-manifest` remembers the hash of what was installed last time; a file
 /// whose current hash differs from that was edited by the user and is left alone.
-fn install_factory_presets(root: &Path) {
+fn install_factory_patches(root: &Path) {
     let manifest_path = root.join(FACTORY_MANIFEST);
     let installed: HashMap<String, u64> = std::fs::read_to_string(&manifest_path)
         .unwrap_or_default()
@@ -90,7 +90,7 @@ fn install_factory_presets(root: &Path) {
         }
     }
     let mut all = Vec::new();
-    files(&BUNDLED_PRESETS, &mut all);
+    files(&BUNDLED_PATCHES, &mut all);
 
     for f in all {
         let rel = f.path().to_string_lossy().replace('\\', "/");
@@ -104,7 +104,7 @@ fn install_factory_presets(root: &Path) {
             (Some(cur), None) => cur != factory_hash,
         };
         if user_modified {
-            nih_log!("keeping user-modified preset file {rel}");
+            nih_log!("keeping user-modified patch file {rel}");
             if let Some(prev) = installed.get(&rel) {
                 manifest.push_str(&format!("{prev:016x} {rel}\n"));
             }
@@ -207,9 +207,9 @@ impl Shared {
             self.listen_state.store(LISTEN_DONE, Ordering::Release);
         }
     }
-    /// Compiles the preset's chain and hands it to the audio thread. Non-audio threads only.
-    pub fn publish(&self, preset: &Preset, free: &[f32]) {
-        let graph = Box::new(Graph::build(preset, self.sample_rate.load(Ordering::Relaxed), free));
+    /// Compiles the patch's chain and hands it to the audio thread. Non-audio threads only.
+    pub fn publish(&self, patch: &Patch, free: &[f32]) {
+        let graph = Box::new(Graph::build(patch, self.sample_rate.load(Ordering::Relaxed), free));
         *self.live.lock().unwrap() = Some(Live { free: graph.free_values(), meters: graph.meters() });
         while self.garbage_rx.lock().unwrap().pop().is_ok() {}
         if self.graph_tx.lock().unwrap().push(graph).is_err() {
@@ -226,7 +226,7 @@ impl Shared {
         }
     }
 
-    /// Current block meter values (index = `Preset::meters`).
+    /// Current block meter values (index = `Patch::meters`).
     pub fn block_meters(&self, out: &mut Vec<f32>) {
         out.clear();
         if let Some(live) = &*self.live.lock().unwrap() {
@@ -246,18 +246,18 @@ pub struct FxParams {
     #[persist = "editor-state"]
     pub editor_state: Arc<EguiState>,
 
-    /// Preset folder name, persisted with the host project. Empty means a
-    /// fresh instance whose macros still need the preset's defaults.
-    #[persist = "preset"]
-    pub preset_name: RwLock<String>,
+    /// Patch folder name, persisted with the host project. Empty means a
+    /// fresh instance whose macros still need the patch's defaults.
+    #[persist = "patch"]
+    pub patch_name: RwLock<String>,
 
-    /// Plain values of the preset's free (not macro-driven) params, by param id.
+    /// Plain values of the patch's free (not macro-driven) params, by param id.
     #[persist = "param-values"]
     pub param_values: RwLock<HashMap<String, f32>>,
 
     /// Generic host-automatable slots. Hosts don't handle parameter lists that
-    /// change at runtime, so presets map their macros onto these. Their names
-    /// follow the preset via the patched nih-plug (`with_dynamic_name`).
+    /// change at runtime, so patches map their macros onto these. Their names
+    /// follow the patch via the patched nih-plug (`with_dynamic_name`).
     #[nested(array, group = "Macros")]
     pub macros: [MacroParams; MACRO_SLOTS],
 
@@ -270,7 +270,7 @@ impl Default for FxParams {
         let macro_names: [Arc<RwLock<String>>; MACRO_SLOTS] = std::array::from_fn(|_| Arc::default());
         Self {
             editor_state: EguiState::from_size(1040, 640),
-            preset_name: RwLock::new(String::new()),
+            patch_name: RwLock::new(String::new()),
             param_values: RwLock::new(HashMap::new()),
             macros: std::array::from_fn(|i| MacroParams {
                 value: FloatParam::new(format!("Macro {}", i + 1), 0.0, FloatRange::Linear {
@@ -287,11 +287,11 @@ impl Default for FxParams {
 }
 
 impl FxParams {
-    /// Plain values for all params of `preset`: persisted values for free
+    /// Plain values for all params of `patch`: persisted values for free
     /// params where available, defaults otherwise.
-    pub fn free_values(&self, preset: &Preset) -> Vec<f32> {
+    pub fn free_values(&self, patch: &Patch) -> Vec<f32> {
         let stored = self.param_values.read().unwrap();
-        preset
+        patch
             .params
             .iter()
             .map(|p| stored.get(&p.id).copied().unwrap_or_else(|| p.default_plain()))
@@ -299,9 +299,9 @@ impl FxParams {
     }
 
     /// Sets the host-visible macro names. Caller must request a rescan.
-    pub fn set_macro_names(&self, preset: &Preset) {
+    pub fn set_macro_names(&self, patch: &Patch) {
         for (i, name) in self.macro_names.iter().enumerate() {
-            *name.write().unwrap() = preset.macros.get(i).map(|m| m.name.clone()).unwrap_or_default();
+            *name.write().unwrap() = patch.macros.get(i).map(|m| m.name.clone()).unwrap_or_default();
         }
     }
 }
@@ -364,7 +364,7 @@ impl Plugin for ScriptFx {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        editor::create(self.params.clone(), self.shared.clone())
+        shell::create(self.params.clone(), self.shared.clone())
     }
 
     fn initialize(
@@ -392,11 +392,11 @@ impl Plugin for ScriptFx {
         // Not the audio thread: safe to load Lua and build the graph here, so audio
         // and host names are right even when the editor is never opened.
         while self.graph_rx.pop().is_ok() {} // drop graphs built for an old sample rate
-        let mut name = self.params.preset_name.read().unwrap().clone();
+        let mut name = self.params.patch_name.read().unwrap().clone();
         if name.is_empty() {
-            name = DEFAULT_PRESET.into();
+            name = DEFAULT_PATCH.into();
         }
-        match Preset::load(presets_root().join(&name)) {
+        match Patch::load(patches_root().join(&name)) {
             Ok(p) => {
                 let graph = Box::new(Graph::build(&p, sr, &self.params.free_values(&p)));
                 *self.shared.live.lock().unwrap() =
@@ -405,7 +405,7 @@ impl Plugin for ScriptFx {
                 self.params.set_macro_names(&p);
                 context.rescan_param_info();
             }
-            Err(e) => nih_log!("preset '{name}' failed to load: {e}"),
+            Err(e) => nih_log!("patch '{name}' failed to load: {e}"),
         }
         true
     }
@@ -477,7 +477,7 @@ impl Plugin for ScriptFx {
 
 impl ClapPlugin for ScriptFx {
     const CLAP_ID: &'static str = "dev.sandbox.scriptfx-poc";
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("Lua-scripted effect presets (PoC)");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("Lua-scripted effect patches (PoC)");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::AudioEffect, ClapFeature::Stereo];

@@ -24,7 +24,7 @@ jobs:
             libxcb-dri2-0-dev libxcb-icccm4-dev libxcursor-dev libxkbcommon-dev libxcb-shape0-dev libxcb-xfixes0-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p preset -p ui-svg
+      - run: cargo test -p patch -p dsp -p ui-svg -p analysis
 
   package:
     strategy:

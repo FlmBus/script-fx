@@ -26,7 +26,7 @@ return {
     dim    = "#6f8f97",
   },
 
-  ui = {
+  control_panel = {
     svg = "panel.svg",
     bindings = {
       translate("fader_cap", { source = "param.gain", from = { 0, 100 }, to = { 0, -100 } }),

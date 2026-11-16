@@ -1,7 +1,7 @@
-//! Offline benchmark: synthetic bass line through each bundled preset.
+//! Offline benchmark: synthetic bass line through each bundled patch.
 //! cargo run --release -p dsp --example bench
 use dsp::{Frame, Graph};
-use preset::{MACRO_SLOTS, Preset};
+use patch::{MACRO_SLOTS, Patch};
 use std::time::Instant;
 
 const SR: f32 = 48_000.0;
@@ -31,11 +31,11 @@ fn peak_db(frames: &[Frame]) -> f32 {
 }
 
 fn main() {
-    let root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../presets"));
+    let root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../patches"));
     let input = bass_line(20.0);
     println!("input: 20 s synthetic bass, peak {:.1} dBFS\n", peak_db(&input));
-    for dir in preset::discover(&root) {
-        let p = Preset::load(&dir).unwrap();
+    for dir in patch::discover(&root) {
+        let p = Patch::load(&dir).unwrap();
         let mut macros = [0.0; MACRO_SLOTS];
         for i in 0..p.macros.len() {
             macros[i] = p.macro_default(i);
@@ -76,8 +76,8 @@ fn stats(frames: &[Frame]) -> (f32, f32, f32, f32) {
 }
 
 fn sweep(input: &[Frame]) {
-    let root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../presets"));
-    let p = Preset::load(root.join("bass-helper")).unwrap();
+    let root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../patches"));
+    let p = Patch::load(root.join("bass-helper")).unwrap();
     println!("\nBass Helper macro sweeps (others at default):");
     println!("{:<12} {:>5}  {:>7} {:>7} {:>6} {:>10}", "macro", "value", "peak", "rms", "crest", "brightness");
     for name in ["transients", "stabilize", "drive", "boom", "click"] {
@@ -97,8 +97,8 @@ fn sweep(input: &[Frame]) {
     }
 }
 
-fn count(chain: &[preset::BlockSpec]) -> usize {
+fn count(chain: &[patch::BlockSpec]) -> usize {
     let mut n = 0;
-    preset::chain::walk(chain, &mut |_| n += 1);
+    patch::chain::walk(chain, &mut |_| n += 1);
     n
 }

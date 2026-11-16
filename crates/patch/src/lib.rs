@@ -1,18 +1,18 @@
-//! Preset model + sandboxed Lua loader.
+//! Patch model + sandboxed Lua loader.
 //!
-//! A preset is a folder containing `preset.lua` (returns a table) and whatever
-//! assets it references (e.g. `panel.svg`). Lua only *describes* the preset:
+//! A patch is a folder containing `patch.lua` (returns a table) and whatever
+//! assets it references (e.g. `panel.svg`). Lua only *describes* the patch:
 //!
-//! - `params`: the preset's internal controls (unlimited). The UI and DSP use these.
+//! - `params`: the patch's internal controls (unlimited). The UI and DSP use these.
 //! - `macros`: up to [`MACRO_SLOTS`] host-automatable controls. Each macro drives one
 //!   or more params, each with its own range and curve (Ableton-rack style).
 //!   A param driven by a macro is "locked" to it; all others are free and keep
 //!   their own value (persisted with the host project, but not automatable).
 //! - `chain`: the effect chain as data (blocks + band splits, see [`chain`]).
 //!   Compiled to native DSP by the `dsp` crate; Lua never runs on the audio thread.
-//! - `theme` and declarative `ui` bindings.
+//! - `theme` and the `control_panel` (SVG + declarative bindings).
 //!
-//! The one exception is the optional `ui.animate(state)` function, which runs once
+//! The one exception is the optional `control_panel.animate(state)` function, which runs once
 //! per UI frame on the UI thread (never on the audio thread).
 
 use std::collections::{BTreeMap, HashMap};
@@ -35,17 +35,17 @@ const HOOK_GRANULARITY: u32 = 1_000;
 const MEMORY_LIMIT: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
-pub enum PresetError {
+pub enum PatchError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("lua: {0}")]
     Lua(#[from] mlua::Error),
-    #[error("invalid preset: {0}")]
+    #[error("invalid patch: {0}")]
     Invalid(String),
 }
 
-fn invalid(msg: impl Into<String>) -> PresetError {
-    PresetError::Invalid(msg.into())
+fn invalid(msg: impl Into<String>) -> PatchError {
+    PatchError::Invalid(msg.into())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -161,12 +161,12 @@ pub enum Source {
     /// Output/input level mapped from -60..0 dBFS to 0..1.
     MeterIn,
     MeterOut,
-    /// Meter of a chain block (index into [`Preset::meters`]), 0..1:
+    /// Meter of a chain block (index into [`Patch::meters`]), 0..1:
     /// comp = gain reduction 0..24 dB; rider/transient = gain, 0.5 = unity.
     Block(usize),
     /// Seconds since the editor opened.
     Time,
-    /// Value returned by the preset's `ui.animate` function.
+    /// Value returned by the patch's `control_panel.animate` function.
     Var(String),
 }
 
@@ -293,7 +293,7 @@ impl Theme {
 }
 
 #[derive(Debug, Clone)]
-pub struct UiSpec {
+pub struct ControlPanelSpec {
     pub svg: PathBuf,
     pub bindings: Vec<Binding>,
 }
@@ -302,11 +302,11 @@ pub struct UiSpec {
 #[derive(Debug, Clone, Default)]
 pub struct Values {
     pub macros: [f32; MACRO_SLOTS],
-    /// Normalized param values (index = param index), see [`Preset::compute_params`].
+    /// Normalized param values (index = param index), see [`Patch::compute_params`].
     pub params: Vec<f32>,
     pub meter_in: f32,
     pub meter_out: f32,
-    /// Block meters, index = [`Preset::meters`].
+    /// Block meters, index = [`Patch::meters`].
     pub blocks: Vec<f32>,
     pub time: f32,
     pub vars: HashMap<String, f32>,
@@ -326,7 +326,7 @@ impl Values {
     }
 }
 
-pub struct Preset {
+pub struct Patch {
     pub name: String,
     pub author: Option<String>,
     pub dir: PathBuf,
@@ -338,7 +338,7 @@ pub struct Preset {
     /// Ids of metered chain blocks (comp/rider/transient), in DSP meter-slot order.
     pub meters: Vec<String>,
     pub theme: Theme,
-    pub ui: Option<UiSpec>,
+    pub control_panel: Option<ControlPanelSpec>,
     animator: Option<Animator>,
 }
 
@@ -375,16 +375,16 @@ transient = binding("transient")
 split     = binding("split")
 "#;
 
-impl Preset {
-    /// Loads `<dir>/preset.lua`.
-    pub fn load(dir: impl AsRef<Path>) -> Result<Self, PresetError> {
+impl Patch {
+    /// Loads `<dir>/patch.lua`.
+    pub fn load(dir: impl AsRef<Path>) -> Result<Self, PatchError> {
         let dir = dir.as_ref().to_path_buf();
-        let src = std::fs::read_to_string(dir.join("preset.lua"))?;
+        let src = std::fs::read_to_string(dir.join("patch.lua"))?;
         let (lua, used) = sandboxed_lua()?;
         lua.load(PRELUDE).set_name("prelude").exec()?;
 
         used.store(0, Ordering::Relaxed);
-        let root: Table = lua.load(&src).set_name("preset.lua").eval()?;
+        let root: Table = lua.load(&src).set_name("patch.lua").eval()?;
 
         let name: String = root.get("name")?;
         let author: Option<String> = root.get("author")?;
@@ -393,21 +393,21 @@ impl Preset {
         let theme = Theme(opt_from_lua(&lua, root.get("theme")?)?);
 
         let mut animator = None;
-        let ui = match root.get::<Option<Table>>("ui")? {
+        let ui = match root.get::<Option<Table>>("control_panel")? {
             None => None,
             Some(ui) => {
                 let svg: String = ui.get("svg")?;
                 let svg = resolve_inside(&dir, &svg)?;
                 let bindings: Vec<Binding> = opt_from_lua(&lua, ui.get("bindings")?)?;
                 animator = ui.get::<Option<Function>>("animate")?;
-                Some(UiSpec { svg, bindings })
+                Some(ControlPanelSpec { svg, bindings })
             }
         };
 
         let controls = resolve_controls(&params, &macros)?;
         let chain: Vec<BlockSpec> = opt_from_lua(&lua, root.get("chain")?)?;
         let meters = chain::validate(&chain, &params)?;
-        let preset = Preset {
+        let patch = Patch {
             name,
             author,
             dir,
@@ -417,15 +417,15 @@ impl Preset {
             chain,
             meters,
             theme,
-            ui,
+            control_panel: ui,
             animator: animator.map(|func| Animator { lua, func, used }),
         };
-        preset.validate_bindings()?;
-        Ok(preset)
+        patch.validate_bindings()?;
+        Ok(patch)
     }
 
-    fn validate_bindings(&self) -> Result<(), PresetError> {
-        let Some(ui) = &self.ui else { return Ok(()) };
+    fn validate_bindings(&self) -> Result<(), PatchError> {
+        let Some(ui) = &self.control_panel else { return Ok(()) };
         for b in &ui.bindings {
             if let Some(src) = b.source() {
                 self.resolve_source(src)?;
@@ -448,7 +448,7 @@ impl Preset {
         self.params.iter().position(|p| p.id == id)
     }
 
-    pub fn resolve_source(&self, s: &str) -> Result<Source, PresetError> {
+    pub fn resolve_source(&self, s: &str) -> Result<Source, PatchError> {
         let unknown = || invalid(format!("unknown source '{s}'"));
         Ok(match s.split_once('.') {
             Some(("macro", id)) => Source::Macro(self.macro_index(id).ok_or_else(unknown)?),
@@ -521,9 +521,9 @@ impl Preset {
         self.animator.is_some()
     }
 
-    /// Runs `ui.animate(state)` and stores the returned numbers in `values.vars`.
+    /// Runs `control_panel.animate(state)` and stores the returned numbers in `values.vars`.
     /// `state` = { time, dt, macro = {<id> = 0..1}, param = {<id> = 0..1}, meter = {in, out} }.
-    pub fn animate(&self, values: &mut Values, dt: f32) -> Result<(), PresetError> {
+    pub fn animate(&self, values: &mut Values, dt: f32) -> Result<(), PatchError> {
         let Some(anim) = &self.animator else {
             return Ok(());
         };
@@ -565,7 +565,7 @@ impl Preset {
 fn opt_from_lua<T: serde::de::DeserializeOwned + Default>(
     lua: &Lua,
     v: mlua::Value,
-) -> Result<T, PresetError> {
+) -> Result<T, PatchError> {
     Ok(match v {
         mlua::Value::Nil => T::default(),
         // `{}` is ambiguous in Lua (empty list or empty map): treat as "nothing".
@@ -593,7 +593,7 @@ where
     }
 }
 
-fn resolve_controls(params: &[ParamSpec], macros: &[MacroSpec]) -> Result<Vec<Control>, PresetError> {
+fn resolve_controls(params: &[ParamSpec], macros: &[MacroSpec]) -> Result<Vec<Control>, PatchError> {
     if macros.len() > MACRO_SLOTS {
         return Err(invalid(format!("{} macros declared, only {MACRO_SLOTS} slots available", macros.len())));
     }
@@ -635,7 +635,7 @@ fn resolve_controls(params: &[ParamSpec], macros: &[MacroSpec]) -> Result<Vec<Co
 
 /// Lua with only table/string/math/utf8, no file loading, a memory cap and an
 /// instruction budget (checked via a hook every `HOOK_GRANULARITY` instructions).
-fn sandboxed_lua() -> Result<(Lua, Arc<AtomicU32>), PresetError> {
+fn sandboxed_lua() -> Result<(Lua, Arc<AtomicU32>), PatchError> {
     let lua = Lua::new_with(
         StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8,
         LuaOptions::default(),
@@ -661,24 +661,24 @@ fn sandboxed_lua() -> Result<(Lua, Arc<AtomicU32>), PresetError> {
     Ok((lua, used))
 }
 
-/// Joins `rel` onto `dir` and rejects anything that escapes the preset folder.
-pub fn resolve_inside(dir: &Path, rel: &str) -> Result<PathBuf, PresetError> {
+/// Joins `rel` onto `dir` and rejects anything that escapes the patch folder.
+pub fn resolve_inside(dir: &Path, rel: &str) -> Result<PathBuf, PatchError> {
     let base = dir.canonicalize()?;
     let full = base.join(rel).canonicalize()?;
     if !full.starts_with(&base) {
-        return Err(invalid(format!("'{rel}' is outside the preset folder")));
+        return Err(invalid(format!("'{rel}' is outside the patch folder")));
     }
     Ok(full)
 }
 
-/// Lists preset folders (those containing `preset.lua`) in `root`, sorted.
+/// Lists patch folders (those containing `patch.lua`) in `root`, sorted.
 pub fn discover(root: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = std::fs::read_dir(root)
         .into_iter()
         .flatten()
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.join("preset.lua").is_file())
+        .filter(|p| p.join("patch.lua").is_file())
         .collect();
     out.sort();
     out
@@ -731,15 +731,15 @@ mod tests {
 
     struct TempDir(PathBuf);
     impl TempDir {
-        fn with_preset(src: &str) -> Self {
+        fn with_patch(src: &str) -> Self {
             static N: AtomicU32 = AtomicU32::new(0);
             let p = std::env::temp_dir().join(format!(
-                "preset-test-{}-{}",
+                "patch-test-{}-{}",
                 std::process::id(),
                 N.fetch_add(1, Ordering::Relaxed)
             ));
             std::fs::create_dir_all(&p).unwrap();
-            std::fs::write(p.join("preset.lua"), src).unwrap();
+            std::fs::write(p.join("patch.lua"), src).unwrap();
             std::fs::write(p.join("panel.svg"), "<svg/>").unwrap();
             TempDir(p)
         }
@@ -775,7 +775,7 @@ mod tests {
             }),
             eq("e", { type = "peak", freq = 100, gain = "param.free" }),
           },
-          ui = {
+          control_panel = {
             svg = "panel.svg",
             bindings = {
               rotate("needle", { source = "param.drive", from = -135, to = 135, pivot = "knob" }),
@@ -792,8 +792,8 @@ mod tests {
 
     #[test]
     fn macros_drive_params_with_ranges_and_curves() {
-        let d = TempDir::with_preset(BASE);
-        let p = Preset::load(&d.0).unwrap();
+        let d = TempDir::with_patch(BASE);
+        let p = Patch::load(&d.0).unwrap();
         assert_eq!(p.meters, vec!["c1", "r"]);
         assert_eq!(p.resolve_source("meter.r").unwrap(), Source::Block(1));
         assert_eq!(p.chain.len(), 3);
@@ -836,22 +836,22 @@ mod tests {
                 r#"{ param = "drive" }, { param = "tone""#,
             ),
         ] {
-            let d = TempDir::with_preset(&bad);
-            assert!(Preset::load(&d.0).is_err(), "should fail:\n{bad}");
+            let d = TempDir::with_patch(&bad);
+            assert!(Patch::load(&d.0).is_err(), "should fail:\n{bad}");
         }
     }
 
     #[test]
     fn sandbox_blocks_io_and_infinite_loops() {
-        let d = TempDir::with_preset(r#"io.open("/etc/passwd") return { name = "T" }"#);
-        assert!(Preset::load(&d.0).is_err());
-        let d = TempDir::with_preset(r#"while true do end"#);
-        let err = Preset::load(&d.0).err().unwrap().to_string();
+        let d = TempDir::with_patch(r#"io.open("/etc/passwd") return { name = "T" }"#);
+        assert!(Patch::load(&d.0).is_err());
+        let d = TempDir::with_patch(r#"while true do end"#);
+        let err = Patch::load(&d.0).err().unwrap().to_string();
         assert!(err.contains("budget"), "{err}");
-        let d = TempDir::with_preset(
-            r#"return { name = "T", ui = { svg = "panel.svg", animate = function() while true do end end } }"#,
+        let d = TempDir::with_patch(
+            r#"return { name = "T", control_panel = { svg = "panel.svg", animate = function() while true do end end } }"#,
         );
-        let p = Preset::load(&d.0).unwrap();
+        let p = Patch::load(&d.0).unwrap();
         assert!(p.animate(&mut Values::default(), 0.0).is_err());
     }
 

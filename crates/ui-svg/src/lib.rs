@@ -1,4 +1,4 @@
-//! Preset panel renderer built on resvg/usvg.
+//! Patch panel renderer built on resvg/usvg.
 //!
 //! resvg renders static SVG only (no scripts, no SMIL/CSS animation, no network).
 //! Animation is done by "patch & reparse": the bindings compute per-element
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use preset::{Axis, Binding, ParamSpec, Pivot, Preset, Source, Theme, Values};
+use patch::{Axis, Binding, ParamSpec, Pivot, Patch, Source, Theme, Values};
 use resvg::usvg::{self, fontdb, roxmltree};
 use resvg::{tiny_skia, usvg::ImageHrefResolver};
 
@@ -22,7 +22,7 @@ pub use tiny_skia::Pixmap;
 pub enum PanelError {
     Io(std::io::Error),
     Svg(String),
-    NoUi,
+    NoControlPanel,
 }
 
 impl std::error::Error for PanelError {}
@@ -32,14 +32,14 @@ impl std::fmt::Display for PanelError {
         match self {
             PanelError::Io(e) => write!(f, "io: {e}"),
             PanelError::Svg(e) => write!(f, "svg: {e}"),
-            PanelError::NoUi => write!(f, "preset has no ui.svg"),
+            PanelError::NoControlPanel => write!(f, "patch has no control_panel.svg"),
         }
     }
 }
 
 /// Bundled fonts only. Scanning system fonts took 7.5s cold on a dev machine
-/// (unacceptable inside a DAW) and would make presets render differently on
-/// every machine. Presets can ship extra fonts in `<preset>/fonts/`.
+/// (unacceptable inside a DAW) and would make patches render differently on
+/// every machine. Patches can ship extra fonts in `<patch>/fonts/`.
 fn base_fonts() -> &'static fontdb::Database {
     static DB: OnceLock<fontdb::Database> = OnceLock::new();
     DB.get_or_init(|| {
@@ -79,12 +79,12 @@ fn theme_css(theme: &Theme) -> String {
     css
 }
 
-/// `<image href>` may only load files from inside the preset folder.
+/// `<image href>` may only load files from inside the patch folder.
 fn sandboxed_image_resolver(dir: PathBuf) -> ImageHrefResolver<'static> {
     ImageHrefResolver {
         resolve_data: ImageHrefResolver::default_data_resolver(),
         resolve_string: Box::new(move |href: &str, opts: &usvg::Options| {
-            let path = preset::resolve_inside(&dir, href).ok()?;
+            let path = patch::resolve_inside(&dir, href).ok()?;
             let data = Arc::new(std::fs::read(&path).ok()?);
             match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
                 "png" => Some(usvg::ImageKind::PNG(data)),
@@ -150,7 +150,7 @@ pub struct Stats {
     pub renders: u64,
 }
 
-pub struct SvgPanel {
+pub struct SvgControlPanel {
     source: String,
     elements: Vec<ElementSlots>,
     ops: Vec<BoundOp>,
@@ -165,23 +165,23 @@ pub struct SvgPanel {
     pub warnings: Vec<String>,
 }
 
-impl SvgPanel {
-    pub fn load(preset: &Preset) -> Result<Self, PanelError> {
-        let ui = preset.ui.as_ref().ok_or(PanelError::NoUi)?;
+impl SvgControlPanel {
+    pub fn load(patch: &Patch) -> Result<Self, PanelError> {
+        let ui = patch.control_panel.as_ref().ok_or(PanelError::NoControlPanel)?;
         let source = std::fs::read_to_string(&ui.svg).map_err(PanelError::Io)?;
-        Self::from_source(source, &preset.dir, preset, &ui.bindings)
+        Self::from_source(source, &patch.dir, patch, &ui.bindings)
     }
 
     fn from_source(
         source: String,
         dir: &Path,
-        preset: &Preset,
+        patch: &Patch,
         bindings: &[Binding],
     ) -> Result<Self, PanelError> {
         let mut options = usvg::Options {
             resources_dir: Some(dir.to_path_buf()),
             fontdb: fonts_for(dir),
-            style_sheet: Some(theme_css(&preset.theme)),
+            style_sheet: Some(theme_css(&patch.theme)),
             image_href_resolver: sandboxed_image_resolver(dir.to_path_buf()),
             ..Default::default()
         };
@@ -224,7 +224,7 @@ impl SvgPanel {
                     Some(rect) => drags.push(DragTarget {
                         id: id.to_string(),
                         rect,
-                        target: preset.resolve_source(target).expect("validated by preset"),
+                        target: patch.resolve_source(target).expect("validated by patch"),
                         range: *range,
                     }),
                     None => warnings.push(format!("drag target '#{id}' has no visible geometry")),
@@ -241,9 +241,9 @@ impl SvgPanel {
                 }
             };
 
-            let mut source_ = preset
+            let mut source_ = patch
                 .resolve_source(b.source().unwrap())
-                .expect("validated by preset");
+                .expect("validated by patch");
             let mut pivot_warnings = Vec::new();
             let mut pivot = |p: &Option<Pivot>| -> (f32, f32) {
                 match p {
@@ -270,21 +270,21 @@ impl SvgPanel {
                 },
                 Binding::Opacity { from, to, .. } => Op::Opacity { from: *from, to: *to },
                 Binding::Fill { from, to, .. } => Op::Fill {
-                    from: parse_color(preset.theme.resolve(from)),
-                    to: parse_color(preset.theme.resolve(to)),
+                    from: parse_color(patch.theme.resolve(from)),
+                    to: parse_color(patch.theme.resolve(to)),
                 },
                 Binding::Text { format, .. } => {
                     if elements[element].text.is_none() {
                         warnings.push(format!("text target '#{id}' has no text content to replace"));
                     }
                     match (source_.clone(), format) {
-                        (Source::Param(i), None) => Op::TextParam(preset.params[i].clone()),
+                        (Source::Param(i), None) => Op::TextParam(patch.params[i].clone()),
                         // A macro driving a single param shows that param's value.
-                        (Source::Macro(m), None) => match preset.macros[m].targets.as_slice() {
+                        (Source::Macro(m), None) => match patch.macros[m].targets.as_slice() {
                             [t] => {
-                                let i = preset.param_index(&t.param).expect("validated");
+                                let i = patch.param_index(&t.param).expect("validated");
                                 source_ = Source::Param(i);
-                                Op::TextParam(preset.params[i].clone())
+                                Op::TextParam(patch.params[i].clone())
                             }
                             _ => Op::TextPercent,
                         },
@@ -302,7 +302,7 @@ impl SvgPanel {
         }
 
         let size = tree.size();
-        Ok(SvgPanel {
+        Ok(SvgControlPanel {
             source,
             elements,
             ops,
@@ -444,7 +444,7 @@ impl SvgPanel {
                 }
                 Op::TextParam(spec) => p.text = Some(escape(&spec.display(v))),
                 Op::TextPercent => p.text = Some(format!("{:.0}%", v * 100.0)),
-                Op::TextFormat(f) => p.text = Some(escape(&preset::format_value(f, v))),
+                Op::TextFormat(f) => p.text = Some(escape(&patch::format_value(f, v))),
             }
         }
 
@@ -529,7 +529,7 @@ fn escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-/// Useful for debugging: what the theme CSS for a preset looks like.
+/// Useful for debugging: what the theme CSS for a patch looks like.
 pub fn debug_theme_css(theme: &Theme) -> String {
     theme_css(theme)
 }
@@ -537,31 +537,31 @@ pub fn debug_theme_css(theme: &Theme) -> String {
 #[allow(dead_code)]
 fn _assert_send_sync() {
     fn is<T: Send + Sync>() {}
-    is::<SvgPanel>();
+    is::<SvgControlPanel>();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn presets() -> PathBuf {
-        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../presets"))
+    fn patches() -> PathBuf {
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../patches"))
     }
 
-    fn values_for(preset: &Preset) -> Values {
+    fn values_for(patch: &Patch) -> Values {
         let mut v = Values::default();
-        for i in 0..preset.macros.len() {
-            v.macros[i] = preset.macro_default(i);
+        for i in 0..patch.macros.len() {
+            v.macros[i] = patch.macro_default(i);
         }
         let macros = v.macros;
-        preset.compute_params(&macros, &preset.default_param_values(), &mut v.params);
+        patch.compute_params(&macros, &patch.default_param_values(), &mut v.params);
         v
     }
 
     #[test]
     fn drag_area_follows_translated_element() {
-        let p = Preset::load(presets().join("clean-gain")).unwrap();
-        let mut panel = SvgPanel::load(&p).unwrap();
+        let p = Patch::load(patches().join("clean-gain")).unwrap();
+        let mut panel = SvgControlPanel::load(&p).unwrap();
         assert!(panel.warnings.is_empty(), "{:?}", panel.warnings);
         let mut v = values_for(&p);
         v.macros[0] = 1.0; // fader at top: translate(0 -100)
@@ -581,8 +581,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ui-svg-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
-            dir.join("preset.lua"),
-            r#"return { name = "T", params = { { id = "a", name = "A" } }, ui = { svg = "p.svg", bindings = {
+            dir.join("patch.lua"),
+            r#"return { name = "T", params = { { id = "a", name = "A" } }, control_panel = { svg = "p.svg", bindings = {
                 rotate("n", { source = "param.a", from = 0, to = 90, pivot = { 50, 50 } }),
                 opacity("n", { source = "param.a" }),
                 text("t", { source = "param.a" }),
@@ -597,8 +597,8 @@ mod tests {
                  <text id="t" x="10" y="90">x</text></svg>"#,
         )
         .unwrap();
-        let p = Preset::load(&dir).unwrap();
-        let mut panel = SvgPanel::load(&p).unwrap();
+        let p = Patch::load(&dir).unwrap();
+        let mut panel = SvgControlPanel::load(&p).unwrap();
         assert_eq!(panel.warnings.len(), 1, "{:?}", panel.warnings);
         let v = Values { params: vec![0.5], ..Default::default() };
         let src = panel.patched_source(&[0.5, 0.5, 0.5]);

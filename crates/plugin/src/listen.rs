@@ -32,7 +32,7 @@ impl Listen {
         Self { seconds: 10.0, pending: None, shown: None, attached: None }
     }
 
-    /// While true, the listen screen replaces the preset panel.
+    /// While true, the listen screen replaces the patch panel.
     pub fn overlay_active(&self, shared: &Shared) -> bool {
         shared.listen_state.load(Ordering::Relaxed) != LISTEN_IDLE || self.pending.is_some() || self.shown.is_some()
     }
@@ -50,7 +50,7 @@ impl Listen {
                 let json = serde_json::to_string_pretty(&serde_json::json!({
                     "capture": {
                         "seconds_of_signal": (seconds * 10.0).round() / 10.0,
-                        "note": "input = the track before the ScriptFX chain, output = after it (current preset)",
+                        "note": "input = the track before the ScriptFX chain, output = after it (current patch)",
                     },
                     "input": a_in,
                     "output": a_out,

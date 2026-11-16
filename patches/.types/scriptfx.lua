@@ -1,5 +1,5 @@
 ---@meta
--- Type stubs for ScriptFX presets (LuaLS / lua-language-server).
+-- Type stubs for ScriptFX patches (LuaLS / lua-language-server).
 -- Also a compact API description to hand to an LLM.
 
 ---@alias Source string  # "macro.<id>" | "param.<id>" (both 0..1) | "meter.in" | "meter.out" (0..1 = -60..0 dBFS) | "meter.<block id>" (comp: gain reduction 0..24 dB → 0..1; rider/transient: gain, 0.5 = unity) | "time" (s) | "var.<name>" (from animate)
@@ -35,19 +35,19 @@
 ---@field param table<string, number>  normalized param values by id
 ---@field meter { in: number, out: number }
 
----@class Ui
----@field svg string  path relative to the preset folder
+---@class ControlPanel  The patch's own UI: an SVG plus declarative bindings.
+---@field svg string  path relative to the patch folder
 ---@field bindings? Binding[]
 ---@field animate? fun(s: AnimateState): table<string, number>  runs once per UI frame; returned keys become `var.<key>`
 
----@class Preset
+---@class Patch  A Lua script describing a chain, its params/macros and its ControlPanel. A Patch file returns this table.
 ---@field name string
 ---@field author? string
 ---@field params? Param[]
 ---@field macros? Macro[]
 ---@field chain? Block[]  effect chain, processed top to bottom (compiled to native DSP)
 ---@field theme? table<string, string>  keys become CSS classes .fill-<k> .stroke-<k> .stop-<k>
----@field ui? Ui
+---@field control_panel? ControlPanel
 
 ---@class Block  Chain block. Units: dB, Hz, ms, % (0..100). Unknown fields are errors.
 

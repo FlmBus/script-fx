@@ -1,5 +1,5 @@
 {
   "runtime.version": "Lua 5.4",
-  "workspace.library": ["presets/.types"],
+  "workspace.library": ["patches/.types"],
   "runtime.builtin": { "io": "disable", "os": "disable", "package": "disable", "debug": "disable" }
 }

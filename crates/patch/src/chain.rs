@@ -1,9 +1,9 @@
-//! Declarative effect chain: what the preset's `chain = { ... }` describes.
+//! Declarative effect chain: what the patch's `chain = { ... }` describes.
 //! Only data here; the `dsp` crate compiles it into an audio graph.
 
 use serde::Deserialize;
 
-use crate::{ParamSpec, PresetError, invalid};
+use crate::{ParamSpec, PatchError, invalid};
 
 /// A block setting: a constant or `"param.<id>"` (the param's plain value is used,
 /// so its unit must match the setting's unit).
@@ -161,7 +161,7 @@ pub fn walk<'a>(chain: &'a [BlockSpec], f: &mut impl FnMut(&'a BlockSpec)) {
     }
 }
 
-pub fn resolve_value(v: &Value, params: &[ParamSpec]) -> Result<ValueRef, PresetError> {
+pub fn resolve_value(v: &Value, params: &[ParamSpec]) -> Result<ValueRef, PatchError> {
     match v {
         Value::Const(c) => Ok(ValueRef::Const(*c)),
         Value::Ref(s) => {
@@ -179,7 +179,7 @@ pub fn resolve_value(v: &Value, params: &[ParamSpec]) -> Result<ValueRef, Preset
 
 /// Checks ids are unique and all `param.*` references resolve. Returns the
 /// ids of metered blocks in [`walk`] order.
-pub fn validate(chain: &[BlockSpec], params: &[ParamSpec]) -> Result<Vec<String>, PresetError> {
+pub fn validate(chain: &[BlockSpec], params: &[ParamSpec]) -> Result<Vec<String>, PatchError> {
     let mut ids = std::collections::HashSet::new();
     let mut meters = Vec::new();
     let mut err = None;

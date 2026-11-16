@@ -90,7 +90,7 @@ return {
     dim    = "#7d8b98",
   },
 
-  ui = {
+  control_panel = {
     svg = "panel.svg",
     bindings = {
       -- big macro knobs (multi-target → value text in percent)

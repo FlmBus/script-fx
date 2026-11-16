@@ -1,6 +1,6 @@
-//! Native DSP for declarative preset chains.
+//! Native DSP for declarative patch chains.
 //!
-//! [`Graph::build`] compiles a preset's `chain` (off the audio thread) into a tree
+//! [`Graph::build`] compiles a patch's `chain` (off the audio thread) into a tree
 //! of nodes. [`Graph::process`] runs it on the audio thread: no allocations, no
 //! locks, no Lua. Settings are recomputed once per sub-block of at most
 //! [`SUB_BLOCK`] frames (from macros + free param values) and smoothed.
@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use atomic_float::AtomicF32;
-use preset::chain::{BlockSpec, CompStyle, EqShape, Value, ValueRef, resolve_value};
-use preset::{Control, MACRO_SLOTS, ParamSpec, Preset};
+use patch::chain::{BlockSpec, CompStyle, EqShape, Value, ValueRef, resolve_value};
+use patch::{Control, MACRO_SLOTS, ParamSpec, Patch};
 
 /// Maximum frames per [`Graph::process`] call.
 pub const SUB_BLOCK: usize = 32;
@@ -62,7 +62,7 @@ struct P {
 impl P {
     fn new(v: Option<&Value>, default: f32, params: &[ParamSpec]) -> Self {
         let src = match v {
-            Some(v) => resolve_value(v, params).expect("validated by preset"),
+            Some(v) => resolve_value(v, params).expect("validated by patch"),
             None => ValueRef::Const(default),
         };
         P { src, cur: default, init: false }
@@ -247,7 +247,7 @@ fn build_nodes(chain: &[BlockSpec], params: &[ParamSpec], meter: &mut usize) -> 
                 meter: next_meter(meter),
             })),
             BlockSpec::Split { freq, low, high, .. } => {
-                // Same depth-first order as `preset::chain::walk`: low, then high.
+                // Same depth-first order as `patch::chain::walk`: low, then high.
                 let low = build_nodes(low, params, meter);
                 let high = build_nodes(high, params, meter);
                 Node::Split {
@@ -456,13 +456,13 @@ pub struct Graph {
 
 impl Graph {
     /// `free` = plain values of all params (only free ones are used).
-    pub fn build(preset: &Preset, sample_rate: f32, free: &[f32]) -> Self {
+    pub fn build(patch: &Patch, sample_rate: f32, free: &[f32]) -> Self {
         let mut meter = 0;
-        let nodes = build_nodes(&preset.chain, &preset.params, &mut meter);
-        debug_assert_eq!(meter, preset.meters.len(), "meter order must match preset::chain::walk");
+        let nodes = build_nodes(&patch.chain, &patch.params, &mut meter);
+        debug_assert_eq!(meter, patch.meters.len(), "meter order must match patch::chain::walk");
         // Idle meter values: comps show 0 dB reduction, gain meters sit at unity (0.5).
         let mut idle = Vec::with_capacity(meter);
-        preset::chain::walk(&preset.chain, &mut |b| {
+        patch::chain::walk(&patch.chain, &mut |b| {
             if b.has_meter() {
                 idle.push(if matches!(b, BlockSpec::Comp { .. }) { 0.0 } else { 0.5 });
             }
@@ -470,10 +470,10 @@ impl Graph {
         let sub_rate = sample_rate / SUB_BLOCK as f32;
         Graph {
             nodes,
-            controls: preset.controls.clone(),
+            controls: patch.controls.clone(),
             free: atomics(free.iter().copied()),
             meters: atomics(idle),
-            values: vec![0.0; preset.params.len()],
+            values: vec![0.0; patch.params.len()],
             sr: sample_rate,
             k: 1.0 - coef(SETTING_SMOOTHING_MS, sub_rate),
         }
@@ -484,7 +484,7 @@ impl Graph {
         self.free.clone()
     }
 
-    /// Block meters (index = `Preset::meters`), readable from the editor.
+    /// Block meters (index = `Patch::meters`), readable from the editor.
     pub fn meters(&self) -> Atomics {
         self.meters.clone()
     }
@@ -517,14 +517,14 @@ mod tests {
 
     const SR: f32 = 48_000.0;
 
-    fn preset_with(chain: &str, params: &str) -> (Preset, TempDir) {
+    fn patch_with(chain: &str, params: &str) -> (Patch, TempDir) {
         let d = TempDir::new();
         std::fs::write(
-            d.0.join("preset.lua"),
+            d.0.join("patch.lua"),
             format!("return {{ name = 'T', params = {{ {params} }}, chain = {{ {chain} }} }}"),
         )
         .unwrap();
-        (Preset::load(&d.0).unwrap(), d)
+        (Patch::load(&d.0).unwrap(), d)
     }
 
     struct TempDir(PathBuf);
@@ -563,7 +563,7 @@ mod tests {
     }
 
     fn run(chain: &str, params: &str, input: &mut [Frame]) -> Graph {
-        let (p, _d) = preset_with(chain, params);
+        let (p, _d) = patch_with(chain, params);
         let mut g = Graph::build(&p, SR, &p.default_param_values());
         g.process_all(&[0.0; MACRO_SLOTS], input);
         g
@@ -614,13 +614,13 @@ mod tests {
         let (p, _d) = {
             let d = TempDir::new();
             std::fs::write(
-                d.0.join("preset.lua"),
+                d.0.join("patch.lua"),
                 "return { name = 'T', params = { { id = 'g', name = 'G', min = -24, max = 0 } },
                   macros = { { id = 'm', name = 'M', targets = { { param = 'g' } } } },
                   chain = { gain('out', { db = 'param.g' }) } }",
             )
             .unwrap();
-            (Preset::load(&d.0).unwrap(), d)
+            (Patch::load(&d.0).unwrap(), d)
         };
         let mut g = Graph::build(&p, SR, &p.default_param_values());
         let mut macros = [0.0; MACRO_SLOTS];
@@ -632,10 +632,10 @@ mod tests {
     }
 
     #[test]
-    fn bundled_presets_build() {
-        let root = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../presets"));
-        for dir in preset::discover(&root) {
-            let p = Preset::load(&dir).unwrap();
+    fn bundled_patches_build() {
+        let root = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../patches"));
+        for dir in patch::discover(&root) {
+            let p = Patch::load(&dir).unwrap();
             let mut g = Graph::build(&p, SR, &p.default_param_values());
             let mut x = sine(110.0, -12.0, 0.2);
             g.process_all(&[0.5; MACRO_SLOTS], &mut x);
