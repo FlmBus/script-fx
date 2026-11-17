@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub mod chain;
+pub mod locale;
 pub use chain::BlockSpec;
 
 use mlua::{Function, HookTriggers, Lua, LuaOptions, LuaSerdeExt, StdLib, Table, VmState};
@@ -378,6 +379,7 @@ split     = binding("split")
 impl Patch {
     /// Loads `<dir>/patch.lua`.
     pub fn load(dir: impl AsRef<Path>) -> Result<Self, PatchError> {
+        let _c = locale::CNumeric::enter();
         let dir = dir.as_ref().to_path_buf();
         let src = std::fs::read_to_string(dir.join("patch.lua"))?;
         let (lua, used) = sandboxed_lua()?;
@@ -527,6 +529,7 @@ impl Patch {
         let Some(anim) = &self.animator else {
             return Ok(());
         };
+        let _c = locale::CNumeric::enter();
         let lua = &anim.lua;
         let state = lua.create_table()?;
         state.set("time", values.time)?;

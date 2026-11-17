@@ -186,6 +186,7 @@ fn error_svg(w: f32, h: f32, msg: &str) -> String {
 impl Ui {
     /// Loads `<dir>/ui.lua`.
     pub fn load(dir: &Path) -> Result<Self, String> {
+        let _c = patch::locale::CNumeric::enter();
         let (lua, used) = patch::sandboxed_lua().map_err(|e| e.to_string())?;
         lua.load(PRELUDE).set_name("prelude").exec().map_err(|e| e.to_string())?;
         let options = usvg::Options {
@@ -214,6 +215,7 @@ impl Ui {
     /// (e.g. the selected tab) survives; everything re-renders once.
     pub fn reload(&mut self) -> Result<(), String> {
         let src = std::fs::read_to_string(&self.file).map_err(|e| e.to_string())?;
+        let _c = patch::locale::CNumeric::enter();
         self.used.store(0, Ordering::Relaxed);
         let t: Table = self
             .lua
@@ -293,6 +295,8 @@ impl Ui {
 
     /// Renders/rasterises what changed. `scale` = physical pixels per logical unit.
     pub fn update(&mut self, inputs: &Inputs, scale: f32) {
+        // All Lua (render functions) runs inside; see patch::locale.
+        let _c = patch::locale::CNumeric::enter();
         let t0 = Instant::now();
         self.stats = FrameStats::default();
         if let Some(mut root) = self.root.take() {
@@ -586,6 +590,7 @@ impl Ui {
         let Some(n) = find(root, id) else { return Ok(()) };
         let handler: Option<Function> = n.def.get("on_click").ok().flatten();
         if let Some(f) = handler {
+            let _c = patch::locale::CNumeric::enter();
             self.used.store(0, Ordering::Relaxed);
             if let Err(e) = f.call::<()>((n.state.clone(), n.props.clone())) {
                 let msg = e.to_string();
@@ -594,6 +599,21 @@ impl Ui {
             }
         }
         Ok(())
+    }
+
+    /// The SVG each component produced last (debugging, tests).
+    pub fn layer_svgs(&self) -> Vec<(String, String)> {
+        fn walk(n: &Node, out: &mut Vec<(String, String)>) {
+            out.push((n.key.clone(), n.svg.clone()));
+            for c in &n.children {
+                walk(c, out);
+            }
+        }
+        let mut out = Vec::new();
+        if let Some(r) = &self.root {
+            walk(r, &mut out);
+        }
+        out
     }
 
     /// Errors of all components (for the shell's error display).
