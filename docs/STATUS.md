@@ -1,6 +1,6 @@
 # ScriptFX: status, decisions & next steps
 
-_Last updated: 2026-11-17. Read this first when picking the project back up. Technical
+_Last updated: 2026-11-18. Read this first when picking the project back up. Technical
 details, measurements and run instructions are in [`README.md`](../README.md)._
 
 ## Vision
@@ -80,6 +80,48 @@ Avoid: "preset" (ambiguous between patch and snapshot), "editor"/"chrome" (use s
 │ chain: PUNCH › FET › OPTO › SPLIT › EQ › OUT  │ in ▮▮▮▯ out ▮▮▯ │ 0.7% CPU │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
+
+## Patch UI: reactive Lua components (decided 2026-11-18, prototype built)
+
+After several mockup rounds (canvas: "ScriptFX Shell Mockup", v1–v7):
+
+- **Shell layout (v6/v7):** plain text library on the left (`▶ Patch` / indented snapshots,
+  sections styled with the patch's background art + logo), the patch's ControlPanel fills the
+  stage, a **two-row shell pill** at the top centre of every ControlPanel (row 1: snapshot ▾,
+  save, load · row 2: reload, chat, settings), thin signal line below. Listen lives in the chat.
+  Chat is per patch (drawer over the panel). Passive mode is offered on the "No patch loaded" screen.
+  Shell style: native-looking (system font, dense, bevels, etched lines), not web-like.
+- **Patch UI = reactive Lua components** (`crates/ui-components`): every visual part (background,
+  logo, knobs, meters, displays, tabs) is `component { kind?, size?, animated?, on_click?, render(p) }`;
+  `render(p)` returns SVG strings and child instances. One cached image per component instance;
+  it re-renders only when its inputs change (props, bound value, meter, hover/drag, local state,
+  `time` if animated). Children are separate layers (a knob drag never re-renders its parents).
+  Behaviour (drag, fine, reset, click) is the shell's, per `kind`. Lua runs sandboxed; the output
+  is SVG for resvg (no scripts, images only from the patch folder). Fonts: images/SVG instead of
+  patch fonts (bundled Noto for text).
+- **Stress test results** (`cargo run --release -p ui-components --example stress`, Neon, 840×560):
+
+  | scenario | @1x | @2x |
+  |---|---|---|
+  | idle (animated LED only) | 0.12 ms | 0.26 ms |
+  | drag a knob | 0.8 ms | 1.9 ms (max 4.5) |
+  | playing (meters + drag + LED) | 1.4 ms | 2.7 ms (max 6.7) |
+  | first frame / rescale (window open) | 44 ms | 150 ms |
+  | 120 knobs, one dragged / all automated | 0.35 / 34 ms | – |
+  | animated full-size background (worst case) | 4.2 ms | 17.6 ms |
+  | spectrum display 256 pts every frame | 2.0 ms | – |
+
+  Faulty components (Lua error, endless loop, invalid SVG, memory hog) show an error box; the
+  rest keeps running. Hot reload keeps local state. In the plugin: ~1.35 ms/frame while playing.
+- **Authoring rules learned:** split static and dynamic parts into separate components (knob body
+  vs. value arc, meter frame vs. bars); avoid blur filters on large areas (fake glows with stacked
+  strokes); keep filter regions tight (`svg.blur(std, pad)`, `svg.arc{glow}` does this); prefer a
+  static background + small animated components over an animated background.
+
+**Open / next:** first-open cost at 2x (150 ms) → persistent raster cache or background-thread
+rendering; bool/enum params for toggles/selectors (toggles are local state only so far); `p.series`
+data (spectrum) from the analysis engine; an LLM writing a component from the API doc alone
+(not tested yet); type stubs for the component API; building the new shell layout itself.
 
 ## What exists (commits on `main`)
 

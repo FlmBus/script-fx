@@ -11,6 +11,7 @@ use nih_plug_egui::egui::{
     TextureOptions, Visuals, pos2, vec2,
 };
 use patch::{Control, MACRO_SLOTS, Patch, Source, Values};
+use ui_components::{Bound, Inputs};
 use ui_svg::SvgControlPanel;
 
 use crate::{FxParams, Shared, patches_root};
@@ -26,11 +27,21 @@ pub fn create(params: Arc<FxParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
     )
 }
 
+/// A patch UI built from reactive Lua components (`ui.lua`).
+struct ComponentPanel {
+    ui: ui_components::Ui,
+    /// One texture per component layer, uploaded only when the layer changed.
+    textures: std::collections::HashMap<u64, TextureHandle>,
+    hover: Option<u64>,
+    active: Option<u64>,
+}
+
 struct Loaded {
     name: String,
     dir: PathBuf,
     patch: Patch,
     panel: Option<SvgControlPanel>,
+    components: Option<ComponentPanel>,
     texture: Option<TextureHandle>,
     mtime: Option<SystemTime>,
     load_ms: f32,
@@ -108,6 +119,9 @@ impl EditorState {
             if let Some(panel) = &mut cur.panel {
                 panel.invalidate();
             }
+            if let Some(cp) = &mut cur.components {
+                cp.textures.clear(); // textures belong to the old egui context
+            }
         }
     }
 
@@ -121,7 +135,8 @@ impl EditorState {
             // load the default patch and apply its defaults.
             let name = params.patch_name.read().unwrap().clone();
             let fresh = name.is_empty();
-            let name = if fresh { crate::DEFAULT_PATCH.to_string() } else { name };
+            let default = std::env::var("SCRIPTFX_DEV_PATCH").unwrap_or_else(|_| crate::DEFAULT_PATCH.to_string());
+            let name = if fresh { default } else { name };
             self.load(setter, params, shared, &name, fresh);
         }
         self.poll_hot_reload(setter, params, shared);
@@ -201,6 +216,35 @@ impl EditorState {
                 return;
             }
         };
+        // Component UI: reuse the running one on hot reload so local state survives.
+        let components = if dir.join("ui.lua").is_file() {
+            let previous = self
+                .current
+                .as_mut()
+                .filter(|c| c.name == name)
+                .and_then(|c| c.components.take());
+            let built = match previous {
+                Some(mut cp) => cp.ui.reload().map(|_| {
+                    cp.textures.clear();
+                    cp
+                }),
+                None => ui_components::Ui::load(&dir).map(|ui| ComponentPanel {
+                    ui,
+                    textures: Default::default(),
+                    hover: None,
+                    active: None,
+                }),
+            };
+            match built {
+                Ok(cp) => Some(cp),
+                Err(e) => {
+                    self.error = Some(format!("{name}/ui.lua: {e}"));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
 
         *params.patch_name.write().unwrap() = name.to_string();
         if reset {
@@ -229,6 +273,7 @@ impl EditorState {
             dir,
             patch,
             panel,
+            components,
             texture: None,
             load_ms: t.elapsed().as_secs_f32() * 1000.0,
         });
@@ -328,6 +373,18 @@ impl EditorState {
                             s.parse_us / 1000.0,
                             s.render_us / 1000.0,
                             s.renders
+                        ));
+                    }
+                    if let Some(cp) = &c.components {
+                        let s = cp.ui.stats;
+                        ui.weak(format!(
+                            "components: {} · last frame {:.2} ms · {} renders · {} rasters · lua {:.0}µs · svg {:.2}ms",
+                            s.nodes,
+                            s.total_us / 1000.0,
+                            s.renders,
+                            s.rasters,
+                            s.lua_us,
+                            (s.parse_us + s.raster_us) / 1000.0
                         ));
                     }
                 }
@@ -454,6 +511,10 @@ impl EditorState {
                 ui.centered_and_justified(|ui| ui.label("No patch loaded"));
                 return;
             };
+            if let Some(cp) = &mut cur.components {
+                component_panel(ui, ctx, avail, cp, &cur.patch, &self.values, &mut self.drag, setter, params, &mut free_change);
+                return;
+            }
             let Some(panel) = &mut cur.panel else {
                 ui.centered_and_justified(|ui| ui.label("Patch has no SVG UI — use the sidebar"));
                 return;
@@ -549,6 +610,145 @@ impl EditorState {
     }
 }
 
+/// Draws and drives a component UI: one texture per layer, drag on `knob`s,
+/// `on_click` on `button`s, hover/drag fed back as props.
+#[allow(clippy::too_many_arguments)]
+fn component_panel(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    avail: Rect,
+    cp: &mut ComponentPanel,
+    patch: &Patch,
+    values: &Values,
+    drag: &mut Option<DragState>,
+    setter: &ParamSetter,
+    params: &FxParams,
+    free_change: &mut Option<(usize, f32)>,
+) {
+    let (uw, uh) = (cp.ui.width, cp.ui.height);
+    let scale = (avail.width() / uw).min(avail.height() / uh);
+    let rect = Rect::from_center_size(avail.center(), vec2(uw * scale, uh * scale));
+
+    let bound = |b: &str| -> Option<Bound> {
+        match patch.resolve_source(b).ok()? {
+            Source::Macro(slot) => {
+                let v = values.macros[slot];
+                Some(Bound { value: v, display: patch.macro_text(slot, v), locked: false })
+            }
+            Source::Param(i) => {
+                let v = values.params.get(i).copied().unwrap_or(0.0);
+                Some(Bound { value: v, display: patch.params[i].display(v), locked: !matches!(patch.controls[i], Control::Free) })
+            }
+            _ => None,
+        }
+    };
+    let meter = |m: &str| -> Option<f32> {
+        match patch.resolve_source(m).ok()? {
+            Source::MeterIn => Some(values.meter_in),
+            Source::MeterOut => Some(values.meter_out),
+            Source::Block(i) => values.blocks.get(i).copied(),
+            _ => None,
+        }
+    };
+    let series = |_: &str| None;
+    let inputs = Inputs { time: values.time, hover: cp.hover, active: cp.active, bound: &bound, meter: &meter, series: &series };
+    cp.ui.update(&inputs, scale * ctx.pixels_per_point());
+
+    // Upload changed layers, draw all, forget vanished ones.
+    let mut alive = std::collections::HashSet::new();
+    for layer in cp.ui.layers() {
+        let Some(pm) = layer.pixmap else { continue };
+        alive.insert(layer.id);
+        if layer.changed || !cp.textures.contains_key(&layer.id) {
+            let img = ColorImage::from_rgba_premultiplied([pm.width() as usize, pm.height() as usize], pm.data());
+            match cp.textures.get_mut(&layer.id) {
+                Some(t) => t.set(img, TextureOptions::LINEAR),
+                None => {
+                    cp.textures.insert(layer.id, ctx.load_texture(format!("layer-{}", layer.id), img, TextureOptions::LINEAR));
+                }
+            }
+        }
+        let r = Rect::from_min_size(
+            rect.min + vec2(layer.rect.x * scale, layer.rect.y * scale),
+            vec2(layer.rect.w * scale, layer.rect.h * scale),
+        );
+        ui.painter().image(cp.textures[&layer.id].id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+    }
+    cp.textures.retain(|id, _| alive.contains(id));
+
+    // Interaction
+    let resp = ui.allocate_rect(rect, Sense::click_and_drag());
+    let to_ui = |p: Pos2| ((p.x - rect.min.x) / scale, (p.y - rect.min.y) / scale);
+    let hit_at = |p: Option<Pos2>| p.and_then(|p| {
+        let (x, y) = to_ui(p);
+        cp.ui.hit(x, y)
+    });
+    let hover = hit_at(resp.hover_pos());
+    cp.hover = hover.as_ref().map(|h| h.id);
+    match hover.as_ref().map(|h| h.kind.as_str()) {
+        Some("knob") => ctx.set_cursor_icon(CursorIcon::ResizeVertical),
+        Some(_) => ctx.set_cursor_icon(CursorIcon::PointingHand),
+        None => {}
+    }
+    let pressed = hit_at(resp.interact_pointer_pos());
+    let target = pressed.as_ref().and_then(|h| {
+        let src = patch.resolve_source(h.bind.as_deref()?).ok()?;
+        drag_what(patch, &src)
+    });
+
+    if resp.drag_started() {
+        if let (Some(h), Some(what)) = (&pressed, target) {
+            if h.kind == "knob" {
+                let start = match what {
+                    DragWhat::Macro(slot) => {
+                        setter.begin_set_parameter(&params.macros[slot].value);
+                        values.macros[slot]
+                    }
+                    DragWhat::Param(i) => values.params[i],
+                };
+                *drag = Some(DragState { what, range: 200.0, start, accum: 0.0 });
+                cp.active = Some(h.id);
+            }
+        }
+    }
+    if resp.dragged() {
+        if let Some(d) = drag {
+            let fine = if ui.input(|i| i.modifiers.shift) { 0.2 } else { 1.0 };
+            d.accum += resp.drag_delta().y / scale * fine;
+            let v = (d.start - d.accum / d.range).clamp(0.0, 1.0);
+            match d.what {
+                DragWhat::Macro(slot) => setter.set_parameter_normalized(&params.macros[slot].value, v),
+                DragWhat::Param(i) => *free_change = Some((i, patch.params[i].plain(v))),
+            }
+        }
+    }
+    if resp.drag_stopped() {
+        if let Some(DragState { what: DragWhat::Macro(slot), .. }) = drag.take() {
+            setter.end_set_parameter(&params.macros[slot].value);
+        }
+        cp.active = None;
+    }
+    if resp.clicked() {
+        if let Some(h) = &pressed {
+            if h.kind == "button" {
+                let _ = cp.ui.click(h.id);
+            }
+        }
+    }
+    if resp.double_clicked() {
+        match target {
+            Some(DragWhat::Macro(slot)) => {
+                let p = &params.macros[slot].value;
+                setter.begin_set_parameter(p);
+                setter.set_parameter_normalized(p, patch.macro_default(slot));
+                setter.end_set_parameter(p);
+            }
+            Some(DragWhat::Param(i)) => *free_change = Some((i, patch.params[i].default_plain())),
+            None => {}
+        }
+    }
+}
+
 /// Resolves a drag target: a macro-driven param drags its macro instead.
 fn drag_what(patch: &Patch, target: &Source) -> Option<DragWhat> {
     match *target {
@@ -569,7 +769,7 @@ fn scan_patches() -> Vec<String> {
 }
 
 fn patch_mtime(dir: &Path, patch: &Patch) -> Option<SystemTime> {
-    let mut files = vec![dir.join("patch.lua")];
+    let mut files = vec![dir.join("patch.lua"), dir.join("ui.lua")];
     if let Some(ui) = &patch.control_panel {
         files.push(ui.svg.clone());
     }
