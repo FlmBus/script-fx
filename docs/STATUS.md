@@ -1,7 +1,21 @@
 # ScriptFX: status, decisions & next steps
 
-_Last updated: 2026-11-18. Read this first when picking the project back up. Technical
+_Last updated: 2026-11-18 (evening). Read this first when picking the project back up. Technical
 details, measurements and run instructions are in [`README.md`](../README.md)._
+
+## Where we left off (2026-11-18)
+
+1. Built and stress-tested the **reactive Lua component system** for patch UIs (`crates/ui-components`)
+   and wired it into the plugin: a patch folder with a `ui.lua` uses it instead of the old SVG panel.
+   Two real component patches: `neon-saturator` and `junkyard-amp` (procedural skeuomorphic fire test).
+2. **Just fixed:** components rendered broken in **Carla** (missing gradients, opacities, knobs not
+   rotating). Cause: Qt hosts set the process locale (here `LC_NUMERIC=de_DE`), so Lua formatted
+   numbers with a decimal comma (`0,08`) → invalid SVG. Fix: every Lua call runs with a per-thread
+   "C" numeric locale (`patch::locale::CNumeric`), host locale untouched; regression test under
+   `de_DE.UTF-8`. **Not yet re-checked by the user in Carla/Reaper** (restart the host after installing).
+3. **First thing next session:** confirm in Carla/Reaper that both component patches render correctly
+   and that dragging knobs, hover tags, tabs and toggles work (only tested headless + via engine tests).
+   Then continue with the TODO list below (next big item: build the new shell layout).
 
 ## Vision
 
@@ -52,34 +66,11 @@ Avoid: "preset" (ambiguous between patch and snapshot), "editor"/"chrome" (use s
 | Mix context | only **current track + master** (no buses: buses/sends would skew a track-vs-bus comparison). The master instance runs in **passive mode** | universally applicable, fewer options |
 | LLM integration (planned) | **Layer 1**: the user attaches a capture to the prompt. **Layer 2**: the LLM gets tools: `get_analysis(section, detail)` and `request_listen(where)` → closed loop: write a patch, listen to the output, compare, adjust | the LLM can't press play; the human always plays the track |
 
-## Shell layout (decided, not built yet)
+## Shell layout
 
-- **Own neutral style** (graphite, flat, one blue accent). **Patch themes never colour the shell**,
-  so shell controls and patch controls are always distinguishable. The ControlPanel sits in a
-  bezel inside the shell. _(The fixed shell style is already applied; the layout below isn't.)_
-- **Header**: shell name · patch picker (with a small theme colour mark) · snapshot picker ◀ ▶ ·
-  reload · 🎧 Listen · 💬 drawer toggle · ⚙
-- **Centre**: the ControlPanel (scaled to fit)
-- **Right drawer** (toggled, overlays the ControlPanel; fixed window size) with tabs **Chat**,
-  **Controls** (macros + params), **Captures** (all analyses of the session, attachable to messages)
-- **Status bar**: chain as a compact block strip (later: clickable for bypass/taps) · in/out meters · CPU · errors
-- **Empty state** (fresh instance): "No patch loaded, the signal passes through untouched" +
-  actions [Browse patches] [💬 Describe what you need] [🎧 Listen first]
-- **Passive mode** view: no patch, no chat; status ("passive · sharing audio"), spectrum, meters,
-  connected instances
-
-```
-┌───────────────────────────────────────────────────────────────────────────┐
-│ ScriptFX │ ▣ Bass Helper ▾ │ snapshot: Init ▾ ◀ ▶ │ ⟳ │ 🎧 Listen │ 💬 │ ⚙ │
-├──────────────────────────────────────────────────┬────────────────────────┤
-│ ╔══════════════════════════════════════════════╗ │ Chat │ Controls │ Captures│
-│ ║            ControlPanel (SVG)                ║ │ you: make it punchier  │
-│ ║          patch's own colours/style           ║ │  📎 capture 10 s       │
-│ ╚══════════════════════════════════════════════╝ │ [type a message…    ⏎] │
-├──────────────────────────────────────────────────┴────────────────────────┤
-│ chain: PUNCH › FET › OPTO › SPLIT › EQ › OUT  │ in ▮▮▮▯ out ▮▮▯ │ 0.7% CPU │
-└───────────────────────────────────────────────────────────────────────────┘
-```
+Decided in the mockup rounds (canvas "ScriptFX Shell Mockup", v1–v7; v7 is the current target),
+**not built yet** – the plugin still has the old PoC chrome (combo box, sidebar, prompt field).
+The fixed graphite shell style is already applied. Details in the next section.
 
 ## Patch UI: reactive Lua components (decided 2026-11-18, prototype built)
 
@@ -127,26 +118,36 @@ After several mockup rounds (canvas: "ScriptFX Shell Mockup", v1–v7):
   `cargo run --release -p ui-components --example render -- <patch> out.png [scale] [bind=v] [hover=x,y]`
   (`BENCH_DRAG=<bind>` times a drag).
 
-**Open / next:** first-open cost at 2x (150 ms) → persistent raster cache or background-thread
-rendering; bool/enum params for toggles/selectors (toggles are local state only so far); `p.series`
-data (spectrum) from the analysis engine; an LLM writing a component from the API doc alone
-(not tested yet); type stubs for the component API; building the new shell layout itself.
+- **Locale bug (fixed):** never rely on the process locale – the host owns it (Qt hosts set the
+  user's locale). All Lua runs under `patch::locale::CNumeric` (per-thread C numeric locale). Keep
+  this in mind for anything formatted for SVG, files or the LLM.
+
+**Open / next (components):** first-open cost at 2x (150 ms) → persistent raster cache or
+background-thread rendering; bool/enum params for toggles/selectors (toggles are local UI state
+only so far); `p.series` data (spectrum) from the analysis engine; write the component API doc +
+LuaLS type stubs (also the LLM's spec); test an LLM writing a component from that doc alone;
+hit areas are rectangles; `measure_text()` helper if layouts need text widths.
 
 ## What exists (commits on `main`)
 
 - `crates/patch`: model + sandboxed Lua loader + chain spec + validation
 - `crates/dsp`: graph engine; blocks `gain eq drive comp(fet|opto|clean) rider transient split(LR4)`, block meters, no-alloc test, bench (`--example bench`)
-- `crates/ui-svg`: SVG panel renderer + bindings (`rotate translate scale opacity fill text drag`)
+- `crates/ui-components`: **reactive Lua component UIs** (prelude with `component`, `child`, `svg.*`
+  helpers; engine with per-layer cache, content-bbox crop, hit testing, local state, error isolation);
+  examples `stress` (benchmarks) and `render` (PNG + per-layer cost); tests incl. locale regression
+- `crates/ui-svg`: older SVG panel renderer + bindings (`rotate translate scale …`) — still used by
+  patches without `ui.lua` (tape-glow, clean-gain, bass-helper); superseded by components
 - `crates/analysis`: loudness (EBU R128, verified against ffmpeg), 1/3-oct spectrum, tilt, centroid, energy shares, resonances, dynamics (percentiles, per-band spread, onsets, attack), stereo, pitch (YIN)
-- `crates/plugin` (package `scriptfx`): egui chrome (patch picker, hot reload, macro/param sidebar, prompt field without LLM yet, 🎧 Listen + result screen + prompt chip), host-name updates, lock-free capture
-- patches: `tape-glow`, `clean-gain`, `bass-helper` (punch → FET → opto → split: ride/grit → EQ; 7 macros)
+- `crates/plugin` (package `scriptfx`): egui PoC chrome (patch picker, hot reload, macro/param sidebar, prompt field without LLM yet, 🎧 Listen + result screen + prompt chip), host-name updates, lock-free capture, component panels (one texture per layer, drag/click/hover); dev env vars `SCRIPTFX_PATCHES`, `SCRIPTFX_DEV_PATCH`, `SCRIPTFX_TEST_INPUT`, `SCRIPTFX_DEV_AUTOLISTEN`
+- patches: `tape-glow`, `clean-gain`, `bass-helper` (SVG panels); `neon-saturator`, `junkyard-amp` (component UIs)
 - `vendor/baseview`: patched to not panic on GLX errors (fixed blank editor after close/reopen in Reaper)
 - CI workflow written, **not run yet** (repo isn't on GitHub; `gh` isn't installed)
 
 ## Key findings (details in README)
 
 - Performance: bass-helper (11 blocks) = **0.7 % of one core**; chain complexity is not a concern.
-- SVG UI: full redraw on the CPU costs ~5 ms @1x / ~13 ms @2x for a 640×360 panel. Needs static-layer caching or a GPU renderer (vello).
+- Old SVG panel: full redraw ~5 ms @1x / ~13 ms @2x. Solved by the component system (per-layer cache): ~1.4 ms @1x / ~2.7 ms @2x while playing.
+- Hosts control the process locale → Lua number formatting must be forced to "C" per call (done).
 - Lua `animate()` per frame: ~25 µs, so scripted UI animation is cheap.
 - Linux: NVIDIA + XWayland GLX issues (standalone tiling crash; fixed for close/reopen via patched baseview). JACK standalone on PipeWire doesn't process; use `-b alsa`.
 - egui `Slider::from_get_set` writes every frame; it needs a change check (otherwise it spams host automation).
@@ -156,14 +157,21 @@ data (spectrum) from the analysis engine; an LLM writing a component from the AP
 ## TODO (prioritised)
 
 ### Next up
-1. **Passive mode** (master instance): toggle; bypass the chain, keep a rolling ~30 s buffer; a track instance's listen pulls the master audio for the same time window (aligned via host transport position) and adds "track vs. mix" analysis (masking per band). In-process registry first (Reaper/Studio One/Fender Studio run plugins in-process); sandboxed hosts (Bitwig, Reaper "dedicated process") would need IPC. Warn if two instances claim master.
-2. **Empty default state (Kontakt-style)**: a fresh instance loads **no patch**, has an **empty chain** (passthrough, does nothing to the sound) and an empty/neutral UI. Currently it auto-loads `tape-glow`.
-3. **LLM integration**: prompt → patch generation (layer 1 with attached capture), then layer-2 tools (`get_analysis`, `request_listen`). Bring-your-own API key. Validate generated patches with the strict loader; feed errors back to the LLM.
+1. **Verify the locale fix + component interaction in Carla/Reaper** (see "Where we left off").
+2. **Build the new shell layout (v7)**: plain text patch/snapshot list (sections on patch art + logo),
+   ControlPanel fills the stage, two-row shell pill (snapshot ▾ save load / reload chat settings),
+   signal line, chat drawer per patch (Listen inside the chat), native-looking shell style.
+   Includes the **empty default state** (fresh instance: no patch, empty chain, passthrough;
+   "No patch loaded" screen with build-from-description + listen + passive option) — today a fresh
+   instance still auto-loads `tape-glow`. Also: snapshots (saved values of a patch) don't exist yet.
+3. **Component API doc + type stubs**, bool/enum params, raster cache (see "Open / next (components)").
+4. **Passive mode**: toggle on the empty screen; bypass, keep a rolling ~30 s buffer; a track instance's listen pulls the passive instance's audio for the same time window (host transport position) and adds "track vs. mix" analysis. In-process registry first (Reaper/Studio One/Fender Studio run plugins in-process); sandboxed hosts need IPC. Channel names: CLAP track-info / VST3 IInfoListener (needs nih-plug patch), fallback: user-named instances.
+5. **LLM integration**: chat → patch generation (layer 1 with attached capture), then layer-2 tools (`get_analysis`, `request_listen`). Bring-your-own API key. Validate generated patches with the strict loader; feed errors back to the LLM.
 
 ### UI redesign (plugin chrome)
-- **Chat view instead of a single prompt field**: most requests need clarification or follow-up adjustments. This also cleans up the general UI, and captures/analyses stay available over the course of a conversation (shown as message attachments).
+- **Chat** (decided: drawer per patch, opened from the pill; captures as message attachments; Listen lives in the chat).
 - **Open question: persist chats?** Options: (a) not at all, (b) in the plugin state (travels with the DAW project; watch the state size), (c) in the data dir next to the patch (e.g. `<patch>/chat.json`, survives across projects), (d) both. Also: should a generated patch carry its chat history?
-- Patch browser, macro/param editing, listen screen and analysis view integrated into the redesign.
+- Where do the macro/param sliders and the listen result screen go in the new layout? (Not decided; the PoC sidebar has them.)
 
 ### DSP / chain model
 - **Multi-output taps**: additional plugin outputs that tap anywhere in the chain (e.g. `tap("di_clean", { output = 2 })` after the punch/comp stage) to get a partly processed DI signal back into the DAW. Needs: aux output buses in the plugin layout (nih-plug `AudioIOLayout.aux_output_ports`), a tap block in the chain spec, and host routing tests.
@@ -176,5 +184,4 @@ data (spectrum) from the analysis engine; an LLM writing a component from the AP
 - Push to GitHub (install `gh` or create the repo manually) and run CI; test on Windows (Fender Studio) and macOS (Studio One 6, including Retina @2x performance)
 - Hide unused macro slots in the host (needs another nih-plug patch; flags + rescan)
 - NVIDIA/GLX: check whether the standalone tiling crash is fixed by the baseview patch; consider a non-GL renderer for the chrome
-- SVG performance: static-layer caching (`resvg::render_node`) or vello; re-measure @2x
 - Licensing: VST3 export goes through `vst3-sys` (GPLv3), so binaries are GPLv3 unless that dependency is replaced
