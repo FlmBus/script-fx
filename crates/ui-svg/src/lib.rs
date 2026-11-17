@@ -59,7 +59,7 @@ fn base_fonts() -> &'static fontdb::Database {
     })
 }
 
-fn fonts_for(dir: &Path) -> Arc<fontdb::Database> {
+pub fn fonts_for(dir: &Path) -> Arc<fontdb::Database> {
     let mut db = base_fonts().clone();
     let fonts_dir = dir.join("fonts");
     if fonts_dir.is_dir() {
@@ -80,7 +80,7 @@ fn theme_css(theme: &Theme) -> String {
 }
 
 /// `<image href>` may only load files from inside the patch folder.
-fn sandboxed_image_resolver(dir: PathBuf) -> ImageHrefResolver<'static> {
+pub fn sandboxed_image_resolver(dir: PathBuf) -> ImageHrefResolver<'static> {
     ImageHrefResolver {
         resolve_data: ImageHrefResolver::default_data_resolver(),
         resolve_string: Box::new(move |href: &str, opts: &usvg::Options| {

@@ -633,9 +633,11 @@ fn resolve_controls(params: &[ParamSpec], macros: &[MacroSpec]) -> Result<Vec<Co
     Ok(controls)
 }
 
-/// Lua with only table/string/math/utf8, no file loading, a memory cap and an
-/// instruction budget (checked via a hook every `HOOK_GRANULARITY` instructions).
-fn sandboxed_lua() -> Result<(Lua, Arc<AtomicU32>), PatchError> {
+/// A sandboxed Lua state (table/string/math/utf8 only, no file loading, memory
+/// cap, instruction budget). The returned counter must be reset to 0 before each
+/// top-level call; the budget applies per call (checked every `HOOK_GRANULARITY`
+/// instructions).
+pub fn sandboxed_lua() -> Result<(Lua, Arc<AtomicU32>), PatchError> {
     let lua = Lua::new_with(
         StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8,
         LuaOptions::default(),
