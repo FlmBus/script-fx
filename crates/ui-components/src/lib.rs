@@ -77,6 +77,8 @@ pub struct FrameStats {
 
 pub struct Layer<'a> {
     pub id: u64,
+    /// Where to draw `pixmap` (logical units): the component's content area,
+    /// which may be smaller than the component itself.
     pub rect: Rect,
     pub pixmap: Option<&'a Pixmap>,
     /// The pixmap was (re)rendered during the last update.
@@ -120,6 +122,9 @@ struct Node {
     error: Option<String>,
     children: Vec<Node>,
     raster_us: f32,
+    /// Area of the component that actually has content (logical, relative to
+    /// the component). Only this area is rasterised.
+    content: Rect,
 }
 
 pub struct Ui {
@@ -260,6 +265,7 @@ impl Ui {
             error: None,
             children: Vec::new(),
             raster_us: 0.0,
+            content: Rect::default(),
         };
         self.set_props(&mut n, props, parent);
         n
@@ -482,8 +488,26 @@ impl Ui {
             }
         };
         let t1 = Instant::now();
-        let pw = (w * scale).ceil().max(1.0) as u32;
-        let ph = (h * scale).ceil().max(1.0) as u32;
+        // Rasterise only the area that has content (incl. strokes/filters), snapped
+        // to whole device pixels and clipped to the component.
+        let bbox = tree.root().abs_layer_bounding_box();
+        let (cx0, cy0, cx1, cy1) = match bbox {
+            Some(b) => (
+                ((b.left().max(0.0) * scale).floor() / scale),
+                ((b.top().max(0.0) * scale).floor() / scale),
+                ((b.right().min(w) * scale).ceil() / scale),
+                ((b.bottom().min(h) * scale).ceil() / scale),
+            ),
+            None => (0.0, 0.0, 0.0, 0.0),
+        };
+        if cx1 <= cx0 || cy1 <= cy0 {
+            n.pixmap = None;
+            n.changed = true;
+            return;
+        }
+        n.content = Rect { x: cx0, y: cy0, w: cx1 - cx0, h: cy1 - cy0 };
+        let pw = ((cx1 - cx0) * scale).round().max(1.0) as u32;
+        let ph = ((cy1 - cy0) * scale).round().max(1.0) as u32;
         let mut pm = match &mut n.pixmap {
             Some(p) if p.width() == pw && p.height() == ph => {
                 let mut p = p.clone();
@@ -492,7 +516,11 @@ impl Ui {
             }
             _ => Pixmap::new(pw, ph).expect("pixmap"),
         };
-        resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut pm.as_mut());
+        resvg::render(
+            &tree,
+            tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, -cx0 * scale, -cy0 * scale),
+            &mut pm.as_mut(),
+        );
         let t2 = Instant::now();
         self.stats.parse_us += (t1 - t0).as_secs_f32() * 1e6;
         self.stats.raster_us += (t2 - t1).as_secs_f32() * 1e6;
@@ -509,7 +537,7 @@ impl Ui {
         fn walk<'a>(n: &'a Node, out: &mut Vec<Layer<'a>>) {
             out.push(Layer {
                 id: n.id,
-                rect: n.abs,
+                rect: Rect { x: n.abs.x + n.content.x, y: n.abs.y + n.content.y, w: n.content.w, h: n.content.h },
                 pixmap: n.pixmap.as_ref(),
                 changed: n.changed,
                 kind: n.kind.as_deref(),

@@ -118,6 +118,15 @@ After several mockup rounds (canvas: "ScriptFX Shell Mockup", v1–v7):
   strokes); keep filter regions tight (`svg.blur(std, pad)`, `svg.arc{glow}` does this); prefer a
   static background + small animated components over an animated background.
 
+- **Fire test: "Junkyard Amp"** (skeuomorphic wood/tape/chicken-head knobs, everything procedural
+  in Lua, no image files): looks right, ~300 SVG elements in the static background (33 ms once @1x,
+  90 ms @2x). It exposed a cost problem that an LLM would hit too: dynamic sub-components sized like
+  their parent rasterise lots of empty pixels. **Fix in the engine: every layer is cropped to its
+  content bounding box** (only that area is rasterised). Drag @2x went from 11.3 ms to 4.0 ms;
+  Neon's rasterised pixels halved. Plus: drop shadows on moving parts as offset copies, not blur.
+  `cargo run --release -p ui-components --example render -- <patch> out.png [scale] [bind=v] [hover=x,y]`
+  (`BENCH_DRAG=<bind>` times a drag).
+
 **Open / next:** first-open cost at 2x (150 ms) → persistent raster cache or background-thread
 rendering; bool/enum params for toggles/selectors (toggles are local state only so far); `p.series`
 data (spectrum) from the analysis engine; an LLM writing a component from the API doc alone
