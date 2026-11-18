@@ -18,14 +18,14 @@ fn frame(ui: &mut Ui, binds: &HashMap<String, f32>, hover: Option<u64>) {
 fn only_the_changed_leaf_rerenders() {
     let mut ui = Ui::load(&fixture("nested")).unwrap();
     let mut binds: HashMap<String, f32> =
-        ["low1", "low2", "low3", "low4", "high1", "high2", "high3", "high4"].iter().map(|k| (k.to_string(), 0.4)).collect();
+        ["low1", "low2", "low3", "low4", "high1", "high2", "high3", "high4"].iter().map(|k| (format!("param.{k}"), 0.4)).collect();
     frame(&mut ui, &binds, None);
     assert!(ui.stats.renders >= 15, "first frame renders everything");
 
     frame(&mut ui, &binds, None);
     assert_eq!(ui.stats.renders, 0, "nothing changed");
 
-    binds.insert("low3".into(), 0.9);
+    binds.insert("param.low3".into(), 0.9);
     frame(&mut ui, &binds, None);
     assert_eq!(ui.stats.renders, 1, "only the knob bound to low3");
     assert_eq!(ui.stats.rasters, 1);
@@ -69,4 +69,12 @@ fn local_state_and_reload() {
     ui.reload().unwrap();
     frame(&mut ui, &binds, None);
     assert!(ui.hit(165.0, 390.0).is_none(), "tab state survives a reload");
+}
+
+#[test]
+fn lua_knows_the_panel_size() {
+    let rt = patch::runtime::Runtime::new(&fixture("numbers")).unwrap();
+    let ui: mlua::Table = rt.lua.globals().get("UI").unwrap();
+    assert_eq!(ui.get::<f32>("WIDTH").unwrap(), ui_components::WIDTH);
+    assert_eq!(ui.get::<f32>("HEIGHT").unwrap(), ui_components::HEIGHT);
 }

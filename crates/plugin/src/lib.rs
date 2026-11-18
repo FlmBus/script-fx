@@ -13,6 +13,7 @@ use nih_plug::prelude::*;
 use nih_plug_egui::EguiState;
 use patch::{MACRO_SLOTS, Patch};
 
+mod gpu_spike;
 mod shell;
 mod listen;
 
@@ -399,6 +400,8 @@ impl Plugin for ScriptFx {
         match Patch::load(patches_root().join(&name)) {
             Ok(p) => {
                 let graph = Box::new(Graph::build(&p, sr, &self.params.free_values(&p)));
+                // Oversampled blocks delay the signal; the host compensates.
+                context.set_latency_samples(graph.latency() as u32);
                 *self.shared.live.lock().unwrap() =
                     Some(Live { free: graph.free_values(), meters: graph.meters() });
                 self.graph = Some(graph);
@@ -414,15 +417,26 @@ impl Plugin for ScriptFx {
         &mut self,
         buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
-        _context: &mut impl ProcessContext<Self>,
+        context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         // Swap in newly published graphs; old ones go back to be dropped elsewhere.
         while let Ok(next) = self.graph_rx.pop() {
+            // Lock-free; nih-plug only tells the host if the latency changed.
+            context.set_latency_samples(next.latency() as u32);
             if let Some(old) = self.graph.replace(next) {
                 if let Err(rtrb::PushError::Full(old)) = self.garbage_tx.push(old) {
                     std::mem::forget(old); // never free on the audio thread
                 }
             }
+        }
+
+        // Synced blocks (`sync = "1/8"`) follow the host tempo; synced LFOs lock to
+        // the beat position while the host plays.
+        let transport = context.transport();
+        let tempo = transport.tempo.map(|t| t as f32);
+        let beat = if transport.playing { transport.pos_beats() } else { None };
+        if let Some(g) = &mut self.graph {
+            g.set_transport(tempo, beat);
         }
 
         let mut peak_in = self.shared.meter_in.load(Ordering::Relaxed);

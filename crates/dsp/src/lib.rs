@@ -4,16 +4,37 @@
 //! of nodes. [`Graph::process`] runs it on the audio thread: no allocations, no
 //! locks, no Lua. Settings are recomputed once per sub-block of at most
 //! [`SUB_BLOCK`] frames (from macros + free param values) and smoothed.
+//!
+//! Oversampling is generic: any block can be wrapped in an oversampled node
+//! (`oversampling = n` on the block; nonlinear blocks automatically). The block
+//! just sees a higher `Ctx::sr`; none of them oversamples on its own. The filters
+//! are linear-phase, so oversampled blocks have latency: every node reports it,
+//! routing blocks delay their shorter branches to line them up, and the graph
+//! reports the total ([`Graph::latency`]) for the host's delay compensation.
+
+mod fx;
+mod oversample;
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use atomic_float::AtomicF32;
-use patch::chain::{BlockSpec, CompStyle, EqShape, Value, ValueRef, resolve_value};
+use patch::chain::{BlockKind, BlockSpec, Chain, Channels, CompSpec, EqSpec, FilterSpec, Side, Value, ValueRef, resolve_value};
+
+use oversample::{Delay, Oversampler};
 use patch::{Control, MACRO_SLOTS, ParamSpec, Patch};
 
 /// Maximum frames per [`Graph::process`] call.
 pub const SUB_BLOCK: usize = 32;
+/// Highest oversampling factor (also for nested oversampled blocks multiplied).
+pub const MAX_OVERSAMPLING: usize = patch::chain::MAX_OVERSAMPLING as usize;
+/// Automatic oversampling of nonlinear blocks aims for at least this rate (Hz).
+const AUTO_OVERSAMPLED_RATE: f32 = 88_000.0;
+/// Longest Haas delay, ms.
+const HAAS_MAX_MS: f32 = 40.0;
+/// Peak meter fall: to a quarter in this time (same as the shell's in/out meters).
+const PEAK_DECAY_MS: f32 = 300.0;
+
 /// Time constant for smoothing block settings.
 const SETTING_SMOOTHING_MS: f32 = 20.0;
 
@@ -27,40 +48,46 @@ fn atomics(values: impl IntoIterator<Item = f32>) -> Atomics {
 }
 
 #[inline]
-fn db_to_gain(db: f32) -> f32 {
+pub(crate) fn db_to_gain(db: f32) -> f32 {
     (db * (std::f32::consts::LN_10 / 20.0)).exp()
 }
 
 #[inline]
-fn gain_to_db(g: f32) -> f32 {
+pub(crate) fn gain_to_db(g: f32) -> f32 {
     20.0 * g.max(1e-9).log10()
 }
 
 /// One-pole coefficient for a time constant in ms at `rate` Hz.
 #[inline]
-fn coef(ms: f32, rate: f32) -> f32 {
+pub(crate) fn coef(ms: f32, rate: f32) -> f32 {
     (-1.0 / (ms.max(0.01) * 0.001 * rate)).exp()
 }
 
 /// Per-sub-block context shared by all nodes.
-struct Ctx<'a> {
-    values: &'a [f32],
-    sr: f32,
+#[derive(Clone, Copy)]
+pub(crate) struct Ctx<'a> {
+    pub(crate) values: &'a [f32],
+    pub(crate) sr: f32,
     /// Setting smoothing factor per sub-block.
-    k: f32,
-    meters: &'a [AtomicF32],
+    pub(crate) k: f32,
+    pub(crate) meters: &'a [AtomicF32],
+    /// Host tempo, BPM (120 when the host doesn't say).
+    pub(crate) tempo: f32,
+    /// Host position in beats (quarter notes) at the first frame of this call;
+    /// `None` when the host isn't playing (or doesn't say).
+    pub(crate) beat: Option<f64>,
 }
 
 /// A smoothed block setting.
 #[derive(Clone, Copy)]
-struct P {
+pub(crate) struct P {
     src: ValueRef,
     cur: f32,
     init: bool,
 }
 
 impl P {
-    fn new(v: Option<&Value>, default: f32, params: &[ParamSpec]) -> Self {
+    pub(crate) fn new(v: Option<&Value>, default: f32, params: &[ParamSpec]) -> Self {
         let src = match v {
             Some(v) => resolve_value(v, params).expect("validated by patch"),
             None => ValueRef::Const(default),
@@ -68,7 +95,7 @@ impl P {
         P { src, cur: default, init: false }
     }
 
-    fn update(&mut self, ctx: &Ctx) -> f32 {
+    pub(crate) fn update(&mut self, ctx: &Ctx) -> f32 {
         let target = match self.src {
             ValueRef::Const(c) => c,
             ValueRef::Param(i) => ctx.values[i],
@@ -83,8 +110,30 @@ impl P {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum EqShape {
+    Peak,
+    LowShelf,
+    HighShelf,
+    LowPass,
+    HighPass,
+    /// Constant 0 dB peak gain band-pass.
+    BandPass,
+    /// 2nd-order allpass; equals LR4 low + high at the same frequency
+    /// (used to phase-align the bands of a [`BandSplit`]).
+    AllPass,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+enum CompStyle {
+    Fet,
+    Opto,
+    #[default]
+    Clean,
+}
+
 #[derive(Clone, Copy, Default)]
-struct Biquad {
+pub(crate) struct Biquad {
     b0: f32,
     b1: f32,
     b2: f32,
@@ -96,7 +145,7 @@ struct Biquad {
 
 impl Biquad {
     /// RBJ cookbook coefficients.
-    fn set(&mut self, shape: EqShape, freq: f32, q: f32, gain_db: f32, sr: f32) {
+    pub(crate) fn set(&mut self, shape: EqShape, freq: f32, q: f32, gain_db: f32, sr: f32) {
         let w0 = std::f32::consts::TAU * freq.clamp(10.0, sr * 0.49) / sr;
         let (sin, cos) = w0.sin_cos();
         let alpha = sin / (2.0 * q.max(0.05));
@@ -122,6 +171,8 @@ impl Biquad {
             ),
             EqShape::LowPass => ((1.0 - cos) / 2.0, 1.0 - cos, (1.0 - cos) / 2.0, 1.0 + alpha, -2.0 * cos, 1.0 - alpha),
             EqShape::HighPass => ((1.0 + cos) / 2.0, -(1.0 + cos), (1.0 + cos) / 2.0, 1.0 + alpha, -2.0 * cos, 1.0 - alpha),
+            EqShape::AllPass => (1.0 - alpha, -2.0 * cos, 1.0 + alpha, 1.0 + alpha, -2.0 * cos, 1.0 - alpha),
+            EqShape::BandPass => (alpha, 0.0, -alpha, 1.0 + alpha, -2.0 * cos, 1.0 - alpha),
         };
         self.b0 = b0 / a0;
         self.b1 = b1 / a0;
@@ -131,7 +182,7 @@ impl Biquad {
     }
 
     #[inline]
-    fn tick(&mut self, x: f32, ch: usize) -> f32 {
+    pub(crate) fn tick(&mut self, x: f32, ch: usize) -> f32 {
         let y = self.b0 * x + self.z1[ch];
         self.z1[ch] = self.b1 * x - self.a1 * y + self.z2[ch];
         self.z2[ch] = self.b2 * x - self.a2 * y;
@@ -177,100 +228,346 @@ struct Transient {
     meter: usize,
 }
 
-enum Node {
+/// LR4 = two cascaded Butterworth (q 0.707) biquads.
+#[derive(Clone, Copy, Default)]
+struct Lr4([Biquad; 2]);
+
+impl Lr4 {
+    fn set(&mut self, shape: EqShape, freq: f32, sr: f32) {
+        for b in &mut self.0 {
+            b.set(shape, freq, std::f32::consts::FRAC_1_SQRT_2, 0.0, sr);
+        }
+    }
+    #[inline]
+    fn tick(&mut self, x: f32, ch: usize) -> f32 {
+        let y = self.0[0].tick(x, ch);
+        self.0[1].tick(y, ch)
+    }
+}
+
+/// N-band Linkwitz-Riley split. Band 0 = LP(f0); band i = LP(fi) of what passed
+/// HP(f0..fi-1); the last band = everything above the last crossover. Each band
+/// also passes the allpasses of the crossovers it didn't go through, so all bands
+/// share the same phase and their sum is flat.
+struct BandSplit {
+    freqs: Vec<P>,
+    last: Vec<f32>,
+    lp: Vec<Lr4>,
+    hp: Vec<Lr4>,
+    /// `ap[i]` = allpasses of band i at crossovers i+1..
+    ap: Vec<Vec<Biquad>>,
+    bands: Vec<Vec<Node>>,
+    bufs: Vec<Vec<Frame>>,
+    /// Latency compensation per band.
+    align: Vec<Delay>,
+    latency: usize,
+}
+
+struct Parallel {
+    branches: Vec<Vec<Node>>,
+    bufs: Vec<Vec<Frame>>,
+    align: Vec<Delay>,
+    latency: usize,
+    /// Crossfade between exactly two branches, %.
+    mix: Option<P>,
+}
+
+fn frame_buf(max_frames: usize) -> Vec<Frame> {
+    vec![[0.0; 2]; max_frames]
+}
+
+pub(crate) fn chain_latency(nodes: &[Node]) -> usize {
+    nodes.iter().map(Node::latency).sum()
+}
+
+/// Delays that line up chains with different latencies; returns them and the
+/// common latency (the longest).
+fn align(chains: &[Vec<Node>]) -> (Vec<Delay>, usize) {
+    let lat: Vec<usize> = chains.iter().map(|c| chain_latency(c)).collect();
+    let max = lat.iter().copied().max().unwrap_or(0);
+    (lat.iter().map(|l| Delay::new(max - l)).collect(), max)
+}
+
+/// A run of blocks at `factor` × the rate around them (one up/down pair).
+struct Oversampled {
+    os: Oversampler,
+    inner: Vec<Node>,
+}
+
+struct Haas {
+    delay: P,
+    /// Delayed channel.
+    ch: usize,
+    buf: Vec<f32>,
+    pos: usize,
+    /// Current delay, samples.
+    cur: f32,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum SplitMode {
+    MidSide,
+    LeftRight,
+}
+
+/// Two mono sub-chains: mid/side or left/right. Each chain sees its signal on
+/// both channels (so channel-linked blocks like compressors behave as mono);
+/// the left channel of the result is used.
+struct Split2 {
+    mode: SplitMode,
+    chains: [Vec<Node>; 2],
+    bufs: [Vec<Frame>; 2],
+    align: Vec<Delay>,
+    latency: usize,
+}
+
+pub(crate) enum Node {
     Gain { db: P, gain: f32 },
+    Pan { pan: P, gains: [f32; 2] },
+    Width { width: P, w: f32 },
+    /// Side → LR4 high-pass; mid → the matching allpass (= LR4 low + high), so
+    /// mid and side keep the same phase above the cutoff and the image stays put.
+    MonoBass { freq: P, last: f32, hp: Lr4, ap: Biquad },
+    Haas(Box<Haas>),
+    Invert { sign: [f32; 2] },
+    DcBlock { x1: [f32; 2], y1: [f32; 2] },
+    Meter { peak: f32, meter: usize },
+    Split2(Box<Split2>),
+    Oversampled(Box<Oversampled>),
+    /// Blocks from `fx` (distortion, filters, modulation, space, pitch, rhythm, dynamics).
+    Fx(Box<dyn fx::Fx>),
     Eq { shape: EqShape, freq: P, q: P, gain: P, last: [f32; 3], bq: Biquad },
     Drive { amount: P, mix: P },
     Comp(Box<Comp>),
     Rider(Box<Rider>),
     Transient(Box<Transient>),
-    Split { freq: P, last: f32, lp: [Biquad; 2], hp: [Biquad; 2], low: Vec<Node>, high: Vec<Node> },
+    BandSplit(Box<BandSplit>),
+    Parallel(Box<Parallel>),
 }
 
-fn build_nodes(chain: &[BlockSpec], params: &[ParamSpec], meter: &mut usize) -> Vec<Node> {
+/// `sr` = the rate the nodes run at, `max_frames` = the most frames per call there.
+///
+/// Neighbouring blocks with the same oversampling share one up/down pair (less
+/// latency and CPU than one pair each). Blocks without their own setting that sit
+/// between two such blocks join them (e.g. a filter between two drives).
+pub(crate) fn build_nodes(chain: &[BlockSpec], params: &[ParamSpec], sr: f32, max_frames: usize, meter: &mut usize) -> Vec<Node> {
+    let mut factors: Vec<usize> = chain.iter().map(|b| oversampling_of(b, sr)).collect();
+    let anchors: Vec<usize> = (0..chain.len()).filter(|&i| factors[i] > 1).collect();
+    for w in anchors.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if factors[a] == factors[b] && chain[a + 1..b].iter().all(|x| x.oversampling.is_none()) {
+            let f = factors[a];
+            factors[a + 1..b].fill(f);
+        }
+    }
+    let mut nodes = Vec::with_capacity(chain.len());
+    let mut i = 0;
+    while i < chain.len() {
+        let f = factors[i];
+        let end = i + factors[i..].iter().take_while(|&&x| x == f).count();
+        if f == 1 {
+            for b in &chain[i..end] {
+                nodes.push(build_kind(&b.kind, params, sr, max_frames, meter));
+            }
+        } else {
+            let inner: Vec<Node> = chain[i..end]
+                .iter()
+                .map(|b| build_kind(&b.kind, params, sr * f as f32, max_frames * f, meter))
+                .collect();
+            let os = Oversampler::new(f, max_frames, chain_latency(&inner));
+            nodes.push(Node::Oversampled(Box::new(Oversampled { os, inner })));
+        }
+        i = end;
+    }
+    nodes
+}
+
+/// Oversampling of a block: its own setting, else automatic for nonlinear blocks
+/// (the smallest factor that reaches [`AUTO_OVERSAMPLED_RATE`]), else none.
+fn oversampling_of(b: &BlockSpec, sr: f32) -> usize {
+    match b.oversampling {
+        Some(f) => (f as usize).clamp(1, MAX_OVERSAMPLING),
+        None if b.kind.is_nonlinear() => {
+            let mut f = 1;
+            while sr * (f as f32) < AUTO_OVERSAMPLED_RATE && f < MAX_OVERSAMPLING {
+                f *= 2;
+            }
+            f
+        }
+        None => 1,
+    }
+}
+
+fn build_kind(kind: &BlockKind, params: &[ParamSpec], sr: f32, max_frames: usize, meter: &mut usize) -> Node {
     let p = |v: &Option<Value>, d: f32| P::new(v.as_ref(), d, params);
+    let req = |v: &Value| P::new(Some(v), 0.0, params);
     fn next_meter(meter: &mut usize) -> usize {
         let m = *meter;
         *meter += 1;
         m
     }
-    let mut out = Vec::with_capacity(chain.len());
-    for b in chain {
-        out.push(match b {
-            BlockSpec::Gain { db, .. } => Node::Gain { db: P::new(Some(db), 0.0, params), gain: 1.0 },
-            BlockSpec::Eq { shape, freq, q, gain, .. } => Node::Eq {
-                shape: *shape,
-                freq: P::new(Some(freq), 1000.0, params),
-                q: p(q, std::f32::consts::FRAC_1_SQRT_2),
-                gain: p(gain, 0.0),
-                last: [f32::NAN; 3],
-                bq: Biquad::default(),
-            },
-            BlockSpec::Drive { amount, mix, .. } => Node::Drive { amount: P::new(Some(amount), 0.0, params), mix: p(mix, 100.0) },
-            BlockSpec::Comp { style, threshold, ratio, attack, release, knee, makeup, auto_makeup, mix, .. } => {
-                let (r, a, rel, k) = match style {
-                    CompStyle::Fet => (4.0, 0.3, 80.0, 2.0),
-                    CompStyle::Opto => (3.0, 10.0, 250.0, 8.0),
-                    CompStyle::Clean => (2.0, 5.0, 100.0, 4.0),
-                };
-                Node::Comp(Box::new(Comp {
-                    style: *style,
-                    threshold: P::new(Some(threshold), 0.0, params),
-                    ratio: p(ratio, r),
-                    attack: p(attack, a),
-                    release: p(release, rel),
-                    knee: p(knee, k),
-                    makeup: p(makeup, 0.0),
-                    mix: p(mix, 100.0),
-                    auto_makeup: *auto_makeup,
-                    env: 0.0,
-                    rms: 0.0,
-                    sustain: 0.0,
-                    avg_gr: 0.0,
-                    meter: next_meter(meter),
-                }))
-            }
-            BlockSpec::Rider { target, range, speed, .. } => Node::Rider(Box::new(Rider {
-                target: P::new(Some(target), -18.0, params),
-                range: P::new(Some(range), 6.0, params),
-                speed: p(speed, 300.0),
-                rms: 0.0,
-                gain_db: 0.0,
-                meter: next_meter(meter),
-            })),
-            BlockSpec::Transient { attack, sustain, .. } => Node::Transient(Box::new(Transient {
-                attack: P::new(Some(attack), 0.0, params),
-                sustain: p(sustain, 0.0),
-                fast: 0.0,
-                slow: 0.0,
-                gain_db: 0.0,
-                meter: next_meter(meter),
-            })),
-            BlockSpec::Split { freq, low, high, .. } => {
-                // Same depth-first order as `patch::chain::walk`: low, then high.
-                let low = build_nodes(low, params, meter);
-                let high = build_nodes(high, params, meter);
-                Node::Split {
-                    freq: P::new(Some(freq), 250.0, params),
-                    last: f32::NAN,
-                    lp: [Biquad::default(); 2],
-                    hp: [Biquad::default(); 2],
-                    low,
-                    high,
-                }
-            }
-        });
+    let eq = |shape: EqShape, e: &EqSpec| Node::Eq {
+        shape,
+        freq: req(&e.freq),
+        q: p(&e.q, std::f32::consts::FRAC_1_SQRT_2),
+        gain: req(&e.gain),
+        last: [f32::NAN; 3],
+        bq: Biquad::default(),
+    };
+    let filter = |shape: EqShape, f: &FilterSpec| Node::Eq {
+        shape,
+        freq: req(&f.freq),
+        q: p(&f.q, std::f32::consts::FRAC_1_SQRT_2),
+        gain: P::new(None, 0.0, params),
+        last: [f32::NAN; 3],
+        bq: Biquad::default(),
+    };
+    // Sub-chains in the same depth-first order as `patch::chain::walk`.
+    let chains = |cs: &[&Chain], meter: &mut usize| -> Vec<Vec<Node>> {
+        cs.iter().map(|c| build_nodes(&c.0, params, sr, max_frames, meter)).collect()
+    };
+    if let Some(f) = fx::build(kind, &fx::Args { params, sr, max_frames }, meter) {
+        return Node::Fx(f);
     }
-    out
+    match kind {
+        BlockKind::Gain { db } => Node::Gain { db: req(db), gain: 1.0 },
+        BlockKind::PeakEq(e) => eq(EqShape::Peak, e),
+        BlockKind::LowShelf(e) => eq(EqShape::LowShelf, e),
+        BlockKind::HighShelf(e) => eq(EqShape::HighShelf, e),
+        BlockKind::LowPass(f) => filter(EqShape::LowPass, f),
+        BlockKind::HighPass(f) => filter(EqShape::HighPass, f),
+        BlockKind::Drive { amount, mix } => Node::Drive { amount: req(amount), mix: p(mix, 100.0) },
+        BlockKind::Compressor(c) => comp(CompStyle::Clean, c, params, next_meter(meter)),
+        BlockKind::FetCompressor(c) => comp(CompStyle::Fet, c, params, next_meter(meter)),
+        BlockKind::OptoCompressor(c) => comp(CompStyle::Opto, c, params, next_meter(meter)),
+        BlockKind::Rider { target, range, speed } => Node::Rider(Box::new(Rider {
+            target: req(target),
+            range: req(range),
+            speed: p(speed, 300.0),
+            rms: 0.0,
+            gain_db: 0.0,
+            meter: next_meter(meter),
+        })),
+        BlockKind::Transient { attack, sustain } => Node::Transient(Box::new(Transient {
+            attack: req(attack),
+            sustain: p(sustain, 0.0),
+            fast: 0.0,
+            slow: 0.0,
+            gain_db: 0.0,
+            meter: next_meter(meter),
+        })),
+        BlockKind::Pan { pan } => Node::Pan { pan: req(pan), gains: [1.0; 2] },
+        BlockKind::Width { width } => Node::Width { width: req(width), w: 1.0 },
+        BlockKind::MonoBass { freq } => {
+            Node::MonoBass { freq: req(freq), last: f32::NAN, hp: Lr4::default(), ap: Biquad::default() }
+        }
+        BlockKind::Haas { delay, channel } => Node::Haas(Box::new(Haas {
+            delay: req(delay),
+            ch: match channel {
+                Side::Left => 0,
+                Side::Right => 1,
+            },
+            buf: vec![0.0; (HAAS_MAX_MS * 0.001 * sr) as usize + 2],
+            pos: 0,
+            cur: 0.0,
+        })),
+        BlockKind::Invert { channels } => Node::Invert {
+            sign: match channels {
+                Channels::Both => [-1.0, -1.0],
+                Channels::Left => [-1.0, 1.0],
+                Channels::Right => [1.0, -1.0],
+            },
+        },
+        BlockKind::DcBlock => Node::DcBlock { x1: [0.0; 2], y1: [0.0; 2] },
+        BlockKind::Meter => Node::Meter { peak: 0.0, meter: next_meter(meter) },
+        BlockKind::MidSide { .. } | BlockKind::LeftRight { .. } => {
+            let mode = if matches!(kind, BlockKind::MidSide { .. }) { SplitMode::MidSide } else { SplitMode::LeftRight };
+            let built = chains(&kind.sub_chains(), meter);
+            let (align, latency) = align(&built);
+            let [a, b]: [Vec<Node>; 2] = built.try_into().ok().expect("two sub-chains");
+            Node::Split2(Box::new(Split2 {
+                mode,
+                chains: [a, b],
+                bufs: [frame_buf(max_frames), frame_buf(max_frames)],
+                align,
+                latency,
+            }))
+        }
+        BlockKind::BandSplit { crossovers, bands } => {
+            let n = crossovers.len();
+            let bands = chains(&bands.iter().collect::<Vec<_>>(), meter);
+            let (align, latency) = align(&bands);
+            Node::BandSplit(Box::new(BandSplit {
+                freqs: crossovers.iter().map(req).collect(),
+                last: vec![f32::NAN; n],
+                lp: vec![Lr4::default(); n],
+                hp: vec![Lr4::default(); n],
+                ap: (0..=n).map(|i| vec![Biquad::default(); n.saturating_sub(i + 1)]).collect(),
+                bands,
+                bufs: (0..=n).map(|_| frame_buf(max_frames)).collect(),
+                align,
+                latency,
+            }))
+        }
+        BlockKind::Parallel { branches, mix } => {
+            let branches = chains(&branches.iter().collect::<Vec<_>>(), meter);
+            let (align, latency) = align(&branches);
+            Node::Parallel(Box::new(Parallel {
+                bufs: branches.iter().map(|_| frame_buf(max_frames)).collect(),
+                branches,
+                mix: mix.as_ref().map(req),
+                align,
+                latency,
+            }))
+        }
+        _ => unreachable!("{kind:?} is built by fx::build"),
+    }
 }
 
-fn process_nodes(nodes: &mut [Node], frames: &mut [Frame], ctx: &Ctx) {
+fn comp(style: CompStyle, c: &CompSpec, params: &[ParamSpec], meter: usize) -> Node {
+    let p = |v: &Option<Value>, d: f32| P::new(v.as_ref(), d, params);
+    let (r, a, rel, k) = match style {
+        CompStyle::Fet => (4.0, 0.3, 80.0, 2.0),
+        CompStyle::Opto => (3.0, 10.0, 250.0, 8.0),
+        CompStyle::Clean => (2.0, 5.0, 100.0, 4.0),
+    };
+    Node::Comp(Box::new(Comp {
+        style,
+        threshold: P::new(Some(&c.threshold), 0.0, params),
+        ratio: p(&c.ratio, r),
+        attack: p(&c.attack, a),
+        release: p(&c.release, rel),
+        knee: p(&c.knee, k),
+        makeup: p(&c.makeup, 0.0),
+        mix: p(&c.mix, 100.0),
+        auto_makeup: c.auto_makeup,
+        env: 0.0,
+        rms: 0.0,
+        sustain: 0.0,
+        avg_gr: 0.0,
+        meter,
+    }))
+}
+
+pub(crate) fn process_nodes(nodes: &mut [Node], frames: &mut [Frame], ctx: &Ctx) {
     for n in nodes {
         n.process(frames, ctx);
     }
 }
 
 impl Node {
+    /// Latency in samples at the rate this node runs at.
+    fn latency(&self) -> usize {
+        match self {
+            Node::Oversampled(o) => o.os.latency(),
+            Node::BandSplit(b) => b.latency,
+            Node::Parallel(p) => p.latency,
+            Node::Split2(s) => s.latency,
+            Node::Fx(f) => f.latency(),
+            _ => 0,
+        }
+    }
+
     fn process(&mut self, frames: &mut [Frame], ctx: &Ctx) {
         let sr = ctx.sr;
         match self {
@@ -282,6 +579,75 @@ impl Node {
                     f[0] *= *gain;
                     f[1] *= *gain;
                 }
+            }
+            Node::Pan { pan, gains } => {
+                // Balance: the side panned away from is attenuated, the other stays.
+                let p = (pan.update(ctx) / 100.0).clamp(-1.0, 1.0);
+                let target = [1.0 - p.max(0.0), 1.0 + p.min(0.0)];
+                let n = frames.len() as f32;
+                let step = [(target[0] - gains[0]) / n, (target[1] - gains[1]) / n];
+                for f in frames {
+                    gains[0] += step[0];
+                    gains[1] += step[1];
+                    f[0] *= gains[0];
+                    f[1] *= gains[1];
+                }
+            }
+            Node::Width { width, w } => {
+                let target = (width.update(ctx) / 100.0).max(0.0);
+                let step = (target - *w) / frames.len() as f32;
+                for f in frames {
+                    *w += step;
+                    let m = 0.5 * (f[0] + f[1]);
+                    let s = 0.5 * (f[0] - f[1]) * *w;
+                    *f = [m + s, m - s];
+                }
+            }
+            Node::MonoBass { freq, last, hp, ap } => {
+                let fr = freq.update(ctx);
+                if fr != *last {
+                    hp.set(EqShape::HighPass, fr, sr);
+                    ap.set(EqShape::AllPass, fr, std::f32::consts::FRAC_1_SQRT_2, 0.0, sr);
+                    *last = fr;
+                }
+                for f in frames {
+                    let m = ap.tick(0.5 * (f[0] + f[1]), 0);
+                    let s = hp.tick(0.5 * (f[0] - f[1]), 0);
+                    *f = [m + s, m - s];
+                }
+            }
+            Node::Haas(h) => h.process(frames, ctx),
+            Node::Invert { sign } => {
+                for f in frames {
+                    f[0] *= sign[0];
+                    f[1] *= sign[1];
+                }
+            }
+            Node::DcBlock { x1, y1 } => {
+                let r = (-std::f32::consts::TAU * 5.0 / sr).exp();
+                for f in frames {
+                    for ch in 0..2 {
+                        let x = f[ch];
+                        y1[ch] = x - x1[ch] + r * y1[ch];
+                        x1[ch] = x;
+                        f[ch] = y1[ch];
+                    }
+                }
+            }
+            Node::Meter { peak, meter } => {
+                let d = 0.25f32.powf((sr * PEAK_DECAY_MS * 0.001).recip());
+                for f in frames.iter() {
+                    *peak = (*peak * d).max(f[0].abs()).max(f[1].abs());
+                }
+                let level = ((gain_to_db(*peak) + 60.0) / 60.0).clamp(0.0, 1.0);
+                ctx.meters[*meter].store(level, Ordering::Relaxed);
+            }
+            Node::Split2(s) => s.process(frames, ctx),
+            Node::Fx(f) => f.process(frames, ctx),
+            Node::Oversampled(o) => {
+                let inner = Ctx { sr: sr * o.os.factor() as f32, ..*ctx };
+                let nodes = &mut o.inner;
+                o.os.run(frames, |buf| process_nodes(nodes, buf, &inner));
             }
             Node::Eq { shape, freq, q, gain, last, bq } => {
                 let cur = [freq.update(ctx), q.update(ctx), gain.update(ctx)];
@@ -308,31 +674,137 @@ impl Node {
             Node::Comp(c) => c.process(frames, ctx),
             Node::Rider(r) => r.process(frames, ctx),
             Node::Transient(t) => t.process(frames, ctx),
-            Node::Split { freq, last, lp, hp, low, high } => {
-                let f0 = freq.update(ctx);
-                if f0 != *last {
-                    for (l, h) in lp.iter_mut().zip(hp.iter_mut()) {
-                        l.set(EqShape::LowPass, f0, std::f32::consts::FRAC_1_SQRT_2, 0.0, sr);
-                        h.set(EqShape::HighPass, f0, std::f32::consts::FRAC_1_SQRT_2, 0.0, sr);
-                    }
-                    *last = f0;
+            Node::BandSplit(b) => b.process(frames, ctx),
+            Node::Parallel(p) => p.process(frames, ctx),
+        }
+    }
+}
+
+impl Haas {
+    fn process(&mut self, frames: &mut [Frame], ctx: &Ctx) {
+        let len = self.buf.len();
+        let max = (len - 2) as f32;
+        let target = (self.delay.update(ctx) * 0.001 * ctx.sr).clamp(0.0, max);
+        let step = (target - self.cur) / frames.len() as f32;
+        for f in frames {
+            self.cur += step;
+            self.buf[self.pos] = f[self.ch];
+            // Linear interpolation between the two samples around `pos - cur`.
+            let read = self.pos as f32 + len as f32 - self.cur;
+            let i0 = read.floor();
+            let frac = read - i0;
+            let i0 = i0 as usize % len;
+            let i1 = (i0 + 1) % len;
+            f[self.ch] = self.buf[i0] + frac * (self.buf[i1] - self.buf[i0]);
+            self.pos = (self.pos + 1) % len;
+        }
+    }
+}
+
+impl Split2 {
+    fn process(&mut self, frames: &mut [Frame], ctx: &Ctx) {
+        let n = frames.len();
+        let [a_buf, b_buf] = &mut self.bufs;
+        for (i, f) in frames.iter().enumerate() {
+            let (a, b) = match self.mode {
+                SplitMode::MidSide => (0.5 * (f[0] + f[1]), 0.5 * (f[0] - f[1])),
+                SplitMode::LeftRight => (f[0], f[1]),
+            };
+            a_buf[i] = [a, a];
+            b_buf[i] = [b, b];
+        }
+        for ((chain, buf), d) in self.chains.iter_mut().zip(self.bufs.iter_mut()).zip(&mut self.align) {
+            process_nodes(chain, &mut buf[..n], ctx);
+            d.process(&mut buf[..n]);
+        }
+        for (i, f) in frames.iter_mut().enumerate() {
+            let (a, b) = (self.bufs[0][i][0], self.bufs[1][i][0]);
+            *f = match self.mode {
+                SplitMode::MidSide => [a + b, a - b],
+                SplitMode::LeftRight => [a, b],
+            };
+        }
+    }
+}
+
+impl BandSplit {
+    fn process(&mut self, frames: &mut [Frame], ctx: &Ctx) {
+        let n = frames.len();
+        let nx = self.freqs.len();
+        // Crossovers driven by params may cross each other: keep them ascending.
+        let mut prev = 10.0f32;
+        let mut changed = false;
+        for k in 0..nx {
+            let f = self.freqs[k].update(ctx).max(prev);
+            prev = f;
+            if f != self.last[k] {
+                self.last[k] = f;
+                self.lp[k].set(EqShape::LowPass, f, ctx.sr);
+                self.hp[k].set(EqShape::HighPass, f, ctx.sr);
+                changed = true;
+            }
+        }
+        if changed {
+            for (i, aps) in self.ap.iter_mut().enumerate() {
+                for (j, ap) in aps.iter_mut().enumerate() {
+                    ap.set(EqShape::AllPass, self.last[i + 1 + j], std::f32::consts::FRAC_1_SQRT_2, 0.0, ctx.sr);
                 }
-                let n = frames.len();
-                let mut lo = [[0.0f32; 2]; SUB_BLOCK];
-                let mut hi = [[0.0f32; 2]; SUB_BLOCK];
-                for i in 0..n {
-                    for ch in 0..2 {
-                        let x = frames[i][ch];
-                        let l = lp[0].tick(x, ch);
-                        lo[i][ch] = lp[1].tick(l, ch);
-                        let h = hp[0].tick(x, ch);
-                        hi[i][ch] = hp[1].tick(h, ch);
+            }
+        }
+        for (idx, frame) in frames.iter().enumerate() {
+            for (ch, &x) in frame.iter().enumerate() {
+                let mut rest = x;
+                for k in 0..nx {
+                    let mut lo = self.lp[k].tick(rest, ch);
+                    for ap in &mut self.ap[k] {
+                        lo = ap.tick(lo, ch);
+                    }
+                    self.bufs[k][idx][ch] = lo;
+                    rest = self.hp[k].tick(rest, ch);
+                }
+                self.bufs[nx][idx][ch] = rest;
+            }
+        }
+        for ((band, buf), d) in self.bands.iter_mut().zip(self.bufs.iter_mut()).zip(&mut self.align) {
+            process_nodes(band, &mut buf[..n], ctx);
+            d.process(&mut buf[..n]);
+        }
+        for (idx, f) in frames.iter_mut().enumerate() {
+            *f = [0.0; 2];
+            for buf in &self.bufs {
+                f[0] += buf[idx][0];
+                f[1] += buf[idx][1];
+            }
+        }
+    }
+}
+
+impl Parallel {
+    fn process(&mut self, frames: &mut [Frame], ctx: &Ctx) {
+        let n = frames.len();
+        for ((branch, buf), d) in self.branches.iter_mut().zip(self.bufs.iter_mut()).zip(&mut self.align) {
+            buf[..n].copy_from_slice(frames);
+            process_nodes(branch, &mut buf[..n], ctx);
+            d.process(&mut buf[..n]);
+        }
+        match &mut self.mix {
+            Some(mix) => {
+                // Linear crossfade: the branches are correlated (same source), so
+                // an equal-power fade would bump the level by ~3 dB in the middle.
+                let m = (mix.update(ctx) / 100.0).clamp(0.0, 1.0);
+                for (idx, f) in frames.iter_mut().enumerate() {
+                    for (ch, y) in f.iter_mut().enumerate() {
+                        *y = (1.0 - m) * self.bufs[0][idx][ch] + m * self.bufs[1][idx][ch];
                     }
                 }
-                process_nodes(low, &mut lo[..n], ctx);
-                process_nodes(high, &mut hi[..n], ctx);
-                for i in 0..n {
-                    frames[i] = [lo[i][0] + hi[i][0], lo[i][1] + hi[i][1]];
+            }
+            None => {
+                for (idx, f) in frames.iter_mut().enumerate() {
+                    *f = [0.0; 2];
+                    for buf in &self.bufs {
+                        f[0] += buf[idx][0];
+                        f[1] += buf[idx][1];
+                    }
                 }
             }
         }
@@ -446,6 +918,8 @@ impl Transient {
 /// A compiled chain. Build off the audio thread, then move it to the audio thread.
 pub struct Graph {
     nodes: Vec<Node>,
+    tempo: f32,
+    beat: Option<f64>,
     controls: Vec<Control>,
     free: Atomics,
     meters: Atomics,
@@ -457,19 +931,17 @@ pub struct Graph {
 impl Graph {
     /// `free` = plain values of all params (only free ones are used).
     pub fn build(patch: &Patch, sample_rate: f32, free: &[f32]) -> Self {
+        let mut idle = Vec::new();
+        patch::chain::walk(&patch.chain, &mut |b| idle.extend(b.kind.idle_meter()));
         let mut meter = 0;
-        let nodes = build_nodes(&patch.chain, &patch.params, &mut meter);
+        let nodes = build_nodes(&patch.chain, &patch.params, sample_rate, SUB_BLOCK, &mut meter);
         debug_assert_eq!(meter, patch.meters.len(), "meter order must match patch::chain::walk");
-        // Idle meter values: comps show 0 dB reduction, gain meters sit at unity (0.5).
-        let mut idle = Vec::with_capacity(meter);
-        patch::chain::walk(&patch.chain, &mut |b| {
-            if b.has_meter() {
-                idle.push(if matches!(b, BlockSpec::Comp { .. }) { 0.0 } else { 0.5 });
-            }
-        });
+        debug_assert_eq!(meter, idle.len());
         let sub_rate = sample_rate / SUB_BLOCK as f32;
         Graph {
             nodes,
+            tempo: 120.0,
+            beat: None,
             controls: patch.controls.clone(),
             free: atomics(free.iter().copied()),
             meters: atomics(idle),
@@ -477,6 +949,22 @@ impl Graph {
             sr: sample_rate,
             k: 1.0 - coef(SETTING_SMOOTHING_MS, sub_rate),
         }
+    }
+
+    /// Host transport, once per host buffer: tempo for synced blocks
+    /// (`sync = "1/8"`; `None` keeps the last, initially 120 BPM) and the position
+    /// in beats at the buffer's first frame (`None` = not playing). The graph
+    /// advances the position itself within the buffer.
+    pub fn set_transport(&mut self, bpm: Option<f32>, beat: Option<f64>) {
+        if let Some(t) = bpm.filter(|t| t.is_finite() && *t > 1.0) {
+            self.tempo = t;
+        }
+        self.beat = beat.filter(|b| b.is_finite());
+    }
+
+    /// Latency in samples (oversampled blocks, lookahead), for the host's delay compensation.
+    pub fn latency(&self) -> usize {
+        chain_latency(&self.nodes)
     }
 
     /// Free param values (plain), writable from the editor.
@@ -498,8 +986,11 @@ impl Graph {
                 Control::Macro { slot, from, to, curve } => curve.apply(from, to, macros[slot]),
             };
         }
-        let ctx = Ctx { values: &self.values, sr: self.sr, k: self.k, meters: &self.meters };
+        let ctx = Ctx { values: &self.values, sr: self.sr, k: self.k, meters: &self.meters, tempo: self.tempo, beat: self.beat };
         process_nodes(&mut self.nodes, frames, &ctx);
+        if let Some(b) = &mut self.beat {
+            *b += frames.len() as f64 * self.tempo as f64 / 60.0 / self.sr as f64;
+        }
     }
 
     /// Convenience for offline use/tests: processes any number of frames.
@@ -517,11 +1008,12 @@ mod tests {
 
     const SR: f32 = 48_000.0;
 
-    fn patch_with(chain: &str, params: &str) -> (Patch, TempDir) {
+    /// `setup` = Lua statements (e.g. params), `chain` = the blocks of the chain.
+    fn patch_with(chain: &str, setup: &str) -> (Patch, TempDir) {
         let d = TempDir::new();
         std::fs::write(
-            d.0.join("patch.lua"),
-            format!("return {{ name = 'T', params = {{ {params} }}, chain = {{ {chain} }} }}"),
+            d.0.join("patch.luau"),
+            format!("{setup}\nreturn Patch.new('T', {{ chain = Chain.new {{ {chain} }} }})"),
         )
         .unwrap();
         (Patch::load(&d.0).unwrap(), d)
@@ -562,30 +1054,68 @@ mod tests {
         10.0 * ms.log10()
     }
 
-    fn run(chain: &str, params: &str, input: &mut [Frame]) -> Graph {
-        let (p, _d) = patch_with(chain, params);
+    fn run(chain: &str, setup: &str, input: &mut [Frame]) -> Graph {
+        let (p, _d) = patch_with(chain, setup);
         let mut g = Graph::build(&p, SR, &p.default_param_values());
         g.process_all(&[0.0; MACRO_SLOTS], input);
         g
     }
 
+    /// Level change (dB) of a sine through `chain`, measured after settling.
+    fn gain_through(chain: &str, freq: f32) -> f32 {
+        let mut x = sine(freq, -12.0, 0.5);
+        let reference = tail_db(&x, 0.2);
+        run(chain, "", &mut x);
+        tail_db(&x, 0.2) - reference
+    }
+
     #[test]
-    fn crossover_sums_flat() {
+    fn two_band_split_sums_flat() {
         for freq in [60.0, 250.0, 1000.0, 5000.0] {
-            let mut x = sine(freq, -12.0, 0.5);
-            let reference = tail_db(&x, 0.2);
-            run("split('s', { freq = 250, low = {}, high = {} })", "", &mut x);
-            let diff = tail_db(&x, 0.2) - reference;
+            let diff = gain_through("Blocks.BandSplit.new('s', { crossovers = { 250 }, bands = { Chain.new(), Chain.new() } })", freq);
             assert!(diff.abs() < 0.05, "{freq} Hz: {diff} dB");
         }
     }
 
     #[test]
+    fn four_band_split_sums_flat() {
+        let chain = "Blocks.BandSplit.new('s', { crossovers = { 120, 800, 4000 },
+            bands = { Chain.new(), Chain.new(), Chain.new(), Chain.new() } })";
+        for freq in [40.0, 120.0, 300.0, 800.0, 2000.0, 4000.0, 9000.0] {
+            let diff = gain_through(chain, freq);
+            assert!(diff.abs() < 0.05, "{freq} Hz: {diff} dB");
+        }
+    }
+
+    #[test]
+    fn band_split_processes_bands_separately() {
+        // Mute the middle band of three: 800 Hz (between 200 and 3000) disappears,
+        // 50 Hz and 12 kHz stay.
+        let chain = "Blocks.BandSplit.new('s', { crossovers = { 200, 3000 },
+            bands = { Chain.new(), Chain.new { Blocks.Gain.new('mute', { db = -120 }) }, Chain.new() } })";
+        assert!(gain_through(chain, 800.0) < -20.0);
+        assert!(gain_through(chain, 50.0).abs() < 0.5);
+        assert!(gain_through(chain, 12000.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn parallel_sums_or_crossfades() {
+        let dry = "Chain.new()";
+        let quiet = "Chain.new { Blocks.Gain.new('g', { db = -6.0206 }) }";
+        // Sum of dry + half = 1.5x.
+        let sum = gain_through(&format!("Blocks.Parallel.new('p', {{ branches = {{ {dry}, {quiet} }} }})"), 1000.0);
+        assert!((sum - 20.0 * 1.5f32.log10()).abs() < 0.05, "sum {sum}");
+        // Mix 0 % = first branch, 100 % = second, 50 % = halfway (0.75x).
+        for (mix, expect) in [(0.0, 1.0f32), (100.0, 0.5), (50.0, 0.75)] {
+            let g = gain_through(&format!("Blocks.Parallel.new('p', {{ mix = {mix}, branches = {{ {dry}, {quiet} }} }})"), 1000.0);
+            assert!((g - 20.0 * expect.log10()).abs() < 0.05, "mix {mix}: {g}");
+        }
+    }
+
+    #[test]
     fn peak_eq_boosts_at_center() {
-        let mut x = sine(1000.0, -20.0, 0.5);
-        let reference = tail_db(&x, 0.2);
-        run("eq('e', { type = 'peak', freq = 1000, q = 1, gain = 6 })", "", &mut x);
-        assert!((tail_db(&x, 0.2) - reference - 6.0).abs() < 0.1);
+        let g = gain_through("Blocks.PeakEq.new('e', { freq = 1000, q = 1, gain = 6 })", 1000.0);
+        assert!((g - 6.0).abs() < 0.1);
     }
 
     #[test]
@@ -593,7 +1123,7 @@ mod tests {
         // Sine peak at -6 dBFS, threshold -20, ratio 4, hard knee → ~10.5 dB GR.
         let mut x = sine(1000.0, -6.0, 1.0);
         let reference = tail_db(&x, 0.3);
-        let g = run("comp('c', { style = 'fet', threshold = -20, ratio = 4, knee = 0 })", "", &mut x);
+        let g = run("Blocks.FETCompressor.new('c', { threshold = -20, ratio = 4, knee = 0 })", "", &mut x);
         let gr = reference - tail_db(&x, 0.3);
         assert!((gr - 10.5).abs() < 1.0, "gr {gr}");
         let meter = g.meters()[0].load(Ordering::Relaxed) * 24.0;
@@ -604,24 +1134,22 @@ mod tests {
     fn rider_lifts_quiet_signal_within_range() {
         let mut x = sine(100.0, -30.0, 4.0);
         let reference = tail_db(&x, 0.5);
-        run("rider('r', { target = -18, range = 6, speed = 100 })", "", &mut x);
+        run("Blocks.Rider.new('r', { target = -18, range = 6, speed = 100 })", "", &mut x);
         let lift = tail_db(&x, 0.5) - reference;
         assert!((lift - 6.0).abs() < 0.5, "lift {lift}");
     }
 
     #[test]
     fn param_refs_follow_macros() {
-        let (p, _d) = {
-            let d = TempDir::new();
-            std::fs::write(
-                d.0.join("patch.lua"),
-                "return { name = 'T', params = { { id = 'g', name = 'G', min = -24, max = 0 } },
-                  macros = { { id = 'm', name = 'M', targets = { { param = 'g' } } } },
-                  chain = { gain('out', { db = 'param.g' }) } }",
-            )
-            .unwrap();
-            (Patch::load(&d.0).unwrap(), d)
-        };
+        let d = TempDir::new();
+        std::fs::write(
+            d.0.join("patch.luau"),
+            "local g = Param.new('g', 'G', { min = -24, max = 0 })
+             local m = Macro.new('m', 'M'):drives(g)
+             return Patch.new('T', { chain = Chain.new { Blocks.Gain.new('out', { db = g }) }, macros = { m } })",
+        )
+        .unwrap();
+        let p = Patch::load(&d.0).unwrap();
         let mut g = Graph::build(&p, SR, &p.default_param_values());
         let mut macros = [0.0; MACRO_SLOTS];
         macros[0] = 0.5; // -12 dB
@@ -632,10 +1160,252 @@ mod tests {
     }
 
     #[test]
+    fn meters_follow_walk_order_through_sub_chains() {
+        let (p, _d) = patch_with(
+            "Blocks.Parallel.new('p', { branches = {
+               Chain.new { Blocks.Compressor.new('a', { threshold = -10 }) },
+               Chain.new { Blocks.Rider.new('b', { target = -18, range = 3 }) } } }),
+             Blocks.Transient.new('c', { attack = 0 })",
+            "",
+        );
+        assert_eq!(p.meters, ["a", "b", "c"]);
+        let g = Graph::build(&p, SR, &p.default_param_values());
+        let idle: Vec<f32> = g.meters().iter().map(|m| m.load(Ordering::Relaxed)).collect();
+        assert_eq!(idle, [0.0, 0.5, 0.5]);
+    }
+
+    /// Runs a stereo signal through `chain` (no setup), returns the output.
+    fn through(chain: &str, mut x: Vec<Frame>) -> Vec<Frame> {
+        run(chain, "", &mut x);
+        x
+    }
+
+    fn peak(x: &[Frame], ch: usize) -> f32 {
+        x.iter().fold(0.0f32, |p, f| p.max(f[ch].abs()))
+    }
+
+    #[test]
+    fn pan_attenuates_the_other_side() {
+        let x = sine(1000.0, -6.0, 0.2);
+        let y = through("Blocks.Pan.new('p', { pan = 100 })", x.clone());
+        assert!(peak(&y[4800..], 0) < 1e-6 && (peak(&y[4800..], 1) - peak(&x, 1)).abs() < 1e-4);
+        let y = through("Blocks.Pan.new('p', { pan = -50 })", x.clone());
+        assert!((peak(&y[4800..], 1) / peak(&x, 1) - 0.5).abs() < 1e-3);
+        assert!((peak(&y[4800..], 0) - peak(&x, 0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn width_scales_the_side_signal() {
+        // Left only = mid x/2 + side x/2.
+        let x: Vec<Frame> = sine(1000.0, -6.0, 0.2).into_iter().map(|f| [f[0], 0.0]).collect();
+        let mono = through("Blocks.Width.new('w', { width = 0 })", x.clone());
+        assert!(mono[4800..].iter().all(|f| (f[0] - f[1]).abs() < 1e-6));
+        let same = through("Blocks.Width.new('w', { width = 100 })", x.clone());
+        assert!(same.iter().zip(&x).all(|(a, b)| (a[0] - b[0]).abs() < 1e-6 && a[1].abs() < 1e-6));
+        let wide = through("Blocks.Width.new('w', { width = 200 })", x.clone());
+        let a = peak(&x, 0);
+        assert!((peak(&wide[4800..], 0) - 1.5 * a).abs() < 1e-3 && (peak(&wide[4800..], 1) - 0.5 * a).abs() < 1e-3);
+    }
+
+    #[test]
+    fn mono_bass_removes_low_side_only() {
+        let left_only = |freq| sine(freq, -6.0, 0.5).into_iter().map(|f| [f[0], 0.0]).collect::<Vec<Frame>>();
+        let chain = "Blocks.MonoBass.new('m', { freq = 200 })";
+        let low = through(chain, left_only(40.0));
+        let tail = &low[12_000..];
+        let diff = tail.iter().fold(0.0f32, |p, f| p.max((f[0] - f[1]).abs()));
+        assert!(diff < 0.02 * peak(tail, 0), "40 Hz side left: {diff}");
+        let high = through(chain, left_only(3000.0));
+        // Above the cutoff the image is unchanged: the right channel stays silent.
+        let leak = gain_to_db(peak(&high[12_000..], 1)) + 6.0;
+        assert!(leak < -60.0, "3 kHz leaks into the right channel: {leak} dB");
+        assert!((peak(&high[12_000..], 0) - db_to_gain(-6.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn haas_delays_one_channel() {
+        let mut x = vec![[0.0f32; 2]; 2000];
+        x[100] = [1.0, 1.0];
+        let y = through("Blocks.Haas.new('h', { delay = 10 })", x);
+        assert_eq!(y[100], [1.0, 0.0]);
+        assert!((y[580][1] - 1.0).abs() < 1e-6, "{:?}", &y[578..583]);
+        let mut x = vec![[0.0f32; 2]; 2000];
+        x[0] = [1.0, 1.0];
+        let y = through("Blocks.Haas.new('h', { delay = 1, channel = 'left' })", x);
+        assert_eq!(y[0], [0.0, 1.0]);
+        assert!((y[48][0] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn invert_and_dc_block() {
+        let y = through("Blocks.Invert.new('i', { channels = 'left' })", vec![[0.5, 0.5]; 64]);
+        assert!(y.iter().all(|f| *f == [-0.5, 0.5]));
+        let y = through("Blocks.Invert.new('i')", vec![[0.5, 0.25]; 64]);
+        assert!(y.iter().all(|f| *f == [-0.5, -0.25]));
+        let y = through("Blocks.DCBlock.new('dc')", vec![[0.5, -0.5]; 48_000]);
+        assert!(peak(&y[24_000..], 0) < 1e-3 && peak(&y[24_000..], 1) < 1e-3);
+    }
+
+    #[test]
+    fn meter_block_reports_peak_level() {
+        let mut x = sine(1000.0, -6.0, 0.5);
+        let g = run("Blocks.Gain.new('g', { db = -12 }), Blocks.Meter.new('m')", "", &mut x);
+        let level = g.meters()[0].load(Ordering::Relaxed);
+        assert!((level - (-18.0 + 60.0) / 60.0).abs() < 0.01, "{level}");
+    }
+
+    #[test]
+    fn mid_side_and_left_right_run_their_own_chains() {
+        let x: Vec<Frame> = sine(1000.0, -6.0, 0.2).into_iter().map(|f| [f[0], 0.3 * f[0]]).collect();
+        let mute = "Chain.new { Blocks.Gain.new('mute', { db = -200 }) }";
+        let y = through(&format!("Blocks.MidSide.new('ms', {{ side = {mute} }})"), x.clone());
+        assert!(y[4800..].iter().all(|f| (f[0] - f[1]).abs() < 1e-5), "side muted = mono");
+        let y = through(&format!("Blocks.LeftRight.new('lr', {{ right = {mute} }})"), x.clone());
+        assert!(peak(&y[4800..], 1) < 1e-6);
+        assert!(y.iter().zip(&x).all(|(a, b)| (a[0] - b[0]).abs() < 1e-6));
+        // Empty chains: transparent.
+        let y = through("Blocks.MidSide.new('ms', { mid = Chain.new() })", x.clone());
+        assert!(y.iter().zip(&x).all(|(a, b)| (a[0] - b[0]).abs() < 1e-5 && (a[1] - b[1]).abs() < 1e-5));
+    }
+
+    fn latency(chain: &str, sr: f32) -> usize {
+        let d = TempDir::new();
+        std::fs::write(d.0.join("patch.luau"), format!("return Patch.new('T', {{ chain = Chain.new {{ {chain} }} }})")).unwrap();
+        let p = Patch::load(&d.0).unwrap();
+        Graph::build(&p, sr, &p.default_param_values()).latency()
+    }
+
+    #[test]
+    fn nonlinear_blocks_are_oversampled_automatically() {
+        let two = latency("Blocks.Gain.new('g', { db = 0, oversampling = 2 })", 48_000.0);
+        assert!(two > 0 && two < 48, "2x latency {two}");
+        assert_eq!(latency("Blocks.Drive.new('d', { amount = 12 })", 48_000.0), two);
+        assert_eq!(latency("Blocks.Drive.new('d', { amount = 12 })", 44_100.0), two);
+        assert_eq!(latency("Blocks.Drive.new('d', { amount = 12 })", 96_000.0), 0);
+        assert_eq!(latency("Blocks.Drive.new('d', { amount = 12, oversampling = 1 })", 48_000.0), 0);
+        assert_eq!(latency("Blocks.Gain.new('g', { db = 0 })", 48_000.0), 0);
+        // Neighbours share one up/down pair, also across a block without its own
+        // setting; an explicit `oversampling = 1` in between splits them.
+        assert_eq!(latency("Blocks.Drive.new('a', { amount = 6 }), Blocks.Drive.new('b', { amount = 6 })", 48_000.0), two);
+        assert_eq!(
+            latency("Blocks.Drive.new('a', { amount = 6 }), Blocks.LowPass.new('lp', { freq = 5000 }), Blocks.Drive.new('b', { amount = 6 })", 48_000.0),
+            two
+        );
+        assert_eq!(
+            latency("Blocks.Drive.new('a', { amount = 6 }), Blocks.Gain.new('g', { db = 0, oversampling = 1 }), Blocks.Drive.new('b', { amount = 6 })", 48_000.0),
+            2 * two
+        );
+        assert!(latency("Blocks.Drive.new('a', { amount = 6 }), Blocks.Drive.new('b', { amount = 6, oversampling = 4 })", 48_000.0) > two);
+        // Inside an oversampled block, Drive already runs at 96 kHz.
+        assert_eq!(
+            latency("Blocks.MidSide.new('ms', { oversampling = 2, mid = Chain.new { Blocks.Drive.new('d', { amount = 6 }) } })", 48_000.0),
+            two
+        );
+        // Parallel: the longest branch.
+        assert_eq!(
+            latency("Blocks.Parallel.new('p', { branches = { Chain.new(), Chain.new { Blocks.Drive.new('d', { amount = 6 }) } } })", 48_000.0),
+            two
+        );
+    }
+
+    #[test]
+    fn reported_latency_matches_the_signal() {
+        for chain in [
+            "Blocks.Gain.new('g', { db = 0, oversampling = 2 })",
+            "Blocks.Gain.new('g', { db = 0, oversampling = 8 })",
+            "Blocks.Parallel.new('p', { mix = 50, branches = { Chain.new(), Chain.new { Blocks.Gain.new('g', { db = 0, oversampling = 4 }) } } })",
+            "Blocks.MidSide.new('ms', { oversampling = 2, side = Chain.new { Blocks.Gain.new('g', { db = 0, oversampling = 4 }) } })",
+        ] {
+            let lat = latency(chain, SR);
+            let mut x = vec![[0.0f32; 2]; 2048];
+            x[100] = [1.0, 1.0];
+            let y = through(chain, x);
+            let peak_at = y.iter().enumerate().max_by(|a, b| a.1[0].abs().total_cmp(&b.1[0].abs())).unwrap().0;
+            assert_eq!(peak_at, 100 + lat, "{chain}");
+            // A band-limited impulse peaks a little below 1 (its energy spreads).
+            assert!(y[peak_at][0] > 0.9, "{chain}: peak {}", y[peak_at][0]);
+        }
+    }
+
+    #[test]
+    fn branches_with_different_latency_are_aligned() {
+        // Dry + the same signal through an oversampled (= delayed) branch: without
+        // compensation this would comb-filter (cancel at some frequencies).
+        let os = "Chain.new { Blocks.Gain.new('g', { db = 0, oversampling = 2 }) }";
+        let par = format!("Blocks.Parallel.new('p', {{ branches = {{ Chain.new(), {os} }} }})");
+        let split = format!("Blocks.BandSplit.new('s', {{ crossovers = {{ 1000 }}, bands = {{ Chain.new(), {os} }} }})");
+        let ms = format!("Blocks.MidSide.new('ms', {{ side = {os} }})");
+        for freq in [100.0, 1000.0, 5000.0, 10_000.0, 15_000.0] {
+            let sum = gain_through(&par, freq);
+            assert!((sum - 6.0206).abs() < 0.05, "parallel {freq} Hz: {sum}");
+            let flat = gain_through(&split, freq);
+            assert!(flat.abs() < 0.05, "band split {freq} Hz: {flat}");
+        }
+        // Mid/side with a stereo signal: L and R come back unchanged (just delayed).
+        let x: Vec<Frame> = sine(3000.0, -6.0, 0.2).into_iter().map(|f| [f[0], 0.3 * f[0]]).collect();
+        let lat = latency(&ms, SR);
+        let y = through(&ms, x.clone());
+        for i in 4800..x.len() {
+            assert!((y[i][0] - x[i - lat][0]).abs() < 1e-3 && (y[i][1] - x[i - lat][1]).abs() < 1e-3, "frame {i}");
+        }
+    }
+
+    #[test]
+    fn oversampling_keeps_linear_blocks_transparent() {
+        for os in [2, 4, 8] {
+            let g = gain_through(&format!("Blocks.PeakEq.new('e', {{ freq = 1000, q = 1, gain = 6, oversampling = {os} }})"), 1000.0);
+            assert!((g - 6.0).abs() < 0.1, "{os}x: {g}");
+        }
+    }
+
+    /// Level (dB re full scale) of `freq` in the left channel (Goertzel, Hann window).
+    fn tone_db(x: &[Frame], freq: f32) -> f32 {
+        let w = std::f32::consts::TAU * freq / SR;
+        let c = 2.0 * w.cos() as f64;
+        let (mut s1, mut s2) = (0.0f64, 0.0f64);
+        let n = x.len();
+        for (i, f) in x.iter().enumerate() {
+            let win = 0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / n as f64).cos();
+            let s0 = f[0] as f64 * win + c * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        let power = s1 * s1 + s2 * s2 - c * s1 * s2;
+        (20.0 * (power.sqrt() / (n as f64 / 4.0)).log10()) as f32
+    }
+
+    #[test]
+    fn oversampled_drive_aliases_far_less() {
+        // 7.5 kHz driven hard: the 5th harmonic (37.5 kHz) folds to 10.5 kHz at 48 kHz.
+        let alias = |opts: &str| {
+            let d = TempDir::new();
+            std::fs::write(
+                d.0.join("patch.luau"),
+                format!("return Patch.new('T', {{ chain = Chain.new {{ Blocks.Drive.new('d', {{ amount = 24 {opts} }}) }} }})"),
+            )
+            .unwrap();
+            let p = Patch::load(&d.0).unwrap();
+            let mut g = Graph::build(&p, SR, &p.default_param_values());
+            let mut x = sine(7500.0, -6.0, 0.5);
+            g.process_all(&[0.0; MACRO_SLOTS], &mut x);
+            tone_db(&x[4800..], 10_500.0)
+        };
+        let plain = alias(", oversampling = 1");
+        let auto = alias("");
+        let os4 = alias(", oversampling = 4");
+        eprintln!("alias at 10.5 kHz: 1x {plain:.1} dB, auto (2x) {auto:.1} dB, 4x {os4:.1} dB");
+        assert!(plain > -40.0, "1x should alias audibly: {plain}");
+        // ~38 dB better. 4x isn't better than 2x *here*: the 27th harmonic
+        // (202.5 kHz) folds onto 10.5 kHz at both 96 and 192 kHz.
+        assert!(auto < plain - 30.0, "2x: {auto} vs {plain}");
+        assert!(os4 < plain - 30.0, "4x: {os4} vs {plain}");
+    }
+
+    #[test]
     fn bundled_patches_build() {
         let root = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../patches"));
         for dir in patch::discover(&root) {
-            let p = Patch::load(&dir).unwrap();
+            let p = Patch::load(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
             let mut g = Graph::build(&p, SR, &p.default_param_values());
             let mut x = sine(110.0, -12.0, 0.2);
             g.process_all(&[0.5; MACRO_SLOTS], &mut x);

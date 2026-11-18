@@ -1,39 +1,34 @@
 //! Patch model + sandboxed Lua loader.
 //!
-//! A patch is a folder containing `patch.lua` (returns a table) and whatever
-//! assets it references (e.g. `panel.svg`). Lua only *describes* the patch:
+//! A patch is a folder containing `patch.luau` (Luau) plus the UI files it
+//! `require`s (components, see the `ui-components` crate). Lua only *describes*
+//! the patch, using the API from `prelude.luau` (runtime: [`runtime`]):
 //!
-//! - `params`: the patch's internal controls (unlimited). The UI and DSP use these.
-//! - `macros`: up to [`MACRO_SLOTS`] host-automatable controls. Each macro drives one
-//!   or more params, each with its own range and curve (Ableton-rack style).
-//!   A param driven by a macro is "locked" to it; all others are free and keep
-//!   their own value (persisted with the host project, but not automatable).
-//! - `chain`: the effect chain as data (blocks + band splits, see [`chain`]).
-//!   Compiled to native DSP by the `dsp` crate; Lua never runs on the audio thread.
-//! - `theme` and the `control_panel` (SVG + declarative bindings).
-//!
-//! The one exception is the optional `control_panel.animate(state)` function, which runs once
-//! per UI frame on the UI thread (never on the audio thread).
+//! - `Param.new(id, name, {...})`: internal controls (unlimited). Blocks and macros
+//!   reference them as objects; the patch collects every param it reaches.
+//! - `Macro.new(id, name, {...}):drives(param, {...})`: up to [`MACRO_SLOTS`]
+//!   host-automatable controls. Each drives one or more params with its own range
+//!   and curve (Ableton-rack style). A param driven by a macro is "locked" to it;
+//!   all others are free and keep their own value (persisted with the host project).
+//! - `Chain.new { Blocks.<Type>.new(id, {...}), ... }`: the effect chain (see [`chain`]),
+//!   compiled to native DSP by the `dsp` crate. Lua never runs on the audio thread.
+//! - `Patch.new(name, { chain, macros, theme, author, panel })` is what `patch.luau` returns;
+//!   `panel` is the root component instance of the ControlPanel.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 pub mod chain;
 pub mod locale;
+pub mod runtime;
 pub use chain::BlockSpec;
 
-use mlua::{Function, HookTriggers, Lua, LuaOptions, LuaSerdeExt, StdLib, Table, VmState};
+use mlua::{Lua, LuaSerdeExt};
 use serde::Deserialize;
 
 /// Number of host-automatable macro slots the plugin exposes.
 pub const MACRO_SLOTS: usize = 16;
 
-/// Instruction budget per Lua call (load or one animate frame).
-const INSTRUCTION_BUDGET: u32 = 200_000;
-const HOOK_GRANULARITY: u32 = 1_000;
-const MEMORY_LIMIT: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PatchError {
@@ -62,7 +57,7 @@ pub struct ParamSpec {
     pub default: Option<f32>,
     #[serde(default)]
     pub unit: String,
-    #[serde(default = "two")]
+    #[serde(default = "two", deserialize_with = "whole_number")]
     pub decimals: usize,
 }
 
@@ -71,6 +66,25 @@ fn one() -> f32 {
 }
 fn two() -> usize {
     2
+}
+
+/// An optional [`whole_number`].
+pub(crate) fn opt_whole_number<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
+    match Option::<f64>::deserialize(d)? {
+        None => Ok(None),
+        Some(v) if v >= 0.0 && v.fract() == 0.0 && v <= u32::MAX as f64 => Ok(Some(v as u32)),
+        Some(v) => Err(serde::de::Error::custom(format!("expected a whole number, got {v}"))),
+    }
+}
+
+/// Luau has only floating-point numbers: accept `2.0` for integer fields.
+fn whole_number<'de, D: serde::Deserializer<'de>>(d: D) -> Result<usize, D::Error> {
+    let v = f64::deserialize(d)?;
+    if v >= 0.0 && v.fract() == 0.0 {
+        Ok(v as usize)
+    } else {
+        Err(serde::de::Error::custom(format!("expected a whole number, got {v}")))
+    }
 }
 
 impl ParamSpec {
@@ -83,8 +97,10 @@ impl ParamSpec {
     pub fn plain(&self, normalized: f32) -> f32 {
         self.min + normalized.clamp(0.0, 1.0) * (self.max - self.min)
     }
+    /// `"6.0 dB"`, `"40%"`, `"4.0:1"`: a space only before units that start with a letter.
     pub fn display_plain(&self, plain: f32) -> String {
-        format!("{:.*}{}", self.decimals, plain, self.unit)
+        let sep = if self.unit.starts_with(|c: char| c.is_alphabetic()) { " " } else { "" };
+        format!("{:.*}{sep}{}", self.decimals, plain, self.unit)
     }
     pub fn display(&self, normalized: f32) -> String {
         self.display_plain(self.plain(normalized))
@@ -152,7 +168,7 @@ pub enum Control {
     Macro { slot: usize, from: f32, to: f32, curve: Curve },
 }
 
-/// Where a binding gets its value from.
+/// A value the UI can read: what a component's `bind` / `source` string resolves to.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Source {
     /// Normalized 0..1 macro value (slot index).
@@ -163,140 +179,17 @@ pub enum Source {
     MeterIn,
     MeterOut,
     /// Meter of a chain block (index into [`Patch::meters`]), 0..1:
-    /// comp = gain reduction 0..24 dB; rider/transient = gain, 0.5 = unity.
+    /// compressors = gain reduction 0..24 dB; rider/transient = gain, 0.5 = unity.
     Block(usize),
-    /// Seconds since the editor opened.
-    Time,
-    /// Value returned by the patch's `control_panel.animate` function.
-    Var(String),
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-pub enum Pivot {
-    /// Center of the bounding box of the element with this id.
-    Element(String),
-    Point([f32; 2]),
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum Axis {
-    #[default]
-    Both,
-    X,
-    Y,
-}
-
-/// Declarative UI bindings. `from`/`to` are what a source value of 0 and 1 map to.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Binding {
-    Rotate {
-        id: String,
-        source: String,
-        from: f32,
-        to: f32,
-        pivot: Option<Pivot>,
-    },
-    Translate {
-        id: String,
-        source: String,
-        from: [f32; 2],
-        to: [f32; 2],
-    },
-    Scale {
-        id: String,
-        source: String,
-        #[serde(default)]
-        from: f32,
-        #[serde(default = "one")]
-        to: f32,
-        #[serde(default)]
-        axis: Axis,
-        pivot: Option<Pivot>,
-    },
-    Opacity {
-        id: String,
-        source: String,
-        #[serde(default)]
-        from: f32,
-        #[serde(default = "one")]
-        to: f32,
-    },
-    /// Colors are `#rrggbb` or `$themekey`.
-    Fill {
-        id: String,
-        source: String,
-        from: String,
-        to: String,
-    },
-    /// Param sources (and single-target macros) render with the param's
-    /// unit/decimals; others use `format` (printf subset: `%.Nf`, `%d`, `%%`).
-    Text {
-        id: String,
-        source: String,
-        format: Option<String>,
-    },
-    /// Vertical drag on this element edits `target` (`macro.<id>` or `param.<id>`).
-    Drag {
-        id: String,
-        target: String,
-        /// SVG units for a full 0..1 sweep.
-        #[serde(default = "default_drag_range")]
-        range: f32,
-    },
-}
-
-fn default_drag_range() -> f32 {
-    200.0
-}
-
-impl Binding {
-    pub fn element_id(&self) -> &str {
-        match self {
-            Binding::Rotate { id, .. }
-            | Binding::Translate { id, .. }
-            | Binding::Scale { id, .. }
-            | Binding::Opacity { id, .. }
-            | Binding::Fill { id, .. }
-            | Binding::Text { id, .. }
-            | Binding::Drag { id, .. } => id,
-        }
-    }
-    pub fn source(&self) -> Option<&str> {
-        match self {
-            Binding::Rotate { source, .. }
-            | Binding::Translate { source, .. }
-            | Binding::Scale { source, .. }
-            | Binding::Opacity { source, .. }
-            | Binding::Fill { source, .. }
-            | Binding::Text { source, .. } => Some(source),
-            Binding::Drag { .. } => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Theme(pub BTreeMap<String, String>);
 
 impl Theme {
-    /// Resolves `$key` references; anything else is returned unchanged.
-    pub fn resolve<'a>(&'a self, color: &'a str) -> &'a str {
-        match color.strip_prefix('$') {
-            Some(key) => self.0.get(key).map(String::as_str).unwrap_or("#ff00ff"),
-            None => color,
-        }
-    }
     pub fn get(&self, key: &str) -> Option<&str> {
         self.0.get(key).map(String::as_str)
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct ControlPanelSpec {
-    pub svg: PathBuf,
-    pub bindings: Vec<Binding>,
 }
 
 /// Everything a UI needs for one frame.
@@ -310,7 +203,6 @@ pub struct Values {
     /// Block meters, index = [`Patch::meters`].
     pub blocks: Vec<f32>,
     pub time: f32,
-    pub vars: HashMap<String, f32>,
 }
 
 impl Values {
@@ -321,8 +213,6 @@ impl Values {
             Source::MeterIn => self.meter_in,
             Source::MeterOut => self.meter_out,
             Source::Block(i) => self.blocks.get(*i).copied().unwrap_or(0.0),
-            Source::Time => self.time,
-            Source::Var(name) => self.vars.get(name).copied().unwrap_or(0.0),
         }
     }
 }
@@ -336,110 +226,34 @@ pub struct Patch {
     /// One entry per param.
     pub controls: Vec<Control>,
     pub chain: Vec<BlockSpec>,
-    /// Ids of metered chain blocks (comp/rider/transient), in DSP meter-slot order.
+    /// Ids of metered chain blocks (compressors/rider/transient), in DSP meter-slot order.
     pub meters: Vec<String>,
     pub theme: Theme,
-    pub control_panel: Option<ControlPanelSpec>,
-    animator: Option<Animator>,
+    /// `Patch.new` got a `panel` (the component UI, built by `ui_components::Ui`).
+    pub has_panel: bool,
 }
-
-struct Animator {
-    lua: Lua,
-    func: Function,
-    used: Arc<AtomicU32>,
-}
-
-const PRELUDE: &str = r#"
-local function binding(kind)
-  return function(id, opts)
-    local t = opts or {}
-    t.kind = kind
-    t.id = id
-    return t
-  end
-end
-rotate    = binding("rotate")
-translate = binding("translate")
-scale     = binding("scale")
-opacity   = binding("opacity")
-fill      = binding("fill")
-text      = binding("text")
-drag      = binding("drag")
-
--- chain blocks
-gain      = binding("gain")
-eq        = binding("eq")
-drive     = binding("drive")
-comp      = binding("comp")
-rider     = binding("rider")
-transient = binding("transient")
-split     = binding("split")
-"#;
 
 impl Patch {
-    /// Loads `<dir>/patch.lua`.
+    /// Loads `<dir>/patch.luau` for the DSP side: evaluates it (including the UI
+    /// files it requires, but without rendering anything) and turns the returned
+    /// `Patch` object into plain data via the prelude's export function.
     pub fn load(dir: impl AsRef<Path>) -> Result<Self, PatchError> {
-        let _c = locale::CNumeric::enter();
         let dir = dir.as_ref().to_path_buf();
-        let src = std::fs::read_to_string(dir.join("patch.lua"))?;
-        let (lua, used) = sandboxed_lua()?;
-        lua.load(PRELUDE).set_name("prelude").exec()?;
+        let rt = runtime::Runtime::new(&dir)?;
+        let patch = rt.eval_patch()?;
+        let root = rt.export(&patch)?;
+        let lua = &rt.lua;
 
-        used.store(0, Ordering::Relaxed);
-        let root: Table = lua.load(&src).set_name("patch.lua").eval()?;
-
+        let has_panel = !patch.get::<mlua::Value>("panel")?.is_nil();
         let name: String = root.get("name")?;
         let author: Option<String> = root.get("author")?;
-        let params: Vec<ParamSpec> = opt_from_lua(&lua, root.get("params")?)?;
-        let macros: Vec<MacroSpec> = opt_from_lua(&lua, root.get("macros")?)?;
-        let theme = Theme(opt_from_lua(&lua, root.get("theme")?)?);
-
-        let mut animator = None;
-        let ui = match root.get::<Option<Table>>("control_panel")? {
-            None => None,
-            Some(ui) => {
-                let svg: String = ui.get("svg")?;
-                let svg = resolve_inside(&dir, &svg)?;
-                let bindings: Vec<Binding> = opt_from_lua(&lua, ui.get("bindings")?)?;
-                animator = ui.get::<Option<Function>>("animate")?;
-                Some(ControlPanelSpec { svg, bindings })
-            }
-        };
-
+        let params: Vec<ParamSpec> = opt_from_lua(lua, root.get("params")?)?;
+        let macros: Vec<MacroSpec> = opt_from_lua(lua, root.get("macros")?)?;
+        let theme = Theme(opt_from_lua(lua, root.get("theme")?)?);
         let controls = resolve_controls(&params, &macros)?;
-        let chain: Vec<BlockSpec> = opt_from_lua(&lua, root.get("chain")?)?;
+        let chain: Vec<BlockSpec> = opt_from_lua(lua, root.get("chain")?)?;
         let meters = chain::validate(&chain, &params)?;
-        let patch = Patch {
-            name,
-            author,
-            dir,
-            params,
-            macros,
-            controls,
-            chain,
-            meters,
-            theme,
-            control_panel: ui,
-            animator: animator.map(|func| Animator { lua, func, used }),
-        };
-        patch.validate_bindings()?;
-        Ok(patch)
-    }
-
-    fn validate_bindings(&self) -> Result<(), PatchError> {
-        let Some(ui) = &self.control_panel else { return Ok(()) };
-        for b in &ui.bindings {
-            if let Some(src) = b.source() {
-                self.resolve_source(src)?;
-            }
-            if let Binding::Drag { target, .. } = b {
-                match self.resolve_source(target)? {
-                    Source::Macro(_) | Source::Param(_) => {}
-                    _ => return Err(invalid(format!("drag target '{target}' must be macro.* or param.*"))),
-                }
-            }
-        }
-        Ok(())
+        Ok(Patch { name, author, dir, params, macros, controls, chain, meters, theme, has_panel })
     }
 
     pub fn macro_index(&self, id: &str) -> Option<usize> {
@@ -458,8 +272,6 @@ impl Patch {
             Some(("meter", "in")) => Source::MeterIn,
             Some(("meter", "out")) => Source::MeterOut,
             Some(("meter", id)) => Source::Block(self.meters.iter().position(|m| m == id).ok_or_else(unknown)?),
-            Some(("var", name)) => Source::Var(name.to_string()),
-            None if s == "time" => Source::Time,
             _ => return Err(unknown()),
         })
     }
@@ -518,51 +330,6 @@ impl Patch {
             _ => format!("{:.0}%", v * 100.0),
         }
     }
-
-    pub fn has_animator(&self) -> bool {
-        self.animator.is_some()
-    }
-
-    /// Runs `control_panel.animate(state)` and stores the returned numbers in `values.vars`.
-    /// `state` = { time, dt, macro = {<id> = 0..1}, param = {<id> = 0..1}, meter = {in, out} }.
-    pub fn animate(&self, values: &mut Values, dt: f32) -> Result<(), PatchError> {
-        let Some(anim) = &self.animator else {
-            return Ok(());
-        };
-        let _c = locale::CNumeric::enter();
-        let lua = &anim.lua;
-        let state = lua.create_table()?;
-        state.set("time", values.time)?;
-        state.set("dt", dt)?;
-        let macros = lua.create_table()?;
-        for (i, m) in self.macros.iter().enumerate() {
-            macros.set(m.id.as_str(), values.macros[i])?;
-        }
-        state.set("macro", macros)?;
-        let params = lua.create_table()?;
-        for (i, p) in self.params.iter().enumerate() {
-            params.set(p.id.as_str(), values.params.get(i).copied().unwrap_or(0.0))?;
-        }
-        state.set("param", params)?;
-        let meter = lua.create_table()?;
-        meter.set("in", values.meter_in)?;
-        meter.set("out", values.meter_out)?;
-        for (i, id) in self.meters.iter().enumerate() {
-            meter.set(id.as_str(), values.blocks.get(i).copied().unwrap_or(0.0))?;
-        }
-        state.set("meter", meter)?;
-
-        anim.used.store(0, Ordering::Relaxed);
-        let out: Option<Table> = anim.func.call(state)?;
-        values.vars.clear();
-        if let Some(out) = out {
-            for pair in out.pairs::<String, f32>() {
-                let (k, v) = pair?;
-                values.vars.insert(k, v);
-            }
-        }
-        Ok(())
-    }
 }
 
 fn opt_from_lua<T: serde::de::DeserializeOwned + Default>(
@@ -610,8 +377,12 @@ fn resolve_controls(params: &[ParamSpec], macros: &[MacroSpec]) -> Result<Vec<Co
         }
     }
 
+    let mut macro_ids = std::collections::HashSet::new();
     let mut controls = vec![Control::Free; params.len()];
     for (slot, m) in macros.iter().enumerate() {
+        if !macro_ids.insert(m.id.as_str()) {
+            return Err(invalid(format!("duplicate macro id '{}'", m.id)));
+        }
         if m.targets.is_empty() {
             return Err(invalid(format!("macro '{}' has no targets", m.id)));
         }
@@ -636,36 +407,6 @@ fn resolve_controls(params: &[ParamSpec], macros: &[MacroSpec]) -> Result<Vec<Co
     Ok(controls)
 }
 
-/// A sandboxed Lua state (table/string/math/utf8 only, no file loading, memory
-/// cap, instruction budget). The returned counter must be reset to 0 before each
-/// top-level call; the budget applies per call (checked every `HOOK_GRANULARITY`
-/// instructions).
-pub fn sandboxed_lua() -> Result<(Lua, Arc<AtomicU32>), PatchError> {
-    let lua = Lua::new_with(
-        StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8,
-        LuaOptions::default(),
-    )?;
-    lua.set_memory_limit(MEMORY_LIMIT)?;
-    let globals = lua.globals();
-    for name in ["dofile", "loadfile", "load", "require", "collectgarbage"] {
-        globals.set(name, mlua::Value::Nil)?;
-    }
-    let used = Arc::new(AtomicU32::new(0));
-    let counter = used.clone();
-    lua.set_hook(
-        HookTriggers::new().every_nth_instruction(HOOK_GRANULARITY),
-        move |_, _| {
-            let n = counter.fetch_add(HOOK_GRANULARITY, Ordering::Relaxed);
-            if n > INSTRUCTION_BUDGET {
-                Err(mlua::Error::runtime("instruction budget exceeded"))
-            } else {
-                Ok(VmState::Continue)
-            }
-        },
-    )?;
-    Ok((lua, used))
-}
-
 /// Joins `rel` onto `dir` and rejects anything that escapes the patch folder.
 pub fn resolve_inside(dir: &Path, rel: &str) -> Result<PathBuf, PatchError> {
     let base = dir.canonicalize()?;
@@ -676,57 +417,16 @@ pub fn resolve_inside(dir: &Path, rel: &str) -> Result<PathBuf, PatchError> {
     Ok(full)
 }
 
-/// Lists patch folders (those containing `patch.lua`) in `root`, sorted.
+/// Lists patch folders (those containing `patch.luau`) in `root`, sorted.
 pub fn discover(root: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = std::fs::read_dir(root)
         .into_iter()
         .flatten()
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.join("patch.lua").is_file())
+        .filter(|p| p.join(runtime::ENTRY).is_file())
         .collect();
     out.sort();
-    out
-}
-
-/// Minimal printf: `%.Nf`, `%d`, `%%`.
-pub fn format_value(fmt: &str, v: f32) -> String {
-    let mut out = String::new();
-    let mut chars = fmt.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '%' {
-            out.push(c);
-            continue;
-        }
-        match chars.peek() {
-            Some('%') => {
-                chars.next();
-                out.push('%');
-            }
-            Some('d') => {
-                chars.next();
-                out.push_str(&format!("{}", v.round() as i64));
-            }
-            Some('.') => {
-                chars.next();
-                let mut digits = String::new();
-                while let Some(d) = chars.peek().filter(|d| d.is_ascii_digit()) {
-                    digits.push(*d);
-                    chars.next();
-                }
-                if chars.peek() == Some(&'f') {
-                    chars.next();
-                }
-                let p = digits.parse().unwrap_or(2);
-                out.push_str(&format!("{v:.p$}"));
-            }
-            Some('f') => {
-                chars.next();
-                out.push_str(&format!("{v:.2}"));
-            }
-            _ => out.push('%'),
-        }
-    }
     out
 }
 
@@ -737,6 +437,7 @@ mod tests {
     struct TempDir(PathBuf);
     impl TempDir {
         fn with_patch(src: &str) -> Self {
+            use std::sync::atomic::{AtomicU32, Ordering};
             static N: AtomicU32 = AtomicU32::new(0);
             let p = std::env::temp_dir().join(format!(
                 "patch-test-{}-{}",
@@ -744,8 +445,7 @@ mod tests {
                 N.fetch_add(1, Ordering::Relaxed)
             ));
             std::fs::create_dir_all(&p).unwrap();
-            std::fs::write(p.join("patch.lua"), src).unwrap();
-            std::fs::write(p.join("panel.svg"), "<svg/>").unwrap();
+            std::fs::write(p.join("patch.luau"), src).unwrap();
             TempDir(p)
         }
     }
@@ -755,60 +455,58 @@ mod tests {
         }
     }
 
+    fn load(src: &str) -> Result<Patch, PatchError> {
+        let d = TempDir::with_patch(src);
+        Patch::load(&d.0)
+    }
+
     const BASE: &str = r##"
-        local angle = 0
-        return {
-          name = "T",
-          params = {
-            { id = "drive", name = "Drive", min = 0, max = 24, unit = " dB", decimals = 1, default = 6 },
-            { id = "tone",  name = "Tone",  min = 500, max = 20000, unit = " Hz", decimals = 0 },
-            { id = "free",  name = "Free",  min = 0, max = 10, default = 5 },
-          },
-          macros = {
-            { id = "character", name = "Character", default = 0.5, targets = {
-              { param = "drive", from = 0, to = 12 },
-              { param = "tone", from = 16000, to = 1000, curve = "exp" },
-            } },
-            { id = "drv", name = "Drv", targets = { { param = "free", from = 0, to = 10 } } },
-          },
-          theme = { accent = "#ff0000" },
-          chain = {
-            comp("c1", { style = "fet", threshold = "param.drive", ratio = 4 }),
-            split("s", { freq = 250,
-              low  = { rider("r", { target = -18, range = 6 }) },
-              high = { drive("d", { amount = "param.drive" }) },
-            }),
-            eq("e", { type = "peak", freq = 100, gain = "param.free" }),
-          },
-          control_panel = {
-            svg = "panel.svg",
-            bindings = {
-              rotate("needle", { source = "param.drive", from = -135, to = 135, pivot = "knob" }),
-              rotate("reel", { source = "var.reel", from = 0, to = 360, pivot = { 10, 20 } }),
-              drag("knob", { target = "macro.character" }),
-              drag("free_knob", { target = "param.free" }),
+        local drive = Param.new("drive", "Drive", { min = 0, max = 24, unit = "dB", decimals = 1, default = 6 })
+        local tone  = Param.new("tone",  "Tone",  { min = 500, max = 20000, unit = "Hz", decimals = 0 })
+        local free  = Param.new("free",  "Free",  { min = 0, max = 10, default = 5 })
+        local xover = Param.new("xover", "Crossover", { min = 100, max = 500, default = 250, unit = "Hz" })
+
+        local character = Macro.new("character", "Character", { default = 0.5 })
+          :drives(drive, { from = 0, to = 12 })
+          :drives(tone,  { from = 16000, to = 1000, curve = "exp" })
+        local drv = Macro.new("drv", "Drv"):drives(free, { from = 0, to = 10 })
+
+        local chain = Chain.new {
+          Blocks.FETCompressor.new("c1", { threshold = drive, ratio = 4 }),
+          Blocks.BandSplit.new("s", {
+            crossovers = { xover },
+            bands = {
+              Chain.new { Blocks.Rider.new("r", { target = -18, range = 6 }) },
+              Chain.new { Blocks.Drive.new("d", { amount = drive }) },
             },
-            animate = function(s)
-              angle = angle + s.dt
-              return { reel = angle, c = s.macro.character, d = s.param.drive }
-            end,
-          },
-        }"##;
+          }),
+          Blocks.Parallel.new("par", { mix = 50, branches = { Chain.new(), Chain.new { Blocks.Transient.new("t", { attack = 3 }) } } }),
+        }
+        chain:add(Blocks.PeakEq.new("e", { freq = 100, gain = free }))
+        chain:add(Blocks.LowPass.new("lp", { freq = tone }))
+
+        return Patch.new("T", { chain = chain, macros = { character, drv }, theme = { accent = "#ff0000" } })
+    "##;
 
     #[test]
-    fn macros_drive_params_with_ranges_and_curves() {
-        let d = TempDir::with_patch(BASE);
-        let p = Patch::load(&d.0).unwrap();
-        assert_eq!(p.meters, vec!["c1", "r"]);
+    fn builds_params_macros_and_chain() {
+        let p = load(BASE).unwrap();
+        // Params in the order the chain reaches them, then macro-only ones.
+        let ids: Vec<_> = p.params.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["drive", "xover", "free", "tone"]);
+        assert_eq!(p.meters, vec!["c1", "r", "t"]);
         assert_eq!(p.resolve_source("meter.r").unwrap(), Source::Block(1));
-        assert_eq!(p.chain.len(), 3);
+        assert_eq!(p.chain.len(), 5);
+        assert_eq!(p.theme.get("accent"), Some("#ff0000"));
         assert_eq!(p.controls[2], Control::Macro { slot: 1, from: 0.0, to: 10.0, curve: Curve::Lin });
+        assert_eq!(p.controls[1], Control::Free);
         let mut macros = [0.0; MACRO_SLOTS];
         macros[0] = 0.5;
         let free = p.default_param_values();
         assert_eq!(p.param_plain(0, &macros, &free), 6.0); // lin 0..12
-        assert!((p.param_plain(1, &macros, &free) - 4000.0).abs() < 1.0); // exp 16k..1k
+        assert!((p.param_plain(3, &macros, &free) - 4000.0).abs() < 1.0); // exp 16k..1k
         assert_eq!(p.param_plain(2, &macros, &free), 0.0); // driven by macro 1 (= 0)
+        assert_eq!(p.param_plain(1, &macros, &free), 250.0); // free: own default
         assert_eq!(p.macro_default(0), 0.5); // explicit
         assert_eq!(p.macro_default(1), 0.5); // derived from param default 5 of 0..10
 
@@ -816,53 +514,199 @@ mod tests {
         p.compute_params(&v.macros.clone(), &free, &mut v.params);
         assert_eq!(p.params[0].display(v.params[0]), "6.0 dB");
         assert_eq!(p.macro_display(0, &v), "50%");
-        p.animate(&mut v, 0.25).unwrap();
-        p.animate(&mut v, 0.25).unwrap();
-        assert_eq!(v.vars["reel"], 0.5);
-        assert_eq!(v.vars["c"], 0.5);
-        assert_eq!(v.vars["d"], 0.25);
     }
 
+    /// Each case: (replace this, with that, expected error substring).
     #[test]
-    fn rejects_bad_mappings_sources_and_escapes() {
-        for bad in [
-            BASE.replace(r#"param = "drive""#, r#"param = "nope""#),
-            BASE.replace(r#"source = "param.drive""#, r#"source = "param.nope""#),
-            BASE.replace(r#"target = "macro.character""#, r#"target = "meter.out""#),
-            BASE.replace(r#"from = 16000, to = 1000"#, r#"from = 0, to = 1000"#),
-            BASE.replace(r#"svg = "panel.svg""#, r#"svg = "../../etc/passwd""#),
-            BASE.replace(r#"amount = "param.drive""#, r#"amount = "param.nope""#),
-            BASE.replace(r#"rider("r""#, r#"rider("c1""#),
-            BASE.replace(r#"type = "peak""#, r#"type = "bandwobble""#),
-            BASE.replace(r#"ratio = 4 }"#, r#"ratio = 4, treshold = 3 }"#),
-            BASE.replace(r#"unit = " dB", decimals = 1"#, r#"unit = " dB", decimls = 1"#),
-            BASE.replace(
-                r#"{ param = "tone""#,
-                r#"{ param = "drive" }, { param = "tone""#,
-            ),
+    fn rejects_mistakes_with_useful_messages() {
+        for (from, to, msg) in [
+            ("ratio = 4 }", "ratio = 4, treshold = 3 }", "unknown option 'treshold'"),
+            (r#"{ threshold = drive, ratio = 4 }"#, "{ ratio = 4 }", "'threshold' is required"),
+            ("threshold = drive", r#"threshold = "param.drive""#, "must be a number or a Param"),
+            ("Blocks.FETCompressor.new", "Blocks.FetCompressor.new", "'Blocks.FetCompressor' does not exist"),
+            (r#"Blocks.LowPass.new("lp""#, r#"Blocks.LowPass.new("c1""#, "duplicate block id 'c1'"),
+            ("crossovers = { xover }", "crossovers = { xover, 800 }", "2 crossover(s) need 3 bands"),
+            ("mix = 50, branches = { Chain.new(),", "mix = 50, branches = { Chain.new(), Chain.new(),", "'mix' needs exactly 2 branches"),
+            (r#"{ from = 16000, to = 1000, curve = "exp" }"#, r#"{ from = 0, to = 1000, curve = "exp" }"#, "non-zero from/to"),
+            (r#"curve = "exp""#, r#"curve = "log""#, r#"must be "lin" or "exp""#),
+            (r#"unit = "dB", decimals = 1"#, r#"unit = "dB", decimls = 1"#, "unknown option 'decimls'"),
+            (r#"Param.new("free",  "Free",  { min = 0, max = 10, default = 5 })"#, r#"Param.new("free",  "Free",  { min = 0, max = 10, default = 50 })"#, "outside"),
+            (r#"Param.new("free""#, r#"Param.new("drive""#, "two different params use the id 'drive'"),
+            ("macros = { character, drv }", "macros = { character, drv, character }", "listed twice"),
+            (":drives(free, { from = 0, to = 10 })", "", "drives nothing"),
+            ("local drv = Macro.new(\"drv\", \"Drv\"):drives(free", "local drv = Macro.new(\"drv\", \"Drv\"):drives(drive", "more than one macro"),
+            ("Chain.new { Blocks.Rider", "Chain.new { nil, Blocks.Rider", "holes"),
+            (r#"return Patch.new("T","#, r#"return { name = "T" } -- "#, "must end with `return Patch.new(...)`"),
         ] {
-            let d = TempDir::with_patch(&bad);
-            assert!(Patch::load(&d.0).is_err(), "should fail:\n{bad}");
+            assert!(BASE.contains(from), "test case doesn't apply: {from}");
+            let src = BASE.replace(from, to);
+            let err = match load(&src) {
+                Ok(_) => panic!("should fail: {from} -> {to}"),
+                Err(e) => e.to_string(),
+            };
+            assert!(err.contains(msg), "expected '{msg}', got: {err}");
         }
     }
 
     #[test]
-    fn sandbox_blocks_io_and_infinite_loops() {
-        let d = TempDir::with_patch(r#"io.open("/etc/passwd") return { name = "T" }"#);
-        assert!(Patch::load(&d.0).is_err());
-        let d = TempDir::with_patch(r#"while true do end"#);
-        let err = Patch::load(&d.0).err().unwrap().to_string();
-        assert!(err.contains("budget"), "{err}");
-        let d = TempDir::with_patch(
-            r#"return { name = "T", control_panel = { svg = "panel.svg", animate = function() while true do end end } }"#,
-        );
-        let p = Patch::load(&d.0).unwrap();
-        assert!(p.animate(&mut Values::default(), 0.0).is_err());
+    fn utility_and_routing_blocks_check_their_options() {
+        for (src, msg) in [
+            ("Blocks.Haas.new('h', { delay = 50 })", "delay must be 0..40 ms"),
+            ("Blocks.Haas.new('h', { delay = 5, channel = 'both' })", r#"'channel' must be "left" or "right""#),
+            ("Blocks.Invert.new('i', { channels = 'middle' })", r#"must be "both", "left" or "right""#),
+            ("Blocks.MidSide.new('ms', {})", "needs a 'mid' and/or a 'side' chain"),
+            ("Blocks.LeftRight.new('lr', { left = 3 })", "'left' must be a Chain"),
+            ("Blocks.DCBlock.new('dc', { freq = 5 })", "unknown option 'freq'"),
+        ] {
+            let err = load(&format!("return Patch.new('T', {{ chain = Chain.new {{ {src} }} }})")).err().unwrap().to_string();
+            assert!(err.contains(msg), "{src}: expected '{msg}', got: {err}");
+        }
+        let err = load("return Patch.new('T', { chain = Chain.new { Blocks.Gain.new('g', { db = 0, oversampling = 3 }) } })")
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("'oversampling' must be 1, 2, 4 or 8"), "{err}");
+        let err = load("return Patch.new('T', { chain = Chain.new { Blocks.MidSide.new('ms', { oversampling = 4,
+            side = Chain.new { Blocks.Drive.new('d', { amount = 6, oversampling = 4 }) } }) } })")
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("nested oversampling multiplies to 16x"), "{err}");
+        let p = load("return Patch.new('T', { chain = Chain.new { Blocks.MidSide.new('ms', { oversampling = 4,
+            side = Chain.new { Blocks.Meter.new('m', { oversampling = 2 }) } }) } })").unwrap();
+        assert_eq!(p.chain[0].oversampling, Some(4));
+        assert_eq!(p.meters, ["m"]);
     }
 
     #[test]
-    fn printf_subset() {
-        assert_eq!(format_value("%.1f dB", 3.14159), "3.1 dB");
-        assert_eq!(format_value("%d%%", 42.4), "42%");
+    fn notes_sync_and_curves_become_plain_data() {
+        let p = load(
+            "return Patch.new('T', { chain = Chain.new {
+                Blocks.Resonator.new('r', { notes = { 'A4', 'C#3', 110, 'Bb1' } }),
+                Blocks.Delay.new('d', { sync = '1/8.' }),
+                Blocks.Chorus.new('c', { sync = '1/4t' }),
+                Blocks.Waveshaper.new('w', { curve = function(x) return x * x end }),
+                Blocks.Waveshaper.new('w2', { curve = { -1, 1 } }),
+            } })",
+        )
+        .unwrap();
+        use chain::BlockKind as K;
+        let K::Resonator { notes, .. } = &p.chain[0].kind else { panic!() };
+        let expect = [440.0, 138.59, 110.0, 58.27];
+        assert!(notes.iter().zip(expect).all(|(a, b)| (a - b).abs() < 0.01), "{notes:?}");
+        let K::Delay { sync, .. } = &p.chain[1].kind else { panic!() };
+        assert_eq!(*sync, Some(0.75));
+        let K::Chorus { sync, .. } = &p.chain[2].kind else { panic!() };
+        assert!((sync.unwrap() - 2.0 / 3.0).abs() < 1e-6);
+        let K::Waveshaper { curve, .. } = &p.chain[3].kind else { panic!() };
+        assert_eq!(curve.len(), 1025);
+        assert!((curve[0] - 1.0).abs() < 1e-6 && curve[512].abs() < 1e-6);
+        let K::Waveshaper { curve, .. } = &p.chain[4].kind else { panic!() };
+        assert_eq!(curve, &[-1.0, 1.0]);
+    }
+
+    #[test]
+    fn effect_blocks_check_their_options() {
+        for (src, msg) in [
+            ("Blocks.Resonator.new('r', { notes = { 'H2' } })", "note names like"),
+            ("Blocks.Delay.new('d', { sync = '1/0' })", "a note length like"),
+            ("Blocks.Delay.new('d', { time = 9000 })", "time must be 1..4000 ms"),
+            ("Blocks.Waveshaper.new('w', { curve = function(x) return 'no' end })", "must return a finite number"),
+            ("Blocks.Waveshaper.new('w', { curve = { 1 } })", "at least 2 numbers"),
+            ("Blocks.Rectifier.new('r', { mode = 'quarter' })", r#""half", "full""#),
+            ("Blocks.Phaser.new('p', { stages = 5 })", "stages must be 2, 4, ..., 12"),
+            ("Blocks.Limiter.new('l', { lookahead = 50 })", "lookahead must be 0..20 ms"),
+            ("Blocks.Tremolo.new('t', { shape = 'saw' })", r#""sine", "triangle", "square""#),
+            ("Blocks.PitchShift.new('p', { semitones = 30 })", "semitones must be -24..24"),
+        ] {
+            let err = load(&format!("return Patch.new('T', {{ chain = Chain.new {{ {src} }} }})")).err().unwrap().to_string();
+            assert!(err.contains(msg), "{src}: expected '{msg}', got: {err}");
+            assert!(err.contains("patch.luau:1:"), "{src}: error should point at the patch: {err}");
+        }
+    }
+
+    #[test]
+    fn errors_point_at_the_patch_line() {
+        let err = load("local x = 1\nlocal p = Param.new(\"a\", \"A\", { min = 0 })\nreturn Patch.new(\"T\")")
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("patch.luau:2:"), "{err}");
+        assert!(err.contains("'max' is required"), "{err}");
+    }
+
+    #[test]
+    fn a_block_belongs_to_one_chain() {
+        let err = load(
+            "local g = Blocks.Gain.new('g', { db = 0 })\nlocal a = Chain.new { g }\nlocal b = Chain.new { g }\nreturn Patch.new('T', { chain = a })",
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(err.contains("already part of a chain"), "{err}");
+    }
+
+    #[test]
+    fn sandbox_blocks_io_loops_and_builtin_changes() {
+        assert!(load(r#"io.open("/etc/passwd") return Patch.new("T")"#).is_err());
+        let err = load("while true do end").err().unwrap().to_string();
+        assert!(err.contains("budget"), "{err}");
+        let err = load("string.format = nil return Patch.new('T')").err().unwrap().to_string();
+        assert!(err.contains("readonly"), "{err}");
+        let err = load("Param.new = nil return Patch.new('T')").err().unwrap().to_string();
+        assert!(err.contains("readonly"), "{err}");
+        for f in ["loadstring", "getfenv", "setfenv", "dofile", "loadfile"] {
+            let err = load(&format!("assert({f} == nil, '{f} exists') return Patch.new('T')"));
+            assert!(err.is_ok(), "{f}: {:?}", err.err());
+        }
+    }
+
+    #[test]
+    fn requires_ui_files_from_the_patch_folder_only() {
+        let d = TempDir::with_patch(
+            "local ui = require('./ui')
+             local g = Param.new('g', 'G', { min = -24, max = 0 })
+             local m = Macro.new('m', 'M'):drives(g)
+             return Patch.new('T', { chain = Chain.new({ Blocks.Gain.new('out', { db = g }) }), macros = { m },
+                                     panel = ui.Panel.new({ gain = m }) })",
+        );
+        std::fs::create_dir_all(d.0.join("components")).unwrap();
+        std::fs::write(
+            d.0.join("ui.luau"),
+            "local Knob = require('./components/knob')
+             local M = {}
+             M.Panel = Component.define({ name = 'Panel', render = function(p) return Knob.new({ bind = p.gain }) end })
+             return M",
+        )
+        .unwrap();
+        std::fs::write(
+            d.0.join("components/knob.luau"),
+            "return Component.define({ name = 'Knob', kind = 'knob', render = function(p) return '' end })",
+        )
+        .unwrap();
+        let p = Patch::load(&d.0).unwrap();
+        assert_eq!(p.macros[0].id, "m");
+
+        // a string where a Macro belongs is caught when the instance is created
+        std::fs::write(
+            d.0.join("ui.luau"),
+            "local M = {}
+             M.Panel = Component.define({ name = 'Panel', render = function(p) return '' end })
+             local K = Component.define({ name = 'K', render = function(p) return '' end })
+             K.new({ bind = 'macro.m' })
+             return M",
+        )
+        .unwrap();
+        let err = Patch::load(&d.0).err().unwrap().to_string();
+        assert!(err.contains("ui.luau:4:") && err.contains("'bind' must be a Macro or Param"), "{err}");
+
+        // nothing outside the patch folder
+        let outside = d.0.parent().unwrap().join(format!("outside-{}.luau", std::process::id()));
+        std::fs::write(&outside, "return 1").unwrap();
+        let name = outside.file_stem().unwrap().to_str().unwrap();
+        std::fs::write(d.0.join("patch.luau"), format!("require('../{name}') return Patch.new('T')")).unwrap();
+        let err = Patch::load(&d.0).err().unwrap().to_string();
+        let _ = std::fs::remove_file(&outside);
+        assert!(err.contains("only files inside the patch folder"), "{err}");
     }
 }

@@ -5,10 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-mlua = { version = "0.12.2", features = ["lua54", "vendored", "send"] }
+mlua = { version = "0.12.2", features = ["luau", "vendored", "send"] }
 patch = { version = "0.1.0", path = "../patch" }
 resvg = "0.50.0"
-ui-svg = { version = "0.1.0", path = "../ui-svg" }
 
 [dev-dependencies]
 libc = "0.2.191"

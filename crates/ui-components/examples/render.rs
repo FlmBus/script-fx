@@ -47,7 +47,7 @@ fn main() {
     for e in ui.errors() {
         println!("ERROR: {e}");
     }
-    let mut pm = Pixmap::new((ui.width * scale) as u32, (ui.height * scale) as u32).unwrap();
+    let mut pm = Pixmap::new((ui_components::WIDTH * scale) as u32, (ui_components::HEIGHT * scale) as u32).unwrap();
     for l in ui.layers() {
         if let Some(p) = l.pixmap {
             pm.draw_pixmap((l.rect.x * scale) as i32, (l.rect.y * scale) as i32, p.as_ref(), &PixmapPaint::default(), Transform::identity(), None);

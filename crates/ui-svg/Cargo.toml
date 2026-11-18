@@ -1,9 +1,0 @@
-[package]
-name = "ui-svg"
-version = "0.1.0"
-edition.workspace = true
-rust-version.workspace = true
-
-[dependencies]
-patch = { version = "0.1.0", path = "../patch" }
-resvg = "0.50.0"

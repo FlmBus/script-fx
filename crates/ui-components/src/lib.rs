@@ -1,6 +1,9 @@
 //! Reactive UI components: Lua `render(props)` → SVG → one cached image per component.
 //!
-//! A patch's `ui.lua` returns `{ width, height, root = SomeComponent{...} }`.
+//! The UI is the `panel` of the patch: `patch.luau` requires its UI files and
+//! passes `Patch.new(..., { panel = Panel.new({ ... }) })`, wiring macros, params
+//! and metered blocks into the components as props. Every ControlPanel has the
+//! same logical size, [`WIDTH`] × [`HEIGHT`]; the shell scales it to the window.
 //! Every frame the shell calls [`Ui::update`] with the current inputs (bound
 //! parameter values, meters, hover/drag, time). Each component instance is
 //! re-rendered only when its *inputs* changed: its props (as passed by its
@@ -17,16 +20,65 @@ use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use mlua::{Function, Lua, Table, Value};
+use resvg::usvg::{ImageHrefResolver, fontdb};
 use resvg::{tiny_skia, usvg};
 
 pub use tiny_skia::Pixmap;
 
-const PRELUDE: &str = include_str!("prelude.lua");
+
+/// Logical size of every ControlPanel (fixed, so all patches look alike in the shell).
+pub const WIDTH: f32 = 840.0;
+pub const HEIGHT: f32 = 560.0;
+
+/// Bundled fonts only. Scanning system fonts took 7.5s cold on a dev machine
+/// (unacceptable inside a DAW) and would make patches render differently on
+/// every machine. Patches can ship extra fonts in `<patch>/fonts/`.
+fn base_fonts() -> &'static fontdb::Database {
+    static DB: OnceLock<fontdb::Database> = OnceLock::new();
+    DB.get_or_init(|| {
+        let mut db = fontdb::Database::new();
+        db.load_font_data(include_bytes!("../assets/NotoSans-Regular.ttf").to_vec());
+        db.load_font_data(include_bytes!("../assets/NotoSans-Bold.ttf").to_vec());
+        db.set_sans_serif_family("Noto Sans");
+        db.set_serif_family("Noto Sans");
+        db.set_monospace_family("Noto Sans");
+        db.set_cursive_family("Noto Sans");
+        db.set_fantasy_family("Noto Sans");
+        db
+    })
+}
+
+fn fonts_for(dir: &Path) -> Arc<fontdb::Database> {
+    let mut db = base_fonts().clone();
+    let fonts_dir = dir.join("fonts");
+    if fonts_dir.is_dir() {
+        db.load_fonts_dir(fonts_dir);
+    }
+    Arc::new(db)
+}
+
+/// `<image href>` may only load files from inside the patch folder.
+fn sandboxed_image_resolver(dir: PathBuf) -> ImageHrefResolver<'static> {
+    ImageHrefResolver {
+        resolve_data: ImageHrefResolver::default_data_resolver(),
+        resolve_string: Box::new(move |href: &str, opts: &usvg::Options| {
+            let path = patch::resolve_inside(&dir, href).ok()?;
+            let data = Arc::new(std::fs::read(&path).ok()?);
+            match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+                "png" => Some(usvg::ImageKind::PNG(data)),
+                "jpg" | "jpeg" => Some(usvg::ImageKind::JPEG(data)),
+                "gif" => Some(usvg::ImageKind::GIF(data)),
+                "webp" => Some(usvg::ImageKind::WEBP(data)),
+                "svg" => usvg::Tree::from_data(&data, opts).ok().map(usvg::ImageKind::SVG),
+                _ => None,
+            }
+        }),
+    }
+}
 const MAX_TREE_DEPTH: usize = 24;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -128,12 +180,9 @@ struct Node {
 }
 
 pub struct Ui {
+    rt: patch::runtime::Runtime,
     lua: Lua,
-    used: Arc<AtomicU32>,
-    file: PathBuf,
     options: usvg::Options<'static>,
-    pub width: f32,
-    pub height: f32,
     root: Option<Node>,
     next_id: u64,
     pub stats: FrameStats,
@@ -185,24 +234,21 @@ fn error_svg(w: f32, h: f32, msg: &str) -> String {
 
 impl Ui {
     /// Loads `<dir>/ui.lua`.
+    /// Loads the patch in `dir` and builds its `panel`.
     pub fn load(dir: &Path) -> Result<Self, String> {
-        let _c = patch::locale::CNumeric::enter();
-        let (lua, used) = patch::sandboxed_lua().map_err(|e| e.to_string())?;
-        lua.load(PRELUDE).set_name("prelude").exec().map_err(|e| e.to_string())?;
+        let rt = patch::runtime::Runtime::new(dir).map_err(|e| e.to_string())?;
+        let lua = rt.lua.clone();
         let options = usvg::Options {
             resources_dir: Some(dir.to_path_buf()),
-            fontdb: ui_svg::fonts_for(dir),
-            image_href_resolver: ui_svg::sandboxed_image_resolver(dir.to_path_buf()),
+            fontdb: fonts_for(dir),
+            image_href_resolver: sandboxed_image_resolver(dir.to_path_buf()),
             font_family: "Noto Sans".into(),
             ..Default::default()
         };
         let mut ui = Ui {
+            rt,
             lua,
-            used,
-            file: dir.join("ui.lua"),
             options,
-            width: 800.0,
-            height: 500.0,
             root: None,
             next_id: 1,
             stats: FrameStats::default(),
@@ -214,20 +260,15 @@ impl Ui {
     /// Re-evaluates `ui.lua`. Instances are matched by key, so local state
     /// (e.g. the selected tab) survives; everything re-renders once.
     pub fn reload(&mut self) -> Result<(), String> {
-        let src = std::fs::read_to_string(&self.file).map_err(|e| e.to_string())?;
         let _c = patch::locale::CNumeric::enter();
-        self.used.store(0, Ordering::Relaxed);
-        let t: Table = self
-            .lua
-            .load(&src)
-            .set_name("ui.lua")
-            .eval()
-            .map_err(|e| e.to_string())?;
-        self.width = t.get::<Option<f32>>("width").ok().flatten().unwrap_or(800.0);
-        self.height = t.get::<Option<f32>>("height").ok().flatten().unwrap_or(500.0);
-        let root: Value = t.get("root").map_err(|e| e.to_string())?;
-        let (def, props) = descriptor(&root).ok_or("ui.lua: `root` must be a component instance")?;
-        let frame = Rect { x: 0.0, y: 0.0, w: self.width, h: self.height };
+        let patch = self.rt.eval_patch().map_err(|e| e.to_string())?;
+        let root: Value = patch.get("panel").map_err(|e| e.to_string())?;
+        if root.is_nil() {
+            return Err("the patch has no panel: pass `panel = <Root>.new({ ... })` to Patch.new".into());
+        }
+        let (def, props) =
+            descriptor(&root).ok_or("`panel` must be a component instance (<Root>.new({ ... }))")?;
+        let frame = Rect { x: 0.0, y: 0.0, w: WIDTH, h: HEIGHT };
         let root = match self.root.take() {
             Some(mut old) => {
                 old.def = def;
@@ -285,8 +326,8 @@ impl Ui {
             h: num("h").or(size_at(2)).unwrap_or(parent.h),
         };
         n.kind = n.def.get::<Option<String>>("kind").ok().flatten();
-        n.bind = props.get::<Option<String>>("bind").ok().flatten();
-        n.source = props.get::<Option<String>>("source").ok().flatten();
+        n.bind = reference(&props, "bind");
+        n.source = reference(&props, "source");
         n.series = props.get::<Option<String>>("series").ok().flatten();
         n.animated = n.def.get::<Option<bool>>("animated").ok().flatten().unwrap_or(false)
             || props.get::<Option<bool>>("animated").ok().flatten().unwrap_or(false);
@@ -300,7 +341,7 @@ impl Ui {
         let t0 = Instant::now();
         self.stats = FrameStats::default();
         if let Some(mut root) = self.root.take() {
-            let frame = Rect { x: 0.0, y: 0.0, w: self.width, h: self.height };
+            let frame = Rect { x: 0.0, y: 0.0, w: WIDTH, h: HEIGHT };
             self.update_node(&mut root, frame, Value::Nil, inputs, scale, 0);
             self.root = Some(root);
         }
@@ -397,7 +438,7 @@ impl Ui {
                 p.set("theme", theme.clone())?;
             }
             let render: Function = n.def.get("render")?;
-            self.used.store(0, Ordering::Relaxed);
+            self.rt.begin_call();
             let t = Instant::now();
             let out: Value = render.call(p)?;
             self.stats.lua_us += t.elapsed().as_secs_f32() * 1e6;
@@ -591,7 +632,7 @@ impl Ui {
         let handler: Option<Function> = n.def.get("on_click").ok().flatten();
         if let Some(f) = handler {
             let _c = patch::locale::CNumeric::enter();
-            self.used.store(0, Ordering::Relaxed);
+            self.rt.begin_call();
             if let Err(e) = f.call::<()>((n.state.clone(), n.props.clone())) {
                 let msg = e.to_string();
                 n.error = Some(msg.lines().next().unwrap_or("").to_string());
@@ -619,6 +660,15 @@ impl Ui {
     /// Errors of all components (for the shell's error display).
     pub fn errors(&self) -> Vec<String> {
         self.layers().iter().filter_map(|l| l.error.map(String::from)).collect()
+    }
+}
+
+/// What a `bind` / `source` prop points at, as a key like "macro.tape": the
+/// `__ref` of a Param/Macro/metered block/`Meters.*` (checked by `X.new`).
+fn reference(props: &Table, field: &str) -> Option<String> {
+    match props.get::<Value>(field).ok()? {
+        Value::Table(t) => t.get::<Option<String>>("__ref").ok().flatten(),
+        _ => None,
     }
 }
 

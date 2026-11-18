@@ -1,4 +1,4 @@
-//! The shell: the plugin's own UI (egui), hosting the patch's ControlPanel (resvg → egui texture).
+//! The shell: the plugin's own UI (egui), hosting the patch's ControlPanel (component layers → egui textures).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -7,12 +7,11 @@ use std::time::{Instant, SystemTime};
 use nih_plug::prelude::*;
 use nih_plug_egui::create_egui_editor;
 use nih_plug_egui::egui::{
-    self, Color32, ColorImage, CursorIcon, Pos2, Rect, Sense, Stroke, TextureHandle,
-    TextureOptions, Visuals, pos2, vec2,
+    self, Color32, ColorImage, CursorIcon, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions, Visuals, pos2,
+    vec2,
 };
 use patch::{Control, MACRO_SLOTS, Patch, Source, Values};
 use ui_components::{Bound, Inputs};
-use ui_svg::SvgControlPanel;
 
 use crate::{FxParams, Shared, patches_root};
 
@@ -27,22 +26,23 @@ pub fn create(params: Arc<FxParams>, shared: Arc<Shared>) -> Option<Box<dyn Edit
     )
 }
 
-/// A patch UI built from reactive Lua components (`ui.lua`).
+/// A patch UI built from reactive Lua components (the patch's `panel`).
 struct ComponentPanel {
     ui: ui_components::Ui,
     /// One texture per component layer, uploaded only when the layer changed.
     textures: std::collections::HashMap<u64, TextureHandle>,
     hover: Option<u64>,
     active: Option<u64>,
+    /// SPIKE: GPU compositing (SCRIPTFX_GPU_SPIKE=1) and the layer ids it has uploaded.
+    spike: Option<crate::gpu_spike::Spike>,
+    spike_uploaded: std::collections::HashSet<u64>,
 }
 
 struct Loaded {
     name: String,
     dir: PathBuf,
     patch: Patch,
-    panel: Option<SvgControlPanel>,
     components: Option<ComponentPanel>,
-    texture: Option<TextureHandle>,
     mtime: Option<SystemTime>,
     load_ms: f32,
 }
@@ -57,7 +57,7 @@ struct DragState {
     what: DragWhat,
     range: f32,
     start: f32,
-    /// Accumulated vertical drag in SVG units.
+    /// Accumulated vertical drag in ControlPanel units.
     accum: f32,
 }
 
@@ -67,15 +67,12 @@ struct EditorState {
     /// Plain values of all params of the current patch (free ones are authoritative).
     free: Vec<f32>,
     error: Option<String>,
-    anim_error: Option<String>,
     values: Values,
     start: Instant,
-    last_frame: Instant,
     last_poll: Instant,
     hot_reload: bool,
     drag: Option<DragState>,
     prompt: String,
-    lua_us: f32,
     listen: crate::listen::Listen,
     autolisten: Option<f32>,
 }
@@ -93,15 +90,12 @@ impl EditorState {
             current: None,
             free: Vec::new(),
             error: None,
-            anim_error: None,
             values: Values::default(),
             start: now,
-            last_frame: now,
             last_poll: now,
             hot_reload: true,
             drag: None,
             prompt: String::new(),
-            lua_us: 0.0,
             listen: crate::listen::Listen::new(),
             autolisten: None,
         }
@@ -115,10 +109,6 @@ impl EditorState {
             self.autolisten = Some(s);
         }
         if let Some(cur) = &mut self.current {
-            cur.texture = None;
-            if let Some(panel) = &mut cur.panel {
-                panel.invalidate();
-            }
             if let Some(cp) = &mut cur.components {
                 cp.textures.clear(); // textures belong to the old egui context
             }
@@ -127,8 +117,6 @@ impl EditorState {
 
     fn frame(&mut self, ctx: &egui::Context, setter: &ParamSetter, params: &FxParams, shared: &Shared) {
         let now = Instant::now();
-        let dt = (now - self.last_frame).as_secs_f32().min(0.1);
-        self.last_frame = now;
 
         if self.current.is_none() && self.error.is_none() {
             // Empty name = fresh instance (nothing restored by the host):
@@ -158,14 +146,6 @@ impl EditorState {
         self.values.meter_out = level(shared.meter_out.load(std::sync::atomic::Ordering::Relaxed));
         shared.block_meters(&mut self.values.blocks);
         self.values.time = (now - self.start).as_secs_f32();
-        if let (Some(cur), None) = (&self.current, &self.anim_error) {
-            let t = Instant::now();
-            if let Err(e) = cur.patch.animate(&mut self.values, dt) {
-                self.anim_error = Some(format!("animate() disabled: {e}"));
-            }
-            let us = t.elapsed().as_secs_f32() * 1e6;
-            self.lua_us = if self.lua_us == 0.0 { us } else { self.lua_us * 0.9 + us * 0.1 };
-        }
 
         let mut action = None;
         self.header(ctx, &mut action);
@@ -202,14 +182,7 @@ impl EditorState {
     ) {
         let dir = patches_root().join(name);
         let t = Instant::now();
-        let result = Patch::load(&dir).map_err(|e| e.to_string()).and_then(|p| {
-            let panel = match p.control_panel {
-                Some(_) => Some(SvgControlPanel::load(&p).map_err(|e| e.to_string())?),
-                None => None,
-            };
-            Ok((p, panel))
-        });
-        let (patch, panel) = match result {
+        let patch = match Patch::load(&dir) {
             Ok(ok) => ok,
             Err(e) => {
                 self.error = Some(format!("{name}: {e}"));
@@ -217,7 +190,7 @@ impl EditorState {
             }
         };
         // Component UI: reuse the running one on hot reload so local state survives.
-        let components = if dir.join("ui.lua").is_file() {
+        let components = if patch.has_panel {
             let previous = self
                 .current
                 .as_mut()
@@ -226,6 +199,7 @@ impl EditorState {
             let built = match previous {
                 Some(mut cp) => cp.ui.reload().map(|_| {
                     cp.textures.clear();
+                    cp.spike_uploaded.clear();
                     cp
                 }),
                 None => ui_components::Ui::load(&dir).map(|ui| ComponentPanel {
@@ -233,12 +207,14 @@ impl EditorState {
                     textures: Default::default(),
                     hover: None,
                     active: None,
+                    spike: crate::gpu_spike::Spike::enabled().then(Default::default),
+                    spike_uploaded: Default::default(),
                 }),
             };
             match built {
                 Ok(cp) => Some(cp),
                 Err(e) => {
-                    self.error = Some(format!("{name}/ui.lua: {e}"));
+                    self.error = Some(format!("{name} (panel): {e}"));
                     return;
                 }
             }
@@ -269,17 +245,13 @@ impl EditorState {
         nih_log!("loaded patch '{name}' (reset={reset})");
         self.current = Some(Loaded {
             name: name.to_string(),
-            mtime: patch_mtime(&dir, &patch),
+            mtime: patch_mtime(&dir),
             dir,
             patch,
-            panel,
             components,
-            texture: None,
             load_ms: t.elapsed().as_secs_f32() * 1000.0,
         });
         self.error = None;
-        self.anim_error = None;
-        self.values.vars.clear();
         self.drag = None;
     }
 
@@ -300,7 +272,7 @@ impl EditorState {
         }
         self.last_poll = Instant::now();
         let Some(cur) = &mut self.current else { return };
-        let mtime = patch_mtime(&cur.dir, &cur.patch);
+        let mtime = patch_mtime(&cur.dir);
         if mtime != cur.mtime {
             // Remember the attempt even if it fails, so we don't retry every poll.
             cur.mtime = mtime;
@@ -332,13 +304,8 @@ impl EditorState {
                 }
                 ui.checkbox(&mut self.hot_reload, "hot reload");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(c) = &self.current {
-                        if let Some(a) = &c.patch.author {
-                            ui.weak(format!("by {a}"));
-                        }
-                        if c.patch.has_animator() {
-                            ui.weak("· scripted animation ·");
-                        }
+                    if let Some(a) = self.current.as_ref().and_then(|c| c.patch.author.as_ref()) {
+                        ui.weak(format!("by {a}"));
                     }
                 });
             });
@@ -363,22 +330,11 @@ impl EditorState {
             ui.horizontal(|ui| {
                 let patches = patches_root();
                 if let Some(c) = &self.current {
-                    if let Some(p) = &c.panel {
-                        let s = p.stats;
-                        ui.weak(format!(
-                            "load {:.1}ms · lua {:.0}µs · patch {:.0}µs · usvg {:.2}ms · resvg {:.2}ms · {} renders",
-                            c.load_ms,
-                            self.lua_us,
-                            s.patch_us,
-                            s.parse_us / 1000.0,
-                            s.render_us / 1000.0,
-                            s.renders
-                        ));
-                    }
                     if let Some(cp) = &c.components {
                         let s = cp.ui.stats;
                         ui.weak(format!(
-                            "components: {} · last frame {:.2} ms · {} renders · {} rasters · lua {:.0}µs · svg {:.2}ms",
+                            "load {:.1}ms · components: {} · last frame {:.2} ms · {} renders · {} rasters · lua {:.0}µs · svg {:.2}ms",
+                            c.load_ms,
                             s.nodes,
                             s.total_us / 1000.0,
                             s.renders,
@@ -392,17 +348,8 @@ impl EditorState {
                     ui.weak(format!("patches: {}", patches.display()));
                 });
             });
-            let warnings = self
-                .current
-                .as_ref()
-                .and_then(|c| c.panel.as_ref())
-                .map(|p| p.warnings.clone())
-                .unwrap_or_default();
-            for msg in self.error.iter().chain(&self.anim_error) {
+            if let Some(msg) = &self.error {
                 ui.colored_label(Color32::from_rgb(255, 110, 110), msg);
-            }
-            for w in warnings {
-                ui.colored_label(Color32::from_rgb(240, 200, 90), format!("⚠ {w}"));
             }
             ui.add_space(4.0);
         });
@@ -481,15 +428,6 @@ impl EditorState {
                     ui.label("Meters");
                     ui.add(egui::ProgressBar::new(self.values.meter_in).text("in"));
                     ui.add(egui::ProgressBar::new(self.values.meter_out).text("out"));
-                    if !self.values.vars.is_empty() {
-                        ui.separator();
-                        ui.label("animate() vars");
-                        let mut vars: Vec<_> = self.values.vars.iter().collect();
-                        vars.sort_by(|a, b| a.0.cmp(b.0));
-                        for (k, v) in vars {
-                            ui.weak(format!("{k} = {v:.3}"));
-                        }
-                    }
                 });
             });
 
@@ -511,96 +449,21 @@ impl EditorState {
                 ui.centered_and_justified(|ui| ui.label("No patch loaded"));
                 return;
             };
-            if let Some(cp) = &mut cur.components {
-                component_panel(ui, ctx, avail, cp, &cur.patch, &self.values, &mut self.drag, setter, params, &mut free_change);
-                return;
-            }
-            let Some(panel) = &mut cur.panel else {
-                ui.centered_and_justified(|ui| ui.label("Patch has no SVG UI — use the sidebar"));
-                return;
-            };
-
-            // Fit the SVG into the available space, keeping aspect ratio.
-            let (sw, sh) = panel.size();
-            let scale = (avail.width() / sw).min(avail.height() / sh);
-            let rect = Rect::from_center_size(avail.center(), vec2(sw * scale, sh * scale));
-            let ppp = ctx.pixels_per_point();
-
-            if panel.update(&self.values, (rect.width() * ppp) as u32, (rect.height() * ppp) as u32) {
-                let pm = panel.pixmap().expect("rendered");
-                let img = ColorImage::from_rgba_premultiplied(
-                    [pm.width() as usize, pm.height() as usize],
-                    pm.data(),
-                );
-                match &mut cur.texture {
-                    Some(t) => t.set(img, TextureOptions::LINEAR),
-                    None => cur.texture = Some(ctx.load_texture("patch-panel", img, TextureOptions::LINEAR)),
-                }
-            }
-            if let Some(t) = &cur.texture {
-                ui.painter().image(
-                    t.id(),
-                    rect,
-                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
-            }
-
-            // Interaction: vertical drag on bound elements edits macros/params.
-            let resp = ui.allocate_rect(rect, Sense::click_and_drag());
-            let to_svg = |p: Pos2| ((p.x - rect.min.x) / scale, (p.y - rect.min.y) / scale);
-            let hit = |p: Option<Pos2>| -> Option<(Source, f32)> {
-                let (x, y) = to_svg(p?);
-                panel.drag_target_at(x, y).map(|d| (d.target.clone(), d.range))
-            };
-
-            if self.drag.is_some() || hit(resp.hover_pos()).is_some() {
-                ctx.set_cursor_icon(CursorIcon::ResizeVertical);
-            }
-            let hit_start = hit(resp.interact_pointer_pos());
-            let patch = &cur.patch;
-
-            if resp.drag_started() {
-                if let Some((target, range)) = &hit_start {
-                    if let Some(what) = drag_what(patch, target) {
-                        let start = match what {
-                            DragWhat::Macro(slot) => {
-                                setter.begin_set_parameter(&params.macros[slot].value);
-                                self.values.macros[slot]
-                            }
-                            DragWhat::Param(i) => self.values.params[i],
-                        };
-                        self.drag = Some(DragState { what, range: *range, start, accum: 0.0 });
-                    }
-                }
-            }
-            if resp.dragged() {
-                if let Some(d) = &mut self.drag {
-                    let fine = if ui.input(|i| i.modifiers.shift) { 0.2 } else { 1.0 };
-                    d.accum += resp.drag_delta().y / scale * fine;
-                    let v = (d.start - d.accum / d.range).clamp(0.0, 1.0);
-                    match d.what {
-                        DragWhat::Macro(slot) => setter.set_parameter_normalized(&params.macros[slot].value, v),
-                        DragWhat::Param(i) => free_change = Some((i, patch.params[i].plain(v))),
-                    }
-                }
-            }
-            if resp.drag_stopped() {
-                if let Some(DragState { what: DragWhat::Macro(slot), .. }) = self.drag.take() {
-                    setter.end_set_parameter(&params.macros[slot].value);
-                }
-            }
-            if resp.double_clicked() {
-                // Double-click resets to the patch default.
-                match hit_start.as_ref().and_then(|(t, _)| drag_what(patch, t)) {
-                    Some(DragWhat::Macro(slot)) => {
-                        let param = &params.macros[slot].value;
-                        setter.begin_set_parameter(param);
-                        setter.set_parameter_normalized(param, patch.macro_default(slot));
-                        setter.end_set_parameter(param);
-                    }
-                    Some(DragWhat::Param(i)) => free_change = Some((i, patch.params[i].default_plain())),
-                    None => {}
+            match &mut cur.components {
+                Some(cp) => component_panel(
+                    ui,
+                    ctx,
+                    avail,
+                    cp,
+                    &cur.patch,
+                    &self.values,
+                    &mut self.drag,
+                    setter,
+                    params,
+                    &mut free_change,
+                ),
+                None => {
+                    ui.centered_and_justified(|ui| ui.label("Patch has no panel — use the sidebar"));
                 }
             }
         });
@@ -625,7 +488,7 @@ fn component_panel(
     params: &FxParams,
     free_change: &mut Option<(usize, f32)>,
 ) {
-    let (uw, uh) = (cp.ui.width, cp.ui.height);
+    let (uw, uh) = (ui_components::WIDTH, ui_components::HEIGHT);
     let scale = (avail.width() / uw).min(avail.height() / uh);
     let rect = Rect::from_center_size(avail.center(), vec2(uw * scale, uh * scale));
 
@@ -654,9 +517,29 @@ fn component_panel(
     let inputs = Inputs { time: values.time, hover: cp.hover, active: cp.active, bound: &bound, meter: &meter, series: &series };
     cp.ui.update(&inputs, scale * ctx.pixels_per_point());
 
+    // SPIKE: hand the layers to the GPU compositor (generated background,
+    // content layers, adjustment shader) instead of drawing them with egui.
+    if let Some(spike) = &cp.spike {
+        let mut frame = crate::gpu_spike::Frame { time: values.time, level: values.meter_out, layers: Vec::new() };
+        for layer in cp.ui.layers() {
+            let Some(pm) = layer.pixmap else { continue };
+            let known = cp.spike_uploaded.contains(&layer.id);
+            frame.layers.push(crate::gpu_spike::LayerIn {
+                id: layer.id,
+                rect01: [layer.rect.x / uw, layer.rect.y / uh, layer.rect.w / uw, layer.rect.h / uh],
+                upload: (layer.changed || !known).then(|| (pm.width(), pm.height(), pm.data().to_vec())),
+            });
+        }
+        cp.spike_uploaded = frame.layers.iter().map(|l| l.id).collect();
+        spike.submit(frame);
+        ui.painter().add(spike.callback(rect));
+        ui.painter().text(rect.left_top() + vec2(8.0, 8.0), egui::Align2::LEFT_TOP, spike.status(), egui::FontId::monospace(11.0), Color32::from_rgb(255, 220, 120));
+        ctx.request_repaint();
+    }
+
     // Upload changed layers, draw all, forget vanished ones.
     let mut alive = std::collections::HashSet::new();
-    for layer in cp.ui.layers() {
+    for layer in cp.ui.layers().into_iter().filter(|_| cp.spike.is_none()) {
         let Some(pm) = layer.pixmap else { continue };
         alive.insert(layer.id);
         if layer.changed || !cp.textures.contains_key(&layer.id) {
@@ -674,7 +557,9 @@ fn component_panel(
         );
         ui.painter().image(cp.textures[&layer.id].id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
     }
-    cp.textures.retain(|id, _| alive.contains(id));
+    if cp.spike.is_none() {
+        cp.textures.retain(|id, _| alive.contains(id));
+    }
 
     // Interaction
     let resp = ui.allocate_rect(rect, Sense::click_and_drag());
@@ -768,15 +653,24 @@ fn scan_patches() -> Vec<String> {
         .collect()
 }
 
-fn patch_mtime(dir: &Path, patch: &Patch) -> Option<SystemTime> {
-    let mut files = vec![dir.join("patch.lua"), dir.join("ui.lua")];
-    if let Some(ui) = &patch.control_panel {
-        files.push(ui.svg.clone());
+/// Newest modification time of any `.luau` file in the patch folder (patch.luau
+/// and everything it may require, including subfolders).
+fn patch_mtime(dir: &Path) -> Option<SystemTime> {
+    fn walk(dir: &Path, depth: usize, newest: &mut Option<SystemTime>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.is_dir() && depth < 4 {
+                walk(&path, depth + 1, newest);
+            } else if path.extension().is_some_and(|x| x == "luau") {
+                let t = e.metadata().and_then(|m| m.modified()).ok();
+                *newest = (*newest).max(t);
+            }
+        }
     }
-    files
-        .iter()
-        .filter_map(|f| std::fs::metadata(f).and_then(|m| m.modified()).ok())
-        .max()
+    let mut newest = None;
+    walk(dir, 0, &mut newest);
+    newest
 }
 
 /// The shell's own fixed style: neutral graphite + one accent, deliberately

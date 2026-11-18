@@ -1,0 +1,10 @@
+{
+  "luau-lsp.platform.type": "standard",
+  "luau-lsp.sourcemap.enabled": false,
+  "luau-lsp.types.definitionFiles": {
+    "@scriptfx": "patches/.types/scriptfx.d.luau"
+  },
+  "files.associations": {
+    "*.luau": "luau"
+  }
+}
