@@ -150,8 +150,13 @@ function SVG.arc(o)
   local stroke = fmt('stroke="%s" stroke-width="%s" stroke-linecap="%s" fill="none"%s', o.stroke or "#fff", num(o.width or 2), o.cap or "round",
     o.opacity and fmt(' opacity="%s"', num(o.opacity)) or "")
   if o.glow and o.glow > 0 then
-    -- Filter region just large enough for the glow (relative to the arc's size).
-    local id, defs = SVG.blur(o.glow, math.min(0.5, (o.glow * 2.5) / (2 * o.r)))
+    -- Filter region in user space around the whole circle plus the blur's reach. A region
+    -- relative to the path (objectBoundingBox) shrank with the arc: a short arc (knob turned
+    -- down) cut its own glow off, worst with the wider hover glow.
+    local id = new_id("blur")
+    local m = o.r + (o.width or 2) / 2 + o.glow * 3
+    local defs = fmt('<defs><filter id="%s" filterUnits="userSpaceOnUse" x="%s" y="%s" width="%s" height="%s"><feGaussianBlur stdDeviation="%s"/></filter></defs>',
+      id, num(o.cx - m), num(o.cy - m), num(2 * m), num(2 * m), num(o.glow))
     return defs .. fmt('<path d="%s" %s filter="url(#%s)" opacity="0.9"/><path d="%s" %s/>', d, stroke, id, d, stroke)
   end
   return fmt('<path d="%s" %s/>', d, stroke)

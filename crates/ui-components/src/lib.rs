@@ -535,15 +535,19 @@ impl Ui {
             }
         };
         let t1 = Instant::now();
-        // Rasterise only the area that has content (incl. strokes/filters), snapped
-        // to whole device pixels and clipped to the component.
+        // Rasterise only the area that has content (incl. strokes/filters), snapped to whole
+        // device pixels. Content may spill over the component's box by up to OVERFLOW: glows
+        // and soft shadows naturally reach past it (a dragged Neon knob's glow was cut at the
+        // top), and authors shouldn't have to pad every component for them. The cap keeps a
+        // runaway component from producing a huge layer. Hit testing stays the component box.
+        const OVERFLOW: f32 = 32.0;
         let bbox = tree.root().abs_layer_bounding_box();
         let (cx0, cy0, cx1, cy1) = match bbox {
             Some(b) => (
-                ((b.left().max(0.0) * scale).floor() / scale),
-                ((b.top().max(0.0) * scale).floor() / scale),
-                ((b.right().min(w) * scale).ceil() / scale),
-                ((b.bottom().min(h) * scale).ceil() / scale),
+                ((b.left().max(-OVERFLOW) * scale).floor() / scale),
+                ((b.top().max(-OVERFLOW) * scale).floor() / scale),
+                ((b.right().min(w + OVERFLOW) * scale).ceil() / scale),
+                ((b.bottom().min(h + OVERFLOW) * scale).ceil() / scale),
             ),
             None => (0.0, 0.0, 0.0, 0.0),
         };
