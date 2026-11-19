@@ -6,6 +6,9 @@ members = ["crates/*"]
 edition = "2024"
 rust-version = "1.89"
 
-# Patched copies of git dependencies (see vendor/*/PATCHES.md).
-[patch."https://github.com/RustAudio/baseview.git"]
+# Patched copies of crates.io dependencies (see vendor/*/PATCHES.md).
+[patch.crates-io]
+nice-plug = { path = "vendor/nice-plug" }
+nice-plug-core = { path = "vendor/nice-plug-core" }
+iced_wgpu = { path = "vendor/iced_wgpu" }
 baseview = { path = "vendor/baseview" }

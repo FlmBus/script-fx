@@ -1,1 +1,0 @@
-Vendored from https://github.com/robbert-vdh/nih-plug at de421011 (ISC). Local patches: see PATCHES.md

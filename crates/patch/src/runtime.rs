@@ -1,5 +1,5 @@
 //! The sandboxed Luau runtime shared by the DSP side (`Patch::load`) and the UI
-//! (`ui_components::Ui`): both evaluate the same `patch.luau`, which `require`s
+//! (`ui_components::Ui`): both evaluate the same `init.luau`, which `require`s
 //! its UI files.
 //!
 //! Sandbox: Luau's sandbox mode (read-only globals and builtins), no `loadstring`
@@ -25,8 +25,9 @@ const MEMORY_LIMIT: usize = 16 * 1024 * 1024;
 const PATCH_PRELUDE: &str = include_str!("prelude.luau");
 const UI_PRELUDE: &str = include_str!("ui_prelude.luau");
 
-/// The patch's entry file.
-pub const ENTRY: &str = "patch.luau";
+/// The patch's entry module: the patch folder itself, i.e. `init.luau` (or `init.lua`), loaded
+/// with Luau's `require` rules. Inside it, the patch's own files are `@self/...`.
+pub const ENTRY_FILES: [&str; 2] = ["init.luau", "init.lua"];
 
 /// A sandboxed Lua state for one patch folder.
 pub struct Runtime {
@@ -69,20 +70,29 @@ impl Runtime {
         self.budget.store(0, Ordering::Relaxed);
     }
 
-    /// Evaluates `patch.luau` (fresh: the `require` cache is cleared first, so
-    /// edited UI files are picked up) and returns the `Patch` object it returns.
+    /// Loads the patch folder as a Luau module (fresh: the `require` cache is cleared first, so
+    /// edited files are picked up) and returns the `Patch` object it returns. Same rules as any
+    /// `require` of a folder: `init.luau`, else `init.lua`; both is an error ("ambiguous").
     pub fn eval_patch(&self) -> Result<Table, PatchError> {
         let _c = locale::CNumeric::enter();
         if let Ok(cache) = self.lua.named_registry_value::<Table>("__MLUA_LOADER_CACHE") {
             cache.clear()?;
         }
-        let file = self.dir.join(ENTRY);
-        let src = std::fs::read_to_string(&file)?;
+        match ENTRY_FILES.iter().filter(|f| self.dir.join(f).is_file()).count() {
+            0 => return Err(invalid(format!("{}: no init.luau", self.dir.display()))),
+            1 => {}
+            _ => return Err(invalid("both init.luau and init.lua exist (ambiguous); remove one")),
+        }
+        let Some(name) = self.dir.file_name().and_then(|n| n.to_str()) else {
+            return Err(invalid("the patch folder has no usable name"));
+        };
+        // `require("./<folder>")`, starting from the folder itself (`./` = next to it).
         self.begin_call();
-        let result: Value = self.lua.load(src).set_name(format!("@{}", file.display())).eval()?;
+        let result: Value =
+            self.lua.load("return require(...)").set_name(format!("@{}", self.dir.display())).call(format!("./{name}"))?;
         match result {
             Value::Table(t) if t.get::<Option<bool>>("__is_patch")?.unwrap_or(false) => Ok(t),
-            _ => Err(invalid(format!("{ENTRY} must end with `return Patch.new(...)`"))),
+            _ => Err(invalid("init.luau must end with `return Patch.new(...)`")),
         }
     }
 
@@ -115,6 +125,15 @@ impl Require for PatchRequirer {
         self.inner.is_require_allowed(chunk)
     }
     fn reset(&mut self, chunk: &str) -> Nav {
+        // An `init.lua(u)` is its folder's module (Luau's rule, as luau-lsp sees it): requires
+        // from it are relative to the folder (`@self/x` inside it, `./x` next to it).
+        if let Some(path) = chunk.strip_prefix('@').map(Path::new) {
+            if path.file_name().and_then(|n| n.to_str()).is_some_and(|n| ENTRY_FILES.contains(&n)) {
+                if let Some(dir) = path.parent() {
+                    return self.inner.reset(&format!("@{}", dir.display()));
+                }
+            }
+        }
         self.inner.reset(chunk)
     }
     fn jump_to_alias(&mut self, path: &str) -> Nav {
@@ -141,7 +160,9 @@ impl Require for PatchRequirer {
     fn loader(&self, lua: &Lua) -> mlua::Result<Function> {
         let path = Path::new(&self.inner.cache_key()).canonicalize().map_err(mlua::Error::external)?;
         if !path.starts_with(&self.root) {
-            return Err(mlua::Error::runtime("require: only files inside the patch folder can be loaded"));
+            return Err(mlua::Error::runtime(
+                "require: only files inside the patch folder can be loaded (in init.luau, the patch's own files are \"@self/...\")",
+            ));
         }
         // Named by its real file path, so errors read ".../ui.luau:12: ..." and
         // relative requires inside it resolve from its folder.

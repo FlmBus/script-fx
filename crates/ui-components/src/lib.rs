@@ -1,6 +1,6 @@
 //! Reactive UI components: Lua `render(props)` → SVG → one cached image per component.
 //!
-//! The UI is the `panel` of the patch: `patch.luau` requires its UI files and
+//! The UI is the `panel` of the patch: `init.luau` requires its UI files and
 //! passes `Patch.new(..., { panel = Panel.new({ ... }) })`, wiring macros, params
 //! and metered blocks into the components as props. Every ControlPanel has the
 //! same logical size, [`WIDTH`] × [`HEIGHT`]; the shell scales it to the window.
@@ -24,6 +24,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use mlua::{Function, Lua, Table, Value};
+
+pub mod glyph_font;
 use resvg::usvg::{ImageHrefResolver, fontdb};
 use resvg::{tiny_skia, usvg};
 

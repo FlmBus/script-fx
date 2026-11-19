@@ -1,6 +1,6 @@
 //! Patch model + sandboxed Lua loader.
 //!
-//! A patch is a folder containing `patch.luau` (Luau) plus the UI files it
+//! A patch is a folder containing `init.luau` (Luau) plus the UI files it
 //! `require`s (components, see the `ui-components` crate). Lua only *describes*
 //! the patch, using the API from `prelude.luau` (runtime: [`runtime`]):
 //!
@@ -12,7 +12,7 @@
 //!   all others are free and keep their own value (persisted with the host project).
 //! - `Chain.new { Blocks.<Type>.new(id, {...}), ... }`: the effect chain (see [`chain`]),
 //!   compiled to native DSP by the `dsp` crate. Lua never runs on the audio thread.
-//! - `Patch.new(name, { chain, macros, theme, author, panel })` is what `patch.luau` returns;
+//! - `Patch.new(name, { chain, macros, theme, author, panel })` is what `init.luau` returns;
 //!   `panel` is the root component instance of the ControlPanel.
 
 use std::collections::BTreeMap;
@@ -183,12 +183,69 @@ pub enum Source {
     Block(usize),
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct Theme(pub BTreeMap<String, String>);
+/// The patch's design tokens (`theme` in `Patch.new`). `colors`, `fonts` and `images` are the
+/// patch's own names (fonts/images as paths relative to the patch folder); `library` overrides
+/// them for the library card. The shell reads `colors.accent/bg/ink`, `fonts.title` and
+/// `images.logo` unless `library` says otherwise.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Theme {
+    pub colors: BTreeMap<String, String>,
+    pub fonts: BTreeMap<String, String>,
+    pub images: BTreeMap<String, String>,
+    pub library: LibraryTheme,
+}
+
+/// What the library card uses where it differs from the shared tokens.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LibraryTheme {
+    pub accent: Option<String>,
+    pub bg: Option<String>,
+    pub ink: Option<String>,
+    /// Font path.
+    pub font: Option<String>,
+    /// Image path.
+    pub logo: Option<String>,
+}
 
 impl Theme {
-    pub fn get(&self, key: &str) -> Option<&str> {
-        self.0.get(key).map(String::as_str)
+    pub fn color(&self, name: &str) -> Option<&str> {
+        self.colors.get(name).map(String::as_str)
+    }
+
+    pub fn library_accent(&self) -> Option<&str> {
+        self.library.accent.as_deref().or(self.color("accent"))
+    }
+
+    pub fn library_bg(&self) -> Option<&str> {
+        self.library.bg.as_deref().or(self.color("bg"))
+    }
+
+    pub fn library_ink(&self) -> Option<&str> {
+        self.library.ink.as_deref().or(self.color("ink"))
+    }
+
+    /// The library card's title font (path).
+    pub fn title_font(&self) -> Option<&str> {
+        self.library.font.as_deref().or(self.fonts.get("title").map(String::as_str))
+    }
+
+    /// The library card's logo (path).
+    pub fn logo(&self) -> Option<&str> {
+        self.library.logo.as_deref().or(self.images.get("logo").map(String::as_str))
+    }
+
+    /// Every asset path with where it's used, for validation.
+    fn assets(&self) -> Vec<(String, &str, &'static [&'static str])> {
+        const FONT: &[&str] = &["ttf", "otf", "svg", "fnt"];
+        const IMAGE: &[&str] = &["svg", "png"];
+        let mut out: Vec<(String, &str, &'static [&'static str])> = Vec::new();
+        out.extend(self.fonts.iter().map(|(k, v)| (format!("theme.fonts.{k}"), v.as_str(), FONT)));
+        out.extend(self.images.iter().map(|(k, v)| (format!("theme.images.{k}"), v.as_str(), IMAGE)));
+        out.extend(self.library.font.as_deref().map(|v| ("theme.library.font".to_string(), v, FONT)));
+        out.extend(self.library.logo.as_deref().map(|v| ("theme.library.logo".to_string(), v, IMAGE)));
+        out
     }
 }
 
@@ -234,7 +291,23 @@ pub struct Patch {
 }
 
 impl Patch {
-    /// Loads `<dir>/patch.luau` for the DSP side: evaluates it (including the UI
+    /// No patch: an empty chain (the signal passes through), no params or macros.
+    pub fn empty() -> Self {
+        Patch {
+            name: String::new(),
+            author: None,
+            dir: PathBuf::new(),
+            params: Vec::new(),
+            macros: Vec::new(),
+            controls: Vec::new(),
+            chain: Vec::new(),
+            meters: Vec::new(),
+            theme: Theme::default(),
+            has_panel: false,
+        }
+    }
+
+    /// Loads `<dir>/init.luau` for the DSP side: evaluates it (including the UI
     /// files it requires, but without rendering anything) and turns the returned
     /// `Patch` object into plain data via the prelude's export function.
     pub fn load(dir: impl AsRef<Path>) -> Result<Self, PatchError> {
@@ -249,7 +322,14 @@ impl Patch {
         let author: Option<String> = root.get("author")?;
         let params: Vec<ParamSpec> = opt_from_lua(lua, root.get("params")?)?;
         let macros: Vec<MacroSpec> = opt_from_lua(lua, root.get("macros")?)?;
-        let theme = Theme(opt_from_lua(lua, root.get("theme")?)?);
+        let theme: Theme = opt_from_lua(lua, root.get("theme")?)?;
+        for (key, rel, exts) in theme.assets() {
+            let path = resolve_inside(&dir, rel).map_err(|e| invalid(format!("{key} '{rel}': {e}")))?;
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+            if !exts.contains(&ext.as_str()) {
+                return Err(invalid(format!("{key} '{rel}': must be {}", exts.join(" or "))));
+            }
+        }
         let controls = resolve_controls(&params, &macros)?;
         let chain: Vec<BlockSpec> = opt_from_lua(lua, root.get("chain")?)?;
         let meters = chain::validate(&chain, &params)?;
@@ -417,14 +497,14 @@ pub fn resolve_inside(dir: &Path, rel: &str) -> Result<PathBuf, PatchError> {
     Ok(full)
 }
 
-/// Lists patch folders (those containing `patch.luau`) in `root`, sorted.
+/// Lists patch folders (those containing `init.luau`) in `root`, sorted.
 pub fn discover(root: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = std::fs::read_dir(root)
         .into_iter()
         .flatten()
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.join(runtime::ENTRY).is_file())
+        .filter(|p| runtime::ENTRY_FILES.iter().any(|f| p.join(f).is_file()))
         .collect();
     out.sort();
     out
@@ -445,7 +525,7 @@ mod tests {
                 N.fetch_add(1, Ordering::Relaxed)
             ));
             std::fs::create_dir_all(&p).unwrap();
-            std::fs::write(p.join("patch.luau"), src).unwrap();
+            std::fs::write(p.join("init.luau"), src).unwrap();
             TempDir(p)
         }
     }
@@ -485,7 +565,7 @@ mod tests {
         chain:add(Blocks.PeakEq.new("e", { freq = 100, gain = free }))
         chain:add(Blocks.LowPass.new("lp", { freq = tone }))
 
-        return Patch.new("T", { chain = chain, macros = { character, drv }, theme = { accent = "#ff0000" } })
+        return Patch.new("T", { chain = chain, macros = { character, drv }, theme = { colors = { accent = "#ff0000" } } })
     "##;
 
     #[test]
@@ -497,7 +577,7 @@ mod tests {
         assert_eq!(p.meters, vec!["c1", "r", "t"]);
         assert_eq!(p.resolve_source("meter.r").unwrap(), Source::Block(1));
         assert_eq!(p.chain.len(), 5);
-        assert_eq!(p.theme.get("accent"), Some("#ff0000"));
+        assert_eq!(p.theme.color("accent"), Some("#ff0000"));
         assert_eq!(p.controls[2], Control::Macro { slot: 1, from: 0.0, to: 10.0, curve: Curve::Lin });
         assert_eq!(p.controls[1], Control::Free);
         let mut macros = [0.0; MACRO_SLOTS];
@@ -621,7 +701,7 @@ mod tests {
         ] {
             let err = load(&format!("return Patch.new('T', {{ chain = Chain.new {{ {src} }} }})")).err().unwrap().to_string();
             assert!(err.contains(msg), "{src}: expected '{msg}', got: {err}");
-            assert!(err.contains("patch.luau:1:"), "{src}: error should point at the patch: {err}");
+            assert!(err.contains("init.luau:1:"), "{src}: error should point at the patch: {err}");
         }
     }
 
@@ -631,7 +711,7 @@ mod tests {
             .err()
             .unwrap()
             .to_string();
-        assert!(err.contains("patch.luau:2:"), "{err}");
+        assert!(err.contains("init.luau:2:"), "{err}");
         assert!(err.contains("'max' is required"), "{err}");
     }
 
@@ -662,9 +742,55 @@ mod tests {
     }
 
     #[test]
+    fn theme_holds_tokens_and_library_overrides() {
+        let src = |theme: &str| {
+            format!(
+                "local g = Param.new('g', 'G', {{ min = -24, max = 0 }})
+                 return Patch.new('T', {{ chain = Chain.new({{ Blocks.Gain.new('out', {{ db = g }}) }}), theme = {theme} }})"
+            )
+        };
+        let good = r##"{
+            colors = { accent = "#ff0000", bg = "#101010", rust = "#8a3b1c" },
+            fonts = { title = Font.new("fonts/a.ttf"), body = Font.new("fonts/b.svg") },
+            images = { logo = Image.new("logo.svg") },
+            library = { bg = "#202020", font = Font.new("fonts/b.svg") },
+        }"##;
+        let d = TempDir::with_patch(&src(good));
+        std::fs::create_dir_all(d.0.join("fonts")).unwrap();
+        for f in ["fonts/a.ttf", "fonts/b.svg", "logo.svg", "logo.gif"] {
+            std::fs::write(d.0.join(f), b"x").unwrap();
+        }
+        let p = Patch::load(&d.0).unwrap();
+        let t = &p.theme;
+        assert_eq!(t.color("rust"), Some("#8a3b1c"));
+        assert_eq!(t.library_accent(), Some("#ff0000")); // shared token
+        assert_eq!(t.library_bg(), Some("#202020")); // library override
+        assert_eq!(t.title_font(), Some("fonts/b.svg")); // library.font wins over fonts.title
+        assert_eq!(t.logo(), Some("logo.svg"));
+        assert_eq!(t.fonts.get("body").map(String::as_str), Some("fonts/b.svg"));
+
+        for (theme, msg) in [
+            (r##"{ colours = {} }"##, "theme: unknown key 'colours'"),
+            (r##"{ colors = { accent = "red" } }"##, "theme.colors.accent must be a colour"),
+            (r##"{ fonts = { title = "fonts/a.ttf" } }"##, "theme.fonts.title must be a Font"),
+            (r##"{ images = { logo = Font.new("fonts/a.ttf") } }"##, "theme.images.logo must be an Image (Image.new(path)), got a Font"),
+            (r##"{ library = { fnt = Font.new("fonts/a.ttf") } }"##, "theme.library: unknown key 'fnt'"),
+            (r##"{ library = { logo = Image.new("logo.svg"), ink = "#fff" } }"##, "theme.library.ink must be a colour"),
+            (r##"{ fonts = { title = Font.new("fonts/missing.ttf") } }"##, "theme.fonts.title 'fonts/missing.ttf'"),
+            (r##"{ images = { logo = Image.new("logo.gif") } }"##, "must be .png, .svg"),
+            (r##"{ images = { logo = Image.new("../outside.svg") } }"##, "must be a path inside the patch folder"),
+            (r##"{ fonts = { title = Font.new("logo.gif") } }"##, "must be .fnt, .otf, .svg, .ttf"),
+        ] {
+            std::fs::write(d.0.join("init.luau"), src(theme)).unwrap();
+            let err = Patch::load(&d.0).err().map(|e| e.to_string()).unwrap_or_default();
+            assert!(err.contains(msg), "{theme}: expected '{msg}', got: {err}");
+        }
+    }
+
+    #[test]
     fn requires_ui_files_from_the_patch_folder_only() {
         let d = TempDir::with_patch(
-            "local ui = require('./ui')
+            "local ui = require('@self/ui')
              local g = Param.new('g', 'G', { min = -24, max = 0 })
              local m = Macro.new('m', 'M'):drives(g)
              return Patch.new('T', { chain = Chain.new({ Blocks.Gain.new('out', { db = g }) }), macros = { m },
@@ -704,9 +830,31 @@ mod tests {
         let outside = d.0.parent().unwrap().join(format!("outside-{}.luau", std::process::id()));
         std::fs::write(&outside, "return 1").unwrap();
         let name = outside.file_stem().unwrap().to_str().unwrap();
-        std::fs::write(d.0.join("patch.luau"), format!("require('../{name}') return Patch.new('T')")).unwrap();
-        let err = Patch::load(&d.0).err().unwrap().to_string();
+        // init.luau is the folder's module: `./x` is a sibling of the folder, `../x` above it.
+        for req in [format!("./{name}"), format!("../{}/{name}", d.0.parent().unwrap().file_name().unwrap().to_str().unwrap())] {
+            std::fs::write(d.0.join("init.luau"), format!("require('{req}') return Patch.new('T')")).unwrap();
+            let err = Patch::load(&d.0).err().unwrap().to_string();
+            assert!(err.contains("only files inside the patch folder") && err.contains("@self/"), "{req}: {err}");
+        }
         let _ = std::fs::remove_file(&outside);
-        assert!(err.contains("only files inside the patch folder"), "{err}");
+    }
+
+    #[test]
+    fn the_patch_folder_is_a_luau_module() {
+        // init.lua works too (Luau's rules for a folder module) ...
+        let d = TempDir::with_patch("return Patch.new('luau')");
+        std::fs::remove_file(d.0.join("init.luau")).unwrap();
+        std::fs::write(d.0.join("init.lua"), "local x = require('@self/x') return Patch.new(x)").unwrap();
+        std::fs::write(d.0.join("x.lua"), "return 'from init.lua'").unwrap();
+        assert_eq!(Patch::load(&d.0).unwrap().name, "from init.lua");
+        assert_eq!(discover(d.0.parent().unwrap()).iter().filter(|p| **p == d.0).count(), 1);
+        // ... but not both.
+        std::fs::write(d.0.join("init.luau"), "return Patch.new('luau')").unwrap();
+        let err = Patch::load(&d.0).err().unwrap().to_string();
+        assert!(err.contains("ambiguous"), "{err}");
+        // No entry at all.
+        std::fs::remove_file(d.0.join("init.luau")).unwrap();
+        std::fs::remove_file(d.0.join("init.lua")).unwrap();
+        assert!(Patch::load(&d.0).err().unwrap().to_string().contains("no init.luau"));
     }
 }

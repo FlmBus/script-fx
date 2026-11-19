@@ -25,12 +25,18 @@ fn bundled_patches_type_check() {
     let mut files = Vec::new();
     // Factory patches plus the DSP test fixtures (which use every block).
     let roots = [root.join("patches"), root.join("crates/dsp/tests/fixtures")];
-    for dir in roots.iter().flat_map(|r| patch::discover(r)) {
-        for e in std::fs::read_dir(&dir).unwrap().flatten() {
-            if e.path().extension().is_some_and(|x| x == "luau") {
-                files.push(e.path().strip_prefix(&root).unwrap().to_path_buf());
+    fn luau_files(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                luau_files(&path, root, out); // e.g. ui/ modules
+            } else if path.extension().is_some_and(|x| x == "luau") {
+                out.push(path.strip_prefix(root).unwrap().to_path_buf());
             }
         }
+    }
+    for dir in roots.iter().flat_map(|r| patch::discover(r)) {
+        luau_files(&dir, &root, &mut files);
     }
     assert!(files.len() >= 7, "found {files:?}");
     let out = Command::new(bin)

@@ -8,13 +8,18 @@ rust-version.workspace = true
 analysis = { version = "0.1.0", path = "../analysis" }
 dirs = "7.0.0"
 dsp = { version = "0.1.0", path = "../dsp" }
-egui_glow = { version = "0.31", default-features = false }
 hound = "3.5.1"
 include_dir = "0.7.4"
-naga = { version = "30", features = ["wgsl-in", "glsl-out"] }
-nih_plug = { path = "../../vendor/nih-plug", features = ["standalone", "assert_process_allocs"] }
-nih_plug_egui = { path = "../../vendor/nih-plug/nih_plug_egui" }
+# Vendored + patched (runtime parameter names), see vendor/nice-plug/PATCHES.md.
+nice-plug = { version = "0.4.2", features = ["standalone", "assert_process_allocs"] }
+nice-plug-iced = { version = "0.5.0", features = ["markdown", "svg", "canvas", "advanced", "image-without-codecs"] }
+# Vendored + patched (frame timing for the dev readout and later the GPU budget),
+# see vendor/iced_wgpu/PATCHES.md.
+iced_wgpu = "0.14"
 patch = { version = "0.1.0", path = "../patch" }
+# Patch logos (SVG size, PNG decode) and fonts (family/weight), same versions ui-components uses.
+resvg = "0.50.0"
+ttf-parser = "0.25"
 rtrb = "0.4.1"
 serde_json = "1.0.154"
 ui-components = { version = "0.1.0", path = "../ui-components" }

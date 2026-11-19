@@ -2,9 +2,11 @@
 -- Also the compact API description to hand to an LLM.
 --
 -- A patch folder has:
---   patch.luau  params, macros, chain; requires its UI files and returns
---               Patch.new(name, { chain, macros, panel = ui.Panel.new({ ...handles }) })
---   ui.luau     (or any files patch.luau requires, e.g. ./components/knob) — UI components
+--   init.luau   the entry point (or init.lua): the patch folder as a Luau module, returning
+--               Patch.new(name, { chain, macros, theme, panel }). Everything else is up to the
+--               author: one file for a simple patch, or parts in their own modules. Luau's rule
+--               for init files: inside init.luau the patch's own files are "@self/...":
+--               `theme = require("@self/theme")`, `require("@self/ui")`. Other files use "./x".
 --
 -- Conventions: constructors take the identity positionally (id, display name)
 -- and every setting by name in an options table. Unknown options, missing
@@ -234,9 +236,33 @@ declare Blocks: {
 
 declare Meters: { IN: LevelMeter, OUT: LevelMeter }
 
+-- A font file from the patch folder: .ttf/.otf, .svg (SVG 1.1 `<font>`: glyphs as paths or shapes,
+-- drawn in `currentColor`) or .fnt (BMFont image font + PNG atlas).
+declare extern type Font with
+  path: string
+end
+declare Font: { new: (path: string) -> Font }
+
+-- An image file from the patch folder: .svg or .png.
+declare extern type Image with
+  path: string
+end
+declare Image: { new: (path: string) -> Image }
+
+--- The patch's design tokens, shared by the library card and the ControlPanel (`p.theme`).
+--- `colors` / `fonts` / `images`: the patch's own names. The shell uses `colors.accent`, `.bg`,
+--- `.ink`, `fonts.title` and `images.logo` (the card shows the logo instead of the title);
+--- `library` overrides them for the library card only. Colours are "#rrggbb".
+export type Theme = {
+  colors: { [string]: string }?,
+  fonts: { [string]: Font }?,
+  images: { [string]: Image }?,
+  library: { accent: string?, bg: string?, ink: string?, font: Font?, logo: Image? }?,
+}
+
 declare Patch: {
   -- macros: order = host automation slots 1..16; panel: the ControlPanel's root instance
-  new: (name: string, o: { author: string?, chain: Chain?, macros: { Macro }?, theme: { [string]: string }?,
+  new: (name: string, o: { author: string?, chain: Chain?, macros: { Macro }?, theme: Theme?,
                            panel: ComponentInstance? }?) -> Patch,
 }
 

@@ -27,7 +27,7 @@ impl Drop for TempDir {
 
 fn load(chain: &str, setup: &str) -> Patch {
     let d = TempDir::new();
-    std::fs::write(d.0.join("patch.luau"), format!("{setup}\nreturn Patch.new('T', {{ chain = Chain.new {{ {chain} }} }})"))
+    std::fs::write(d.0.join("init.luau"), format!("{setup}\nreturn Patch.new('T', {{ chain = Chain.new {{ {chain} }} }})"))
         .unwrap();
     Patch::load(&d.0).unwrap_or_else(|e| panic!("{chain}: {e}"))
 }

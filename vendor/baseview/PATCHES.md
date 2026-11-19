@@ -1,18 +1,16 @@
 # Local patches to baseview
 
-Vendored from https://github.com/RustAudio/baseview at `9a0b42c` (MIT OR Apache-2.0), the
-revision egui-baseview uses. Applied workspace-wide via `[patch]` in the root `Cargo.toml`
-(this also replaces the `579130e` revision nih-plug's standalone wrapper asks for).
-Examples, dev-dependencies and the `[workspace]` section were dropped. Changes are marked `PATCH(scriptfx)`.
+Vendored from crates.io: `baseview` 0.4.2 (MIT OR Apache-2.0), the version iced_baseview 0.6 uses.
+Applied via `[patch.crates-io]`. Changes are marked `PATCH(scriptfx)`.
 
-## 1. No panics on GLX errors (`src/gl/x11.rs`)
+## 1. X11: always pace frames with the timer (`src/platform/x11/present.rs`)
 
-`make_current`, `make_not_current` and `swap_buffers` used to `unwrap()` X errors. The panic
-kills the editor's window thread, which leaves a blank plugin window. Seen with Reaper on
-Linux (NVIDIA proprietary driver, Hyprland/XWayland):
+baseview paces X11 frames with Present-extension MSC notifications. Under XWayland (NVIDIA,
+Hyprland) these never arrive for our windows: with the original path the editor drew at ~5 fps
+(only iced_baseview's poll timer drew). baseview's own fallback (a 15 ms frame timer, used when
+Present isn't available) works, so it's now always used. `BASEVIEW_X11_PRESENT=1` restores the
+Present path for testing.
 
-- `GLXBadDrawable` when the editor is closed and reopened (the host destroys the parent
-  window while a frame is being drawn)
-- `GLXBadContext` in the standalone when the WM tiles/resizes the window
-
-Now the error is logged once per call site to stderr and the frame is skipped.
+Related finding (not a patch): iced_baseview's poll timer also triggers a redraw; at its default
+interval (1/64 s) it fired ~1000×/s here (1000+ fps, 35–40 % CPU). The shell sets a 250 ms poll
+interval (`crates/plugin/src/shell/mod.rs`). Result: ~70 fps, 9–13 % CPU with an animated panel.

@@ -1012,7 +1012,7 @@ mod tests {
     fn patch_with(chain: &str, setup: &str) -> (Patch, TempDir) {
         let d = TempDir::new();
         std::fs::write(
-            d.0.join("patch.luau"),
+            d.0.join("init.luau"),
             format!("{setup}\nreturn Patch.new('T', {{ chain = Chain.new {{ {chain} }} }})"),
         )
         .unwrap();
@@ -1143,7 +1143,7 @@ mod tests {
     fn param_refs_follow_macros() {
         let d = TempDir::new();
         std::fs::write(
-            d.0.join("patch.luau"),
+            d.0.join("init.luau"),
             "local g = Param.new('g', 'G', { min = -24, max = 0 })
              local m = Macro.new('m', 'M'):drives(g)
              return Patch.new('T', { chain = Chain.new { Blocks.Gain.new('out', { db = g }) }, macros = { m } })",
@@ -1270,7 +1270,7 @@ mod tests {
 
     fn latency(chain: &str, sr: f32) -> usize {
         let d = TempDir::new();
-        std::fs::write(d.0.join("patch.luau"), format!("return Patch.new('T', {{ chain = Chain.new {{ {chain} }} }})")).unwrap();
+        std::fs::write(d.0.join("init.luau"), format!("return Patch.new('T', {{ chain = Chain.new {{ {chain} }} }})")).unwrap();
         let p = Patch::load(&d.0).unwrap();
         Graph::build(&p, sr, &p.default_param_values()).latency()
     }
@@ -1380,7 +1380,7 @@ mod tests {
         let alias = |opts: &str| {
             let d = TempDir::new();
             std::fs::write(
-                d.0.join("patch.luau"),
+                d.0.join("init.luau"),
                 format!("return Patch.new('T', {{ chain = Chain.new {{ Blocks.Drive.new('d', {{ amount = 24 {opts} }}) }} }})"),
             )
             .unwrap();

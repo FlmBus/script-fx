@@ -9,13 +9,13 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use dsp::{Atomics, Frame, Graph, SUB_BLOCK};
 use include_dir::{Dir, include_dir};
-use nih_plug::prelude::*;
-use nih_plug_egui::EguiState;
+use nice_plug::prelude::*;
+use nice_plug_iced::IcedEditorState;
+use nice_plug_iced::iced::PollSubNotifier;
 use patch::{MACRO_SLOTS, Patch};
 
-mod gpu_spike;
-mod shell;
 mod listen;
+mod shell;
 
 /// Listen/capture states (`Shared::listen_state`).
 pub const LISTEN_IDLE: u8 = 0;
@@ -36,7 +36,8 @@ pub struct CaptureBuf {
     pub target: usize,
 }
 
-pub const DEFAULT_PATCH: &str = "tape-glow";
+/// Editor window size (logical px), fixed.
+pub const WINDOW_SIZE: (f32, f32) = (1040.0, 640.0);
 const PEAK_DECAY_MS: f32 = 300.0;
 const GRAPH_QUEUE: usize = 16;
 
@@ -105,7 +106,7 @@ fn install_factory_patches(root: &Path) {
             (Some(cur), None) => cur != factory_hash,
         };
         if user_modified {
-            nih_log!("keeping user-modified patch file {rel}");
+            nice_log!("keeping user-modified patch file {rel}");
             if let Some(prev) = installed.get(&rel) {
                 manifest.push_str(&format!("{prev:016x} {rel}\n"));
             }
@@ -119,6 +120,32 @@ fn install_factory_patches(root: &Path) {
         }
         manifest.push_str(&format!("{factory_hash:016x} {rel}\n"));
     }
+    // Factory files that were removed from the bundle: delete them unless the user changed them.
+    let bundled: std::collections::HashSet<String> =
+        manifest.lines().filter_map(|l| l.split_once(' ').map(|(_, p)| p.to_string())).collect();
+    for (rel, hash) in &installed {
+        if bundled.contains(rel) {
+            continue;
+        }
+        let path = root.join(rel);
+        if std::fs::read(&path).ok().is_some_and(|c| fnv(&c) == *hash) {
+            nice_log!("removing old factory file {rel}");
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    // Lua 5.4 leftovers from before the Luau port (not in any manifest): a `x.lua` next to
+    // `x.luau` makes `require("./x")` ambiguous. Keep them, renamed.
+    for dir in BUNDLED_PATCHES.dirs() {
+        let Ok(entries) = std::fs::read_dir(root.join(dir.path())) else { continue };
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.extension().is_some_and(|x| x == "lua") && path.with_extension("luau").exists() {
+                nice_log!("renaming leftover {} to .lua.bak", path.display());
+                let _ = std::fs::rename(&path, path.with_extension("lua.bak"));
+            }
+        }
+    }
+
     let _ = std::fs::create_dir_all(root);
     let _ = std::fs::write(manifest_path, manifest);
 }
@@ -129,7 +156,7 @@ struct Live {
     meters: Atomics,
 }
 
-/// State shared between audio thread, editor and `initialize()`.
+/// State shared between audio thread, editor and `activate()`.
 pub struct Shared {
     pub meter_in: AtomicF32,
     pub meter_out: AtomicF32,
@@ -174,7 +201,7 @@ impl Shared {
         Some(out)
     }
 
-    /// Called from `initialize()` (not the audio thread).
+    /// Called from `activate()` (not the audio thread).
     fn allocate_capture(&self, sample_rate: f32) {
         let n = (MAX_CAPTURE_SECONDS * sample_rate) as usize;
         let mut cap = self.capture.lock().unwrap();
@@ -209,12 +236,13 @@ impl Shared {
         }
     }
     /// Compiles the patch's chain and hands it to the audio thread. Non-audio threads only.
+    /// `Patch::empty()` = no patch (passthrough).
     pub fn publish(&self, patch: &Patch, free: &[f32]) {
         let graph = Box::new(Graph::build(patch, self.sample_rate.load(Ordering::Relaxed), free));
         *self.live.lock().unwrap() = Some(Live { free: graph.free_values(), meters: graph.meters() });
         while self.garbage_rx.lock().unwrap().pop().is_ok() {}
         if self.graph_tx.lock().unwrap().push(graph).is_err() {
-            nih_log!("graph queue full, dropping update");
+            nice_log!("graph queue full, dropping update");
         }
     }
 
@@ -244,11 +272,8 @@ pub struct MacroParams {
 
 #[derive(Params)]
 pub struct FxParams {
-    #[persist = "editor-state"]
-    pub editor_state: Arc<EguiState>,
-
-    /// Patch folder name, persisted with the host project. Empty means a
-    /// fresh instance whose macros still need the patch's defaults.
+    /// Patch folder name, persisted with the host project. Empty = no patch
+    /// (fresh instance or unloaded): the signal passes through.
     #[persist = "patch"]
     pub patch_name: RwLock<String>,
 
@@ -270,7 +295,6 @@ impl Default for FxParams {
     fn default() -> Self {
         let macro_names: [Arc<RwLock<String>>; MACRO_SLOTS] = std::array::from_fn(|_| Arc::default());
         Self {
-            editor_state: EguiState::from_size(1040, 640),
             patch_name: RwLock::new(String::new()),
             param_values: RwLock::new(HashMap::new()),
             macros: std::array::from_fn(|i| MacroParams {
@@ -310,6 +334,9 @@ impl FxParams {
 pub struct ScriptFx {
     params: Arc<FxParams>,
     shared: Arc<Shared>,
+    editor_state: Arc<IcedEditorState>,
+    /// Wakes the editor (unused for now: the shell runs its own frame clock).
+    notifier: PollSubNotifier,
     graph: Option<Box<Graph>>,
     graph_rx: rtrb::Consumer<Box<Graph>>,
     garbage_tx: rtrb::Producer<Box<Graph>>,
@@ -324,6 +351,11 @@ impl Default for ScriptFx {
         let (garbage_tx, garbage_rx) = rtrb::RingBuffer::new(GRAPH_QUEUE);
         Self {
             params: Arc::new(FxParams::default()),
+            editor_state: IcedEditorState::from_size(
+                nice_plug::editor::dpi::LogicalSize::new(WINDOW_SIZE.0, WINDOW_SIZE.1),
+                1.0,
+            ),
+            notifier: PollSubNotifier::new(),
             shared: Arc::new(Shared {
                 meter_in: AtomicF32::new(0.0),
                 meter_out: AtomicF32::new(0.0),
@@ -357,6 +389,7 @@ impl Plugin for ScriptFx {
         ..AudioIOLayout::const_default()
     }];
 
+    type Editor = nice_plug_iced::IcedEditor;
     type SysExMessage = ();
     type BackgroundTask = ();
 
@@ -364,15 +397,15 @@ impl Plugin for ScriptFx {
         self.params.clone()
     }
 
-    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        shell::create(self.params.clone(), self.shared.clone())
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Self::Editor> {
+        shell::create(self.editor_state.clone(), self.notifier.clone(), self.params.clone(), self.shared.clone())
     }
 
-    fn initialize(
+    fn activate(
         &mut self,
         _layout: &AudioIOLayout,
         buffer_config: &BufferConfig,
-        context: &mut impl InitContext<Self>,
+        context: &mut impl ActivateContext<Self>,
     ) -> bool {
         let sr = buffer_config.sample_rate;
         self.shared.sample_rate.store(sr, Ordering::Relaxed);
@@ -383,19 +416,25 @@ impl Plugin for ScriptFx {
                     let ch = r.spec().channels as usize;
                     let s: Vec<f32> = r.samples::<f32>().filter_map(Result::ok).collect();
                     let frames: Vec<Frame> = s.chunks(ch).map(|c| [c[0], c[ch.min(2) - 1]]).collect();
-                    nih_log!("test input: {} frames from {:?}", frames.len(), path);
+                    nice_log!("test input: {} frames from {:?}", frames.len(), path);
                     self.test_input = Some((frames, 0));
                 }
-                _ => nih_log!("SCRIPTFX_TEST_INPUT: need a float WAV at the host sample rate"),
+                _ => nice_log!("SCRIPTFX_TEST_INPUT: need a float WAV at the host sample rate"),
             }
         }
         self.peak_decay = 0.25f32.powf((sr * PEAK_DECAY_MS / 1000.0).recip());
         // Not the audio thread: safe to load Lua and build the graph here, so audio
         // and host names are right even when the editor is never opened.
         while self.graph_rx.pop().is_ok() {} // drop graphs built for an old sample rate
-        let mut name = self.params.patch_name.read().unwrap().clone();
+        let name = self.params.patch_name.read().unwrap().clone();
         if name.is_empty() {
-            name = DEFAULT_PATCH.into();
+            // No patch: passthrough, no latency, default slot names.
+            self.graph = None;
+            *self.shared.live.lock().unwrap() = None;
+            context.set_latency_samples(0);
+            self.params.set_macro_names(&Patch::empty());
+            context.rescan_param_info();
+            return true;
         }
         match Patch::load(patches_root().join(&name)) {
             Ok(p) => {
@@ -408,7 +447,7 @@ impl Plugin for ScriptFx {
                 self.params.set_macro_names(&p);
                 context.rescan_param_info();
             }
-            Err(e) => nih_log!("patch '{name}' failed to load: {e}"),
+            Err(e) => nice_log!("patch '{name}' failed to load: {e}"),
         }
         true
     }
@@ -503,5 +542,5 @@ impl Vst3Plugin for ScriptFx {
         &[Vst3SubCategory::Fx, Vst3SubCategory::Dynamics];
 }
 
-nih_export_clap!(ScriptFx);
-nih_export_vst3!(ScriptFx);
+nice_export_clap!(ScriptFx);
+nice_export_vst3!(ScriptFx);

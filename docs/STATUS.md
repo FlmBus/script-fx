@@ -1,10 +1,34 @@
 # ScriptFX: status, decisions & next steps
 
-_Last updated: 2026-11-18 (full block catalogue, per-block oversampling with latency compensation). Read this first when picking the project back up. Technical
+_Last updated: 2026-11-18 (new shell in iced on nice-plug, in the "ScriptFX Shell" design system). Read this first when picking the project back up. Technical
 details, measurements and run instructions are in [`README.md`](../README.md)._
 
 ## Where we left off
 
+0. **New shell built** (iced on nice-plug, design system "ScriptFX Shell", skin Matte + Paper
+   chat; research + spike: [`research/shell-ui-toolkit.md`](research/shell-ui-toolkit.md)).
+   - Framework moved **nih-plug → nice-plug 0.4.2** (vendored; our runtime-parameter-name patch
+     ported, `vendor/nice-plug/PATCHES.md`). `initialize()` is `activate()` now.
+   - `crates/plugin/src/shell/`: `library` (cards in the patch's colours), `notch` (snapshot
+     selector, save/load disabled until snapshots exist, reload + sync LED, chat, settings),
+     `stage` (ControlPanel layers as iced images, pointer widget for knob drag/click/double-click
+     reset, rounded window corners forced on every panel), `chat` (Listen inside; capture analysis
+     posted as a markdown table and attached to the next message; no LLM yet, it says so),
+     `controls` (Settings: macros, params, hot reload), `signal_line` (from the chain; routing
+     blocks as lanes; amber LED while a metered block works), `empty` (fresh instance = no patch,
+     passthrough), `session` (library scan, load/reload/unload, hot reload, values), `slide`
+     (sheet slide-in), `theme` (design tokens). The egui shell and the egui GPU spike are gone.
+   - Fresh instances start **empty** now (no auto-load). `SCRIPTFX_DEV_PATCH` loads one for dev.
+   - Frame pacing on this machine: baseview's X11 Present pacing never fires under XWayland →
+     vendored baseview always uses its frame timer; iced_baseview's poll timer must be slow
+     (250 ms), at 1/64 s it fired ~1000×/s. Result: ~70 fps, 9–13 % CPU with an animated panel
+     (`vendor/baseview/PATCHES.md`). vsync stays off (it would block the host's UI thread).
+   - `vendor/iced_wgpu`: frame timing incl. GPU timestamps (`SCRIPTFX_DEV_STATS=1`).
+   - Factory install now removes factory files that left the bundle and renames Lua 5.4
+     leftovers (`x.lua` next to `x.luau` broke `require`) to `.lua.bak`.
+   - Checked: standalone (all five patches, chat/controls sheets, empty state) and VST3 in Carla.
+     **Not checked by hand yet:** Reaper, clicking/typing (synthetic input doesn't reach XWayland
+     windows here), close/reopen, two instances, HiDPI, Windows/macOS.
 0. **Block catalogue built** (50 blocks; modulators — LFO/envelope as sources — are next, to be
    planned properly first).
    - Utility `Pan Width MonoBass Haas Invert DCBlock Meter`, Routing `MidSide LeftRight`; then
@@ -32,16 +56,16 @@ details, measurements and run instructions are in [`README.md`](../README.md)._
    - Ideas, not built: a shell-level "quality" switch that scales the automatic factors (rebuild +
      swap the graph; fixed latency possible by padding to the highest factor); merging/SIMD for
      cheaper filters.
-1. **Ported patches to Luau** (decided after a spike, see below). Patches are `patch.luau` +
+1. **Ported patches to Luau** (decided after a spike, see below). Patches are `init.luau` +
    UI files it `require`s; no more `ui.lua` entry point.
-   - **References instead of strings in the UI:** `patch.luau` passes the real objects into the UI:
+   - **References instead of strings in the UI:** `init.luau` passes the real objects into the UI:
      `Patch.new(name, { ..., panel = ui.Panel.new({ tape = tape_macro, gr = fet_block }) })`;
      components use `bind = p.tape` (Macro/Param) and `source = p.gr` (metered block) or
      `Meters.IN/OUT`. Objects carry `__ref` ("macro.tape") which the engine/shell resolve as before.
    - **Relative `require`** (Luau require-by-string), restricted to the patch folder by our
      `PatchRequirer` (`crates/patch/src/runtime.rs`); `.luaurc` files are ignored at runtime.
      UI files can be split freely (e.g. `./components/knob`).
-   - **One runtime for DSP and UI** (`patch::runtime::Runtime`): both evaluate `patch.luau` (the UI
+   - **One runtime for DSP and UI** (`patch::runtime::Runtime`): both evaluate `init.luau` (the UI
      side keeps the state; hot reload clears mlua's require cache and re-evaluates, local
      component state survives). Both preludes live in the `patch` crate (`prelude.luau`, `ui_prelude.luau`).
    - **Sandbox:** Luau sandbox mode (read-only globals/builtins), `loadstring/getfenv/setfenv` removed,
@@ -78,9 +102,9 @@ patches, informed by an analysis of the actual audio on the track (and the mix).
 | Term | Meaning | Code |
 |---|---|---|
 | **Shell** | the plugin itself and its own UI (frame, header, drawer, status bar) | `crates/plugin/src/shell.rs` |
-| **Patch** | a Luau script describing a chain, its params/macros, theme and panel (`return Patch.new(...)`) | crate `patch`, `Patch`, `patches/<name>/patch.luau` |
+| **Patch** | a Luau script describing a chain, its params/macros, theme and panel (`return Patch.new(...)`) | crate `patch`, `Patch`, `patches/<name>/init.luau` |
 | **Snapshot** | saved values of a patch (macros + free params). Not implemented yet | — |
-| **ControlPanel** | a patch's own UI: reactive Luau components, fixed 840×560; the `panel` of `Patch.new` | UI files required by `patch.luau`, `ui_components::Ui` |
+| **ControlPanel** | a patch's own UI: reactive Luau components, fixed 840×560; the `panel` of `Patch.new` | UI files required by `init.luau`, `ui_components::Ui` |
 | **Component** | one visual part of a ControlPanel; each instance is a cached layer | `Component.define`, `X.new {}` |
 | **Chain / Block** | DSP description / one building block (`Chain.new`, `Blocks.<Type>.new(id, {...})`) | `patch::chain`, `BlockSpec` |
 | **Graph** | compiled chain running on the audio thread | `dsp::Graph` |
@@ -100,19 +124,19 @@ Avoid: "preset" (ambiguous between patch and snapshot), "editor"/"chrome" (use s
 | Topic | Decision | Why |
 |---|---|---|
 | Language | **Rust** | readable for a Go dev, compiler catches real-time mistakes (`assert_no_alloc`) |
-| Plugin framework | **nih-plug, vendored + patched** (`vendor/nih-plug`) | works; the plugin layer is thin, so swapping it stays cheap. clack + clap-wrapper was the alternative, but lost its advantage once we went VST3-first |
+| Plugin framework | **nice-plug** (community continuation of nih-plug), vendored + patched (`vendor/nice-plug`, `vendor/nice-plug-core`) | nih-plug is in maintenance mode; nice-plug maintains the iced adapter. Before: nih-plug (vendored); clack + clap-wrapper lost its advantage once we went VST3-first |
 | Formats | **VST3 first** (CLAP built for free) | all 3 machines (Fender Studio/Win, Studio One 6/Mac, Reaper+Carla/Linux) speak VST3. No AU, no AAX |
 | Platforms | Linux x86_64, Windows x86_64, macOS universal (arm64 + x86_64) | via GitHub Actions |
 | Lua's role | **describes only** (params, macros, chain, theme) and renders the UI components (UI thread, sandboxed + instruction budget); never on the audio thread | real-time safety, LLM-friendly validation |
 | Patch model | **params** (internal, unlimited, saved with project) + **macros** (max 16, host-automatable, each drives 1..n params with range + lin/exp curve, Ableton-rack style). A param is free *or* driven by exactly one macro | 8–16 macros are enough when macros can drive many params; hosts can't handle changing parameter lists |
-| Host parameters | 16 fixed slots, **names follow the patch** (patched nih-plug: VST3 `kParamTitlesChanged`, CLAP `RESCAN_INFO`). **Verified in Reaper.** Automation stays on the slot across patch changes (same contract as Serum's macros) | plugins can't delete host automation; renaming is safe because hosts key automation by ID |
+| Host parameters | 16 fixed slots, **names follow the patch** (patched nice-plug: VST3 `kParamTitlesChanged`, CLAP `RESCAN_INFO`). **Verified in Reaper.** Automation stays on the slot across patch changes (same contract as Serum's macros) | plugins can't delete host automation; renaming is safe because hosts key automation by ID |
 | DSP | declarative `chain` → `dsp::Graph` compiled off the audio thread, swapped lock-free (rtrb), old graphs freed off-thread | |
 | Patch UI | **reactive Lua components** → SVG → one cached layer each (resvg), fixed 840×560 | see "Patch UI" below; the earlier SVG + bindings panel was removed |
 | Block tags / categories | Doc comments in the definitions file (`--- <Category> · …`), checked by a test | LSP hover/completion and LLM search from one place; no runtime field until something needs it |
 | Oversampling | Per block via one generic wrapper (`oversampling` on every block, auto for nonlinear ones); linear-phase FIR + latency compensation (PDC) | only blocks that need it pay; linear phase + branch delays keep parallel blends from comb filtering; PDC is needed anyway for lookahead/pitch blocks |
 | Script language | **Luau** (mlua `luau` feature) with luau-lsp type checking (strict) | relative `require` (per-patch UI files, no name collisions), typed props across files, built-in sandbox; LuaLS couldn't resolve per-folder requires or infer prop types |
 | Lua API style | builder objects; identity positional, settings in an options table; namespaced; enums as strings; separate block types instead of a `type`/`style` option | readable, one way to do things, typo-proof for LLMs |
-| Plugin's own UI | egui (to be redesigned, see TODO) | |
+| Plugin's own UI (shell) | **iced** (`nice-plug-iced`, wgpu), one module per section | clean, sectioned code; wgpu (no GL); see `research/shell-ui-toolkit.md` |
 | Fonts | bundled Noto Sans (+ optional `<patch>/fonts/`) | system font scan took 7.5 s cold |
 | Factory patches | compiled into the binary, installed to `<data dir>/ScriptFX/patches`, **updated unless user-modified** (`.factory-manifest`) | |
 | Strict patches | unknown fields are errors | catches typos (`treshold`), important for LLM output |
@@ -122,9 +146,9 @@ Avoid: "preset" (ambiguous between patch and snapshot), "editor"/"chrome" (use s
 
 ## Shell layout
 
-Decided in the mockup rounds (canvas "ScriptFX Shell Mockup", v1–v7; v7 is the current target),
-**not built yet** – the plugin still has the old PoC chrome (combo box, sidebar, prompt field).
-The fixed graphite shell style is already applied. Details in the next section.
+Designed in the canvas "ScriptFX Shell Mockup" (page "Shell", skin Matte + Paper chat) and the
+design system "ScriptFX Shell" (tokens, components). **Built** (2026-11-18) in iced, see "Where we
+left off". The macro/param sliders live in the controls sheet (Settings in the notch).
 
 ## Patch UI: reactive Lua components (decided 2026-11-18, prototype built)
 
@@ -195,9 +219,10 @@ hit areas are rectangles; `measure_text()` helper if layouts need text widths.
   `Component.define`/`SVG.*`/`Util.*` lives in `patch/src/ui_prelude.luau`; engine with per-layer cache, content-bbox crop, hit testing, local state, error isolation, bundled
   fonts, sandboxed images); examples `stress` (benchmarks) and `render` (PNG + per-layer cost); tests incl. locale regression
 - `crates/analysis`: loudness (EBU R128, verified against ffmpeg), 1/3-oct spectrum, tilt, centroid, energy shares, resonances, dynamics (percentiles, per-band spread, onsets, attack), stereo, pitch (YIN)
-- `crates/plugin` (package `scriptfx`): egui PoC chrome (patch picker, hot reload, macro/param sidebar, prompt field without LLM yet, 🎧 Listen + result screen + prompt chip), host-name updates, lock-free capture, component panels (one texture per layer, drag/click/hover); dev env vars `SCRIPTFX_PATCHES`, `SCRIPTFX_DEV_PATCH`, `SCRIPTFX_TEST_INPUT`, `SCRIPTFX_DEV_AUTOLISTEN`
+- `crates/plugin` (package `scriptfx`): nice-plug plugin, iced shell (`src/shell/`, see "Where we left off"), host-name updates, lock-free capture, Listen; dev env vars `SCRIPTFX_PATCHES`, `SCRIPTFX_DEV_PATCH`, `SCRIPTFX_DEV_SHEET`, `SCRIPTFX_DEV_STATS`, `SCRIPTFX_TEST_INPUT`, `SCRIPTFX_DEV_AUTOLISTEN`
 - patches (all with component UIs): `tape-glow`, `clean-gain`, `bass-helper`, `neon-saturator`, `junkyard-amp`
-- `vendor/baseview`: patched to not panic on GLX errors (fixed blank editor after close/reopen in Reaper)
+- `vendor/baseview` (0.4.2): X11 frame pacing by timer; `vendor/iced_wgpu` (0.14.0): frame timing; `vendor/nice-plug*`: runtime param names
+- `spikes/shell-iced`: the shell spike (throwaway, own workspace)
 - CI workflow written, **not run yet** (repo isn't on GitHub; `gh` isn't installed)
 
 ## Key findings (details in README)
@@ -205,23 +230,42 @@ hit areas are rectangles; `measure_text()` helper if layouts need text widths.
 - Performance: bass-helper (11 blocks) = **0.7 % of one core**; chain complexity is not a concern.
 - Old SVG panel: full redraw ~5 ms @1x / ~13 ms @2x. Solved by the component system (per-layer cache): ~1.4 ms @1x / ~2.7 ms @2x while playing.
 - Hosts control the process locale → Lua number formatting must be forced to "C" per call (done).
-- Linux: NVIDIA + XWayland GLX issues (standalone tiling crash; fixed for close/reopen via patched baseview). JACK standalone on PipeWire doesn't process; use `-b alsa`.
-- egui `Slider::from_get_set` writes every frame; it needs a change check (otherwise it spams host automation).
+- Linux: the shell renders with wgpu/Vulkan, so the old GLX problems are gone. XWayland: baseview's Present pacing never fires (patched to its frame timer). JACK standalone on PipeWire doesn't process; use `-b alsa`.
 - Chain model gaps: no sidechain/modulators/lookahead, click on graph swap. (Param boilerplate is smaller now that params are objects declared inline, e.g. in loops.)
 - Analysis caveats: "resonances" include notes/harmonics of tonal sources; onset detection misses soft re-attacks at equal level; the rider uses an absolute target level.
 
 ## TODO (prioritised)
 
+### Flemming's list (2026-11-19)
+- **Scrollable library:** already scrolls (thin frame scrollbar, appears when the cards overflow);
+  check by hand with more patches than fit.
+- **Notch layout:** the notch itself looks good, but the controls inside it look messy (alignment,
+  spacing, sizes of row 1 vs row 2). Rework the arrangement.
+- **Passive mode is too hidden** (a disabled checkbox on the empty screen). Give it a central,
+  prominent place; maybe bring a top bar back.
+- **LLM research:**
+  - cheap or ideally free language models for this job (writing Luau patches, reading analysis JSON);
+  - how to implement it: support all providers (one API layer) or pick a free one for now;
+  - chat model: per patch, one global chat, or tabs for several chats? If global: the chat button
+    moves to the top bar, next to passive mode.
+- **Standard library of ready-to-use, generic panels** (patches without their own UI get a good
+  panel for free).
+- **Dark bars at the top/bottom of panels:** probably the letterbox. The ControlPanel is fixed
+  840×560 (3:2), the stage is 816×578, so the panel is scaled to 816×544 and the remaining 17 px
+  above and below are filled with `colors.bg`, which doesn't match the panel's own background.
+  Options: fit the stage to 3:2, let the panel background fill the whole stage, or scale to cover.
+- **Neon Saturator meters:** the boxes around the meter bars look ugly; draw the bars straight on
+  the background like Clean Gain does.
+
 ### Next up
-1. **Check all five component UIs in Carla/Reaper** (render, knob drag, fader, hover, tabs/toggles) and the locale fix.
-2. **Build the new shell layout (v7)**: plain text patch/snapshot list (sections on patch art + logo),
-   ControlPanel fills the stage, two-row shell pill (snapshot ▾ save load / reload chat settings),
-   signal line, chat drawer per patch (Listen inside the chat), native-looking shell style.
-   Includes the **empty default state** (fresh instance: no patch, empty chain, passthrough;
-   "No patch loaded" screen with build-from-description + listen + passive option) — today a fresh
-   instance still auto-loads `tape-glow`. Also: snapshots (saved values of a patch) don't exist yet.
+1. **Hands-on check of the new shell in Reaper and Carla**: knob drag/double-click on all five
+   panels, chat typing (Enter/Shift+Enter, selection, clipboard, dead keys), Listen in the chat,
+   controls sheet sliders (host automation gestures, names), hot reload + error card, unload →
+   empty state, close/reopen ×10, two instances, HiDPI.
+2. **Snapshots** (saved values of a patch): notch selector/save/load and the library rows are
+   placeholders ("Init" = defaults) until then.
 3. Bool/enum params, raster cache, shell-pill safe area (see "Open / next (components)").
-4. **Passive mode**: toggle on the empty screen; bypass, keep a rolling ~30 s buffer; a track instance's listen pulls the passive instance's audio for the same time window (host transport position) and adds "track vs. mix" analysis. In-process registry first (Reaper/Studio One/Fender Studio run plugins in-process); sandboxed hosts need IPC. Channel names: CLAP track-info / VST3 IInfoListener (needs nih-plug patch), fallback: user-named instances.
+4. **Passive mode**: toggle on the empty screen; bypass, keep a rolling ~30 s buffer; a track instance's listen pulls the passive instance's audio for the same time window (host transport position) and adds "track vs. mix" analysis. In-process registry first (Reaper/Studio One/Fender Studio run plugins in-process); sandboxed hosts need IPC. Channel names: CLAP track-info / VST3 IInfoListener (nice-plug has `track_info_updated`), fallback: user-named instances.
 5. **LLM integration**: chat → patch generation (layer 1 with attached capture), then layer-2 tools (`get_analysis`, `request_listen`). Bring-your-own API key. Validate generated patches with the strict loader; feed errors back to the LLM.
 
 ### UI plan (decided 2026-11-18): raster layers + sprite sheets + shaders
@@ -290,25 +334,69 @@ not only at the plugin's input/output.
 ### UI redesign (plugin chrome)
 - **Chat** (decided: drawer per patch, opened from the pill; captures as message attachments; Listen lives in the chat).
 - **Open question: persist chats?** Options: (a) not at all, (b) in the plugin state (travels with the DAW project; watch the state size), (c) in the data dir next to the patch (e.g. `<patch>/chat.json`, survives across projects), (d) both. Also: should a generated patch carry its chat history?
-- Where do the macro/param sliders and the listen result screen go in the new layout? (Not decided; the PoC sidebar has them.)
-- **Contenders for a possible shell UI rewrite** (today: egui, chosen because nih-plug ships a ready
-  bridge into the DAW's window): **Slint** (an `nih-plug-slint` adapter exists: baseview + OpenGL;
-  also the candidate for patch panels later) and **vizia** (official nih-plug bridge, CSS styling).
-  Not GPUI: it's built to own the app and its windows, no plugin-window bridge exists, Rust-only UIs.
+- Shell follow-ups: letter-spacing (IN/OUT, tracked titles) isn't supported by iced text;
+  accessibility labels for icon buttons (no iced equivalent yet); full font files (the bundled
+  ones are Latin subsets, "→" falls back); per-node clip LEDs (no per-block peaks); library card
+  background art (cards use a gradient from the theme colours).
+- Done 2026-11-18/19: thin overlay scrollbars (paper on the sheets, frame on the library).
+  **Theme restructured** (2026-11-19): `theme = { colors, fonts, images, library }`. `colors`
+  (`#rrggbb`), `fonts` (`Font.new(path)`: ttf/otf/svg/fnt) and `images` (`Image.new(path)`:
+  svg/png) are the patch's own tokens, shared by the library card and the ControlPanel
+  (`p.theme`); the shell uses `colors.accent/bg/ink`, `fonts.title`, `images.logo`;
+  `theme.library = { accent, bg, ink, font, logo }` overrides them for the card only. Strict
+  keys and errors that name the field; paths checked at load. Factory: Neon (Orbitron), Tape
+  Glow (Playfair Display italic), Junkyard (label-tape BMFont), Clean Gain (SVG font), Bass
+  Helper (SVG wordmark logo); licences next to the fonts.
+- **Shell UI reboot: decided 2026-11-18, iced** (`nice-plug-iced`, wgpu), one module per shell
+  section (Elm architecture: state, messages, update, view) so the UI code stays clean while we
+  tinker. [`research/shell-ui-toolkit.md`](research/shell-ui-toolkit.md). Not GPUI (no embedding
+  into host windows, owns the event loop, no hook for our GPU passes). Fallback: Slint. Migrate
+  nih-plug → **nice-plug** first. Earlier shortlist was Slint + vizia; on
+  recheck the Slint bridge is WIP/OpenGL-only and vizia's bridge is now third party (nightly).
+  Independent of the patch UI plan (the shell only hosts the compositor's render hook).
+  Spike (`spikes/shell-iced`) → **built into the plugin** (see "Where we left off").
+
+### Patch isolation (assets and state)
+Principle (Flemming, 2026-11-19): patches are isolated from the shell and from each other.
+- **Isolated:** Lua runtime per patch (sandbox, memory cap, instruction budget); `require`, panel
+  images and `theme` paths confined to the patch folder; panel SVG text uses a per-patch font
+  database (bundled + the patch's `fonts/`); patch fonts in the shell get private family names
+  (patch folder + content hash), so they can't restyle the shell or each other (fixed 2026-11-19).
+- **Not yet:** chat log and the attached capture are per plugin instance and survive a patch
+  switch (the design says chat is per patch); captures go to one shared folder; param values of
+  a patch are dropped on switch (fine now, needed per patch once snapshots exist).
+- **Entry file renamed `patch.luau` → `init.luau`** (2026-11-19): less opinionated (it doesn't
+  have to contain the whole patch). The patch folder is loaded as a Luau module (`require` of the
+  folder): `init.luau`, else `init.lua`, both = error. Luau's init rule applies (same in the
+  runtime and in luau-lsp): inside `init.luau` the patch's own files are `require("@self/ui")`;
+  `./x` would be next to the folder (blocked). Old unmodified `patch.luau` files in the user data
+  dir are removed by the factory install.
+- **Patch UIs split into `ui/` module folders** (2026-11-19): `ui/init.luau` (the Panel) requires
+  one file per component family (`@self/knob`, …); shared colours/geometry in `ui/style.luau`
+  (Junkyard: drawing helpers in `ui/craft.luau`). Renders are pixel-identical to before; the type
+  check now walks subfolders.
+- **Backlog: assets as a manifest** (discussed 2026-11-19, parked: the attack surface is small,
+  patches can only load files from their own folder). Idea: `Font.new(id, path)` /
+  `Image.new(id, path, { columns, frames })` objects, declarable in any patch file but only while
+  the patch loads; the registered set is the manifest; panels take asset objects only (no paths or
+  family names), loaders accept registered files only. Patch files stay free-form (one file for a
+  minimal patch, `require`d modules for bigger ones); no JSON (no references, no types).
+- Patch fonts beyond TTF/OTF: **SVG fonts and BMFont image fonts work for the library title**
+  (Clean Gain: SVG font, Junkyard Amp: label-tape BMFont); ControlPanel text in them is next.
+  [`research/patch-fonts.md`](research/patch-fonts.md).
 
 ### DSP / chain model
-- **Multi-output taps**: additional plugin outputs that tap anywhere in the chain (e.g. `tap("di_clean", { output = 2 })` after the punch/comp stage) to get a partly processed DI signal back into the DAW. Needs: aux output buses in the plugin layout (nih-plug `AudioIOLayout.aux_output_ports`), a tap block in the chain spec, and host routing tests.
+- **Multi-output taps**: additional plugin outputs that tap anywhere in the chain (e.g. `tap("di_clean", { output = 2 })` after the punch/comp stage) to get a partly processed DI signal back into the DAW. Needs: aux output buses in the plugin layout (`AudioIOLayout.aux_output_ports`), a tap block in the chain spec, and host routing tests.
 - Macro targets directly on block settings (`{ block = "fet", setting = "threshold", ... }`) to cut param boilerplate
 - Crossfade on graph swap (no click on patch switch / hot reload)
 - Sidechain input (host aux bus): then `Ducker`, keyed compressors, "low band keyed by …"; modulators (LFO/envelope/step sequencer as sources driving params, planned next)
 - Rider: relative target (follow the input level) instead of an absolute dBFS
 
 ### Platform / build
-- **nih-plug is in maintenance mode** (its README points to the community fork
-  codeberg.org/BillyDM/nih-plug for further development). We build against a vendored copy
-  (`vendor/nih-plug`), so nothing breaks now; watch the fork for fixes (hosts, baseview, CLAP) and
-  consider switching to it if we need upstream changes.
+- Upstream our patches: runtime param names (nice-plug), X11 frame pacing / poll-timer rate
+  (baseview / iced_baseview), timestamp queries (iced_wgpu). Re-vendor on nice-plug updates.
 - Push to GitHub (install `gh` or create the repo manually) and run CI; test on Windows (Fender Studio) and macOS (Studio One 6, including Retina @2x performance)
-- Hide unused macro slots in the host (needs another nih-plug patch; flags + rescan)
-- NVIDIA/GLX: check whether the standalone tiling crash is fixed by the baseview patch; consider a non-GL renderer for the chrome
-- Licensing: VST3 export goes through `vst3-sys` (GPLv3), so binaries are GPLv3 unless that dependency is replaced
+- Hide unused macro slots in the host (needs another nice-plug patch; flags + rescan)
+- Licensing: nice-plug exports VST3 through the `vst3` crate (MIT/Apache-2.0), not `vst3-sys`
+  (GPLv3): our binaries are no longer forced to be GPLv3. Check the remaining dependencies before
+  picking a license.

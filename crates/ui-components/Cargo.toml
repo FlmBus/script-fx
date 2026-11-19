@@ -8,6 +8,8 @@ rust-version.workspace = true
 mlua = { version = "0.12.2", features = ["luau", "vendored", "send"] }
 patch = { version = "0.1.0", path = "../patch" }
 resvg = "0.50.0"
+# SVG fonts (the same XML parser usvg uses).
+roxmltree = "0.21"
 
 [dev-dependencies]
 libc = "0.2.191"

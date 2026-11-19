@@ -1,4 +1,4 @@
--- ScriptFX patch API (loaded into the sandbox before patch.luau).
+-- ScriptFX patch API (loaded into the sandbox before init.luau).
 --
 --   local ui = require("./ui")
 --   local drive = Param.new("drive", "Drive", { min = 0, max = 24, unit = "dB" })
@@ -25,6 +25,7 @@ local function is(v, class) return type(v) == "table" and getmetatable(v) == cla
 -- Classes are locals (exported as globals at the end), so patch code that
 -- shadows a global can't break the checks below.
 local Param, Macro, Chain, Patch, Blocks = {}, {}, {}, {}, {}
+local Font, Image = {}, {}
 
 local Block = {}
 Block.__index = Block
@@ -34,6 +35,8 @@ local function describe(v)
   if is(v, Macro) then return "a Macro" end
   if is(v, Chain) then return "a Chain" end
   if is(v, Block) then return "a block" end
+  if is(v, Font) then return "a Font" end
+  if is(v, Image) then return "an Image" end
   if type(v) == "string" then return fmt("the string %q", v) end
   return type(v)
 end
@@ -121,13 +124,7 @@ local KINDS = {
   chains   = { list_of(function(v) return is(v, Chain) end), "a non-empty list of Chains" },
   macros   = { list_of(function(v) return is(v, Macro) end), "a non-empty list of Macros" },
   panel    = { function(v) return type(v) == "table" and type(v.__component) == "table" end, "a component instance (Panel.new(...))" },
-  theme    = { function(v)
-    if type(v) ~= "table" then return false end
-    for k, c in pairs(v) do
-      if type(k) ~= "string" or type(c) ~= "string" then return false end
-    end
-    return true
-  end, "a table of name = colour strings" },
+  theme    = { function(v) return type(v) == "table" and getmetatable(v) == nil end, "a table (colors, fonts, images, library)" },
 }
 
 -- `fields` is an ordered list of "name:kind" or "name:kind!" (required).
@@ -466,6 +463,102 @@ end)
 
 strict("Blocks", Blocks)
 
+---------------------------------------------------------------- Assets
+-- Font.new(path) / Image.new(path): files from the patch folder, used as tokens in the theme
+-- (and later by panels). Paths are relative to the patch folder; the loader checks they exist.
+Font.__index, Font.__name = Font, "Font"
+Image.__index, Image.__name = Image, "Image"
+
+local function asset(class, what, exts, path, level)
+  if type(path) ~= "string" or path == "" then
+    fail(fmt("%s: needs a path relative to the patch folder, got %s", what, describe(path)), level + 1)
+  end
+  if path:sub(1, 1) == "/" or path:find("..", 1, true) or path:find("\\", 1, true) then
+    fail(fmt("%s: %q must be a path inside the patch folder", what, path), level + 1)
+  end
+  local ext = (path:match("%.(%w+)$") or ""):lower()
+  if not exts[ext] then
+    local list = {}
+    for e in pairs(exts) do list[#list + 1] = "." .. e end
+    table.sort(list)
+    fail(fmt("%s: %q must be %s", what, path, table.concat(list, ", ")), level + 1)
+  end
+  return setmetatable({ path = path }, class)
+end
+
+-- .ttf/.otf, .svg (SVG 1.1 font) or .fnt (BMFont + PNG atlas)
+function Font.new(path) return asset(Font, "Font.new", { ttf = true, otf = true, svg = true, fnt = true }, path, 2) end
+-- .svg or .png
+function Image.new(path, o)
+  if o ~= nil then fail("Image.new: no options yet (sprite sheets come with the raster UI)", 2) end
+  return asset(Image, "Image.new", { svg = true, png = true }, path, 2)
+end
+strict("Font", Font)
+strict("Image", Image)
+
+-- theme = { colors = { name = "#rrggbb" }, fonts = { name = Font }, images = { name = Image },
+--           library = { accent, bg, ink = "#rrggbb", font = Font, logo = Image } }
+-- colors/fonts/images are the patch's own tokens (any names); `library` overrides them for the
+-- library card. The shell reads colors.accent/bg/ink, fonts.title and images.logo by default.
+local LIBRARY_KEYS = { accent = "colour", bg = "colour", ink = "colour", font = "Font", logo = "Image" }
+local function check_theme(t, what, level)
+  local function colour(v) return type(v) == "string" and v:match("^#%x%x%x%x%x%x$") ~= nil end
+  local checks = {
+    colors = { colour, 'a colour "#rrggbb"' },
+    fonts = { function(v) return is(v, Font) end, "a Font (Font.new(path))" },
+    images = { function(v) return is(v, Image) end, "an Image (Image.new(path))" },
+  }
+  for k, v in pairs(t) do
+    if checks[k] then
+      if type(v) ~= "table" or getmetatable(v) ~= nil then fail(fmt("%s: theme.%s must be a table", what, k), level + 1) end
+      for name, x in pairs(v) do
+        if type(name) ~= "string" then fail(fmt("%s: theme.%s needs names as keys", what, k), level + 1) end
+        if not checks[k][1](x) then
+          fail(fmt("%s: theme.%s.%s must be %s, got %s", what, k, name, checks[k][2], describe(x)), level + 1)
+        end
+      end
+    elseif k == "library" then
+      if type(v) ~= "table" or getmetatable(v) ~= nil then fail(fmt("%s: theme.library must be a table", what), level + 1) end
+      for name, x in pairs(v) do
+        local kind = LIBRARY_KEYS[name]
+        if not kind then
+          fail(fmt("%s: theme.library: unknown key '%s' (accent, bg, ink, font, logo)", what, tostring(name)), level + 1)
+        end
+        local ok = (kind == "colour" and colour(x)) or (kind == "Font" and is(x, Font)) or (kind == "Image" and is(x, Image))
+        if not ok then
+          local want = kind == "colour" and 'a colour "#rrggbb"' or (kind == "Font" and "a Font" or "an Image")
+          fail(fmt("%s: theme.library.%s must be %s, got %s", what, name, want, describe(x)), level + 1)
+        end
+      end
+    else
+      fail(fmt("%s: theme: unknown key '%s' (colors, fonts, images, library)", what, tostring(k)), level + 1)
+    end
+  end
+end
+
+-- Plain data for the loader: assets become their paths.
+local function export_theme(t)
+  if not t then return nil end
+  local function map(m, f)
+    if not m or next(m) == nil then return nil end
+    local out = {}
+    for k, v in pairs(m) do out[k] = f(v) end
+    return out
+  end
+  local path = function(a) return a.path end
+  local lib = t.library or {}
+  local library = {
+    accent = lib.accent, bg = lib.bg, ink = lib.ink,
+    font = lib.font and lib.font.path, logo = lib.logo and lib.logo.path,
+  }
+  return {
+    colors = map(t.colors, function(c) return c end),
+    fonts = map(t.fonts, path),
+    images = map(t.images, path),
+    library = next(library) and library or nil,
+  }
+end
+
 ---------------------------------------------------------------- Patch
 Patch.__index = Patch
 Patch.__name = "Patch"
@@ -479,6 +572,7 @@ function Patch.new(name, o)
   local what = fmt("Patch '%s'", name)
   o = options(what, o, PATCH_FIELDS, 2)
   if o.chain then take_chain(o.chain, what, 2) end
+  if o.theme then check_theme(o.theme, what, 2) end
   return setmetatable({ name = name, author = o.author, chain = o.chain, macros = o.macros or {}, theme = o.theme,
                         panel = o.panel }, Patch)
 end
@@ -488,13 +582,14 @@ end
 local Meters = { IN = { __ref = "meter.in" }, OUT = { __ref = "meter.out" } }
 
 _G.Param, _G.Macro, _G.Chain, _G.Blocks, _G.Patch, _G.Meters = Param, Macro, Chain, Blocks, Patch, Meters
+_G.Font, _G.Image = Font, Image
 
 ---------------------------------------------------------------- export (called by the loader)
 -- Params are collected from what the chain and the macros reference (chain
 -- order first), so a patch never lists them separately.
 return function(p)
   if not is(p, Patch) then
-    error("patch.luau must end with `return Patch.new(...)`, got " .. describe(p), 0)
+    error("init.luau must end with `return Patch.new(...)`, got " .. describe(p), 0)
   end
   local params, by_id = {}, {}
   local function use(prm)
@@ -558,5 +653,5 @@ return function(p)
     end
     macros[i] = { id = m.id, name = m.name, default = m.default, targets = targets }
   end
-  return { name = p.name, author = p.author, params = params, macros = macros, chain = chain, theme = p.theme }
+  return { name = p.name, author = p.author, params = params, macros = macros, chain = chain, theme = export_theme(p.theme) }
 end

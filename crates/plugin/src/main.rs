@@ -1,5 +1,5 @@
-use nih_plug::prelude::*;
+use nice_plug::prelude::*;
 
 fn main() {
-    nih_export_standalone::<scriptfx::ScriptFx>();
+    nice_export_standalone::<scriptfx::ScriptFx>();
 }

@@ -4,7 +4,7 @@
 --                                   render = function(p: KnobProps) return SVG.circle({ ... }) end })
 --   Knob.new({ bind = drive_macro, x = 10, y = 20 })      -- an instance
 --
--- UI files are modules that patch.luau requires; the root instance goes into
+-- UI files are modules that init.luau requires; the root instance goes into
 -- Patch.new(..., { panel = Panel.new({ ... }) }) and always covers the whole
 -- ControlPanel, UI.WIDTH x UI.HEIGHT. `bind` takes a Macro or Param, `source`
 -- a metered block or Meters.IN / Meters.OUT.
@@ -177,7 +177,7 @@ function Component.define(def)
       error(string.format("%s.new expects a props table, got %s", name, type(props)), 2)
     end
     props = props or {}
-    -- bind/source must be objects from patch.luau (a string would silently show nothing)
+    -- bind/source must be objects from init.luau (a string would silently show nothing)
     local bind, source = props.bind, props.source
     if bind ~= nil and not (type(bind) == "table" and type(bind.__ref) == "string"
                             and (bind.__ref:sub(1, 6) == "macro." or bind.__ref:sub(1, 6) == "param.")) then

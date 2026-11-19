@@ -8,9 +8,12 @@ crates/patch         patch model (params + macros + chain), sandboxed Luau runti
 crates/analysis      offline analysis of a capture → LLM-friendly JSON (loudness/LUFS, spectrum, dynamics, stereo, pitch)
 crates/dsp           native DSP: compiles a patch's chain into a graph (no alloc/locks/Lua on the audio thread)
 crates/ui-components reactive Lua components → SVG → one cached layer per component (the patch UI: its `panel`)
-crates/plugin        package `scriptfx`: nih-plug plugin (VST3/CLAP/standalone), egui shell + component panel
-crates/xtask         `cargo xtask bundle` (nih_plug_xtask)
-vendor/nih-plug      patched nih-plug (runtime parameter names), see vendor/nih-plug/PATCHES.md
+crates/plugin        package `scriptfx`: nice-plug plugin (VST3/CLAP/standalone), iced shell + component panel
+crates/xtask         `cargo xtask bundle` (nice-plug-xtask)
+vendor/nice-plug*    patched nice-plug (runtime parameter names), see vendor/nice-plug/PATCHES.md
+vendor/baseview      patched baseview (X11 frame pacing), see vendor/baseview/PATCHES.md
+vendor/iced_wgpu     patched iced_wgpu (frame timing), see vendor/iced_wgpu/PATCHES.md
+spikes/shell-iced    the shell spike (throwaway, own workspace)
 patches/             tape-glow (multi-target macro, reels/VU), clean-gain (minimal, fader),
                      bass-helper (punch → FET → opto → band split: ride / parallel grit → EQ; live block meters),
                      neon-saturator, junkyard-amp (component UI stress/fire tests)
@@ -27,9 +30,8 @@ cargo xtask bundle scriptfx --release            # → $CARGO_TARGET_DIR/bundled
 # install for local hosts (Reaper, Carla ≥ 2.6 for CLAP; Carla 2.5 = VST3 only)
 cp -r $CARGO_TARGET_DIR/bundled/ScriptFX.vst3 ~/.vst3/ && cp $CARGO_TARGET_DIR/bundled/ScriptFX.clap ~/.clap/
 
-# standalone (see "Linux gotchas" for the env vars)
-SCRIPTFX_PATCHES=$PWD/patches __GLX_VENDOR_LIBRARY_NAME=mesa LIBGL_ALWAYS_SOFTWARE=1 \
-  $CARGO_TARGET_DIR/release/scriptfx -b alsa
+# standalone
+SCRIPTFX_PATCHES=$PWD/patches $CARGO_TARGET_DIR/release/scriptfx -b alsa   # -b dummy: UI only
 
 # headless render + per-layer cost of a patch UI
 cargo run --release -p ui-components --example render -- patches/tape-glow /tmp/out.png [scale] [bind=value ...]
@@ -39,16 +41,20 @@ cargo run --release -p ui-components --example render -- patches/tape-glow /tmp/
 `~/Library/Application Support/ScriptFX/patches`, `%APPDATA%\ScriptFX\patches`). The bundled
 patches are compiled in and copied there on first run; existing files are never overwritten.
 For patch development, point `SCRIPTFX_PATCHES` at this repo's `patches/`. Hot reload picks up
-edits, errors show in the footer, and the last good patch keeps running.
+edits (the LED on Reload turns red on an error, the error shows as a card in the window), and the
+last good patch keeps running. Factory files that left the bundle are removed if unmodified; old
+Lua 5.4 files next to a `.luau` of the same name are renamed to `.lua.bak` (they break `require`).
 
-**Listen** (footer, 🎧): waits for signal, records N seconds of the chain's input *and* output
-(silence skipped), analyses both off the audio thread, shows the result and can attach it to the
-prompt. Saved to `<data dir>/ScriptFX/captures/capture-<time>/` (`analysis.json`, `input.wav`, `output.wav`).
+**Listen** (chat sheet): waits for signal, records N seconds of the chain's input *and* output
+(silence skipped), analyses both off the audio thread, posts the result into the chat and attaches
+it to the next message. Saved to `<data dir>/ScriptFX/captures/capture-<time>/` (`analysis.json`, `input.wav`, `output.wav`).
 Loudness verified against ffmpeg's `ebur128` (identical LUFS, ±0.1 dB true peak / LRA).
 `cargo run --release -p analysis --example analyze -- file.wav` analyses a WAV from the command line.
 
-Dev aids for the standalone: `SCRIPTFX_TEST_INPUT=file.wav` (float WAV at the host rate, looped as
-input), `SCRIPTFX_DEV_AUTOLISTEN=10` (start a 10 s listen when the editor opens).
+Dev aids: `SCRIPTFX_TEST_INPUT=file.wav` (float WAV at the host rate, looped as input),
+`SCRIPTFX_DEV_PATCH=<folder>` (a fresh instance loads this patch instead of starting empty),
+`SCRIPTFX_DEV_SHEET=chat|controls` (open a sheet), `SCRIPTFX_DEV_AUTOLISTEN=10` (start a 10 s
+listen when the editor opens), `SCRIPTFX_DEV_STATS=1` (fps, render CPU, GPU time, panel stats).
 
 **CI** (`.github/workflows/build.yml`): tests, then VST3 + CLAP bundles for Linux x86_64,
 Windows x86_64 and macOS universal (arm64 + x86_64, ad-hoc signed, not notarized → remove
@@ -56,13 +62,14 @@ quarantine, see the README in the artifact).
 
 ## Patch model
 
-Patches are **Luau** (typed Lua; mlua's `luau` feature). `patch.luau` builds the patch with a
-small API and returns it; it `require`s its UI files (relative paths, only inside the patch
-folder) and passes the real objects into the UI. Constructors take the identity positionally
+Patches are **Luau** (typed Lua; mlua's `luau` feature). A patch folder is a Luau module: its
+`init.luau` (or `init.lua`) builds the patch with a small API and returns it. It `require`s its
+other files (only inside the patch folder; from `init.luau` they're `"@self/ui"`, Luau's rule for
+init files, elsewhere `"./x"`) and passes the real objects into the UI. Constructors take the identity positionally
 (id, display name) and every setting by name in an options table:
 
 ```lua
-local ui = require("./ui")
+local ui = require("@self/ui")
 
 local drive = Param.new("drive", "Drive", { min = 0, max = 24, unit = "dB", default = 6 })
 local tone  = Param.new("tone",  "Tone",  { min = 500, max = 20000, unit = "Hz", default = 8000 })
@@ -81,13 +88,21 @@ local chain = Chain.new({
 chain:add(Blocks.Gain.new("out", { db = -3 }))   -- it's code: loops and helper functions work
 
 return Patch.new("Tape Glow", {
-  chain = chain, macros = { character }, theme = { accent = "#ff8a3d" },
+  chain = chain, macros = { character },
+  theme = { colors = { accent = "#ff8a3d", bg = "#17141c" }, fonts = { title = Font.new("fonts/Title.ttf") } },
   panel = ui.Panel.new({ character = character, drive = drive, gr = comp }),
 })
 ```
 
+**Theme** = the patch's design tokens, shared by the library card and the ControlPanel (`p.theme`):
+`colors` (`"#rrggbb"`), `fonts` (`Font.new(path)`: .ttf/.otf, .svg SVG font, .fnt BMFont image font)
+and `images` (`Image.new(path)`: .svg/.png) with the patch's own names. The shell uses
+`colors.accent/bg/ink`, `fonts.title` and `images.logo` (shown instead of the title); `library = { accent,
+bg, ink, font, logo }` overrides them for the library card only. Every part of `Patch.new` is a value,
+so it can live in its own file: `theme = require("./theme")`.
+
 ```lua
--- ui.luau: components get the objects as typed props
+-- ui/init.luau (components in ui/*.luau): components get the objects as typed props
 export type PanelProps = { character: Macro, drive: Param, gr: MeteredBlock }
 local Panel = Component.define({
   name = "Panel",
@@ -235,25 +250,23 @@ What it took / what's missing:
 - Graph swap resets DSP state → a click on patch switch / hot reload (needs a crossfade).
 - Drive aliased at high settings (fixed: per-block oversampling, see Patch model).
 
-## Integration findings (nih-plug + egui)
+## Integration findings (plugin framework + shell)
 
-- Component layers → one `egui::TextureHandle` each → painted in the CentralPanel; egui widgets around it.
-- Macro sliders are auto-generated with patch units (dev sidebar).
+- Shell: iced on nice-plug (see docs/research/shell-ui-toolkit.md). Component layers → one iced
+  image each, positioned in the stage; a small pointer widget turns input into param changes.
+- Macro sliders are auto-generated with patch units (controls sheet, Settings in the notch).
 - **Host params are fixed**: 16 slots; patches map their macros onto them in order. DAWs
   don't tolerate parameter lists that change at runtime, but renaming is fine (automation is
-  keyed by ID). The vendored nih-plug is patched to push names (VST3 `kParamTitlesChanged`,
+  keyed by ID). The vendored nice-plug is patched to push names (VST3 `kParamTitlesChanged`,
   CLAP `RESCAN_INFO`). **Needs testing per host** (Reaper, Carla, Studio One 6, Fender Studio).
-- **egui gotcha**: `Slider::from_get_set` calls the setter *every frame* (clamping). Without a
-  change check this spams host automation gestures and overwrote patch defaults.
 - The patch name is persisted with the host project. Routing (macro → DSP) is applied in
-  `initialize()` so audio is right even when the editor never opens.
+  `activate()` so audio is right even when the editor never opens.
 
 ## Linux gotchas found on this machine (NVIDIA + Hyprland/XWayland + PipeWire)
 
-- **baseview's GLX context crashes on the NVIDIA proprietary driver** (`GLXBadContext` in
-  `make_current`). Workaround: `__GLX_VENDOR_LIBRARY_NAME=mesa LIBGL_ALWAYS_SOFTWARE=1`.
-  nih_plug_egui is locked to OpenGL. Needs a look at baseview or a softbuffer-based renderer
-  before this is usable in a real DAW on such setups.
+- The shell renders with wgpu (Vulkan), no GL: the old GLX problems on the NVIDIA proprietary
+  driver are gone, the standalone needs no Mesa workaround.
+- X11 frame pacing under XWayland: see vendor/baseview/PATCHES.md.
 - Standalone with **JACK backend on PipeWire never called `process()`**, so parameters never
   updated. `-b alsa` works.
 - Tiling WMs resize the standalone window, but the editor stays 900×560 (top-left).

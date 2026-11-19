@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg">
+<!-- Clean Line: monoline geometric display font for the Clean Gain patch (SVG 1.1 font). -->
+<defs>
+<font id="clean-line" horiz-adv-x="600">
+  <font-face font-family="Clean Line" units-per-em="1000" ascent="800" descent="200" cap-height="700" x-height="504"/>
+  <missing-glyph horiz-adv-x="500"><path d="M70 0 L70 700 L430 700 L430 0 Z" fill="none" stroke="currentColor" stroke-width="40"/></missing-glyph>
+  <glyph unicode=" " horiz-adv-x="300"/>
+  <glyph unicode="A" horiz-adv-x="660"><path d="M 70 0 L 330 700 L 590 0 M 165 250 L 495 250" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="a" horiz-adv-x="514"><path d="M 70 0 L 257 504 L 444 0 M 138 180 L 376 180" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="B" horiz-adv-x="590"><path d="M 70 350 L 340 350 A 175 175 0 0 0 340 0 L 70 0 L 70 700 L 310 700 A 175 175 0 0 0 310 350" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="b" horiz-adv-x="464"><path d="M 70 252 L 264 252 A 126 126 0 0 0 264 0 L 70 0 L 70 504 L 243 504 A 126 126 0 0 0 243 252" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="C" horiz-adv-x="640"><path d="M 560 560 A 300 350 0 1 1 560 140" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="c" horiz-adv-x="500"><path d="M 423 403 A 216 252 0 1 1 423 101" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="D" horiz-adv-x="640"><path d="M 70 700 L 70 0 L 250 0 A 320 350 0 0 1 250 700 Z" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="d" horiz-adv-x="500"><path d="M 70 504 L 70 0 L 200 0 A 230 252 0 0 1 200 504 Z" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="E" horiz-adv-x="570"><path d="M 500 700 L 70 700 L 70 0 L 500 0 M 70 350 L 420 350" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="e" horiz-adv-x="450"><path d="M 380 504 L 70 504 L 70 0 L 380 0 M 70 252 L 322 252" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="F" horiz-adv-x="570"><path d="M 500 700 L 70 700 L 70 0 M 70 350 L 420 350" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="f" horiz-adv-x="450"><path d="M 380 504 L 70 504 L 70 0 M 70 252 L 322 252" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="G" horiz-adv-x="660"><path d="M 560 570 A 300 350 0 1 1 590 180 L 590 300 L 390 300" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="g" horiz-adv-x="514"><path d="M 423 410 A 216 252 0 1 1 444 130 L 444 216 L 300 216" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="H" horiz-adv-x="620"><path d="M 70 700 L 70 0 M 550 700 L 550 0 M 70 350 L 550 350" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="h" horiz-adv-x="486"><path d="M 70 504 L 70 0 M 416 504 L 416 0 M 70 252 L 416 252" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="I" horiz-adv-x="140"><path d="M 70 700 L 70 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="i" horiz-adv-x="140"><path d="M 70 504 L 70 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="J" horiz-adv-x="440"><path d="M 370 700 L 370 180 A 170 180 0 0 0 70 140" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="j" horiz-adv-x="356"><path d="M 286 504 L 286 130 A 122 130 0 0 0 70 101" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="K" horiz-adv-x="600"><path d="M 70 700 L 70 0 M 510 700 L 70 280 M 220 410 L 530 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="k" horiz-adv-x="471"><path d="M 70 504 L 70 0 M 387 504 L 70 202 M 178 295 L 401 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="L" horiz-adv-x="540"><path d="M 70 700 L 70 0 L 470 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="l" horiz-adv-x="428"><path d="M 70 504 L 70 0 L 358 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="M" horiz-adv-x="740"><path d="M 70 0 L 70 700 L 370 250 L 670 700 L 670 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="m" horiz-adv-x="572"><path d="M 70 0 L 70 504 L 286 180 L 502 504 L 502 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="N" horiz-adv-x="620"><path d="M 70 0 L 70 700 L 550 0 L 550 700" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="n" horiz-adv-x="486"><path d="M 70 0 L 70 504 L 416 0 L 416 504" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="O" horiz-adv-x="740"><path d="M 370 700 A 300 350 0 1 1 370 0 A 300 350 0 1 1 370 700" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="o" horiz-adv-x="572"><path d="M 286 504 A 216 252 0 1 1 286 0 A 216 252 0 1 1 286 504" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="P" horiz-adv-x="590"><path d="M 70 0 L 70 700 L 340 700 A 180 180 0 0 0 340 340 L 70 340" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="p" horiz-adv-x="464"><path d="M 70 0 L 70 504 L 264 504 A 130 130 0 0 0 264 245 L 70 245" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="Q" horiz-adv-x="740"><path d="M 370 700 A 300 350 0 1 1 370 0 A 300 350 0 1 1 370 700 M 450 180 L 670 -30" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="q" horiz-adv-x="572"><path d="M 286 504 A 216 252 0 1 1 286 0 A 216 252 0 1 1 286 504 M 344 130 L 502 -22" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="R" horiz-adv-x="600"><path d="M 70 0 L 70 700 L 340 700 A 180 180 0 0 0 340 340 L 70 340 M 320 340 L 530 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="r" horiz-adv-x="471"><path d="M 70 0 L 70 504 L 264 504 A 130 130 0 0 0 264 245 L 70 245 M 250 245 L 401 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="S" horiz-adv-x="610"><path d="M 520 580 C 470 680 110 690 110 520 C 110 360 530 370 530 180 C 530 10 150 -10 90 110" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="s" horiz-adv-x="478"><path d="M 394 418 C 358 490 99 497 99 374 C 99 259 401 266 401 130 C 401 7 128 -7 84 79" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="T" horiz-adv-x="620"><path d="M 70 700 L 550 700 M 310 700 L 310 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="t" horiz-adv-x="486"><path d="M 70 504 L 416 504 M 243 504 L 243 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="U" horiz-adv-x="600"><path d="M 70 700 L 70 230 A 230 230 0 0 1 530 230 L 530 700" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="u" horiz-adv-x="471"><path d="M 70 504 L 70 166 A 166 166 0 0 1 401 166 L 401 504" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="V" horiz-adv-x="640"><path d="M 70 700 L 320 0 L 570 700" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="v" horiz-adv-x="500"><path d="M 70 504 L 250 0 L 430 504" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="W" horiz-adv-x="860"><path d="M 70 700 L 240 0 L 430 500 L 620 0 L 790 700" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="w" horiz-adv-x="658"><path d="M 70 504 L 192 0 L 329 360 L 466 0 L 588 504" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="X" horiz-adv-x="620"><path d="M 70 700 L 550 0 M 550 700 L 70 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="x" horiz-adv-x="486"><path d="M 70 504 L 416 0 M 416 504 L 70 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="Y" horiz-adv-x="640"><path d="M 70 700 L 320 340 L 570 700 M 320 340 L 320 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="y" horiz-adv-x="500"><path d="M 70 504 L 250 245 L 430 504 M 250 245 L 250 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="Z" horiz-adv-x="600"><path d="M 70 700 L 530 700 L 70 0 L 530 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="z" horiz-adv-x="471"><path d="M 70 504 L 401 504 L 70 0 L 401 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="0" horiz-adv-x="600"><path d="M 300 700 A 230 350 0 1 1 300 0 A 230 350 0 1 1 300 700" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="1" horiz-adv-x="340"><path d="M 70 570 L 240 700 L 240 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="2" horiz-adv-x="580"><path d="M 100 540 C 130 680 490 700 490 500 C 490 320 70 200 70 0 L 510 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="3" horiz-adv-x="580"><path d="M 90 610 C 190 720 490 700 490 520 C 490 370 330 350 250 350 C 370 350 510 320 510 170 C 510 -20 170 -30 80 80" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="4" horiz-adv-x="610"><path d="M 410 0 L 410 700 L 70 220 L 540 220" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="5" horiz-adv-x="570"><path d="M 490 700 L 130 700 L 100 370 C 190 420 500 440 500 200 C 500 -20 160 -30 80 80" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="6" horiz-adv-x="580"><path d="M 470 660 C 270 740 70 580 70 250 A 220 225 0 1 1 290 450 C 180 450 100 380 70 280" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="7" horiz-adv-x="600"><path d="M 70 700 L 530 700 L 240 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="8" horiz-adv-x="580"><path d="M 290 360 A 180 170 0 1 0 290 700 A 180 170 0 1 0 290 360 M 290 360 A 210 180 0 1 1 290 0 A 210 180 0 1 1 290 360" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="9" horiz-adv-x="580"><path d="M 110 40 C 310 -40 510 120 510 450 A 220 225 0 1 1 290 250 C 400 250 480 320 510 420" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="-" horiz-adv-x="380"><path d="M 70 280 L 310 280" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="." horiz-adv-x="140"><path d="M 70 0 L 70 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="," horiz-adv-x="180"><path d="M 110 10 L 70 -90" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode=":" horiz-adv-x="140"><path d="M 70 450 L 70 450 M 70 0 L 70 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="&apos;" horiz-adv-x="140"><path d="M 70 700 L 70 500" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="/" horiz-adv-x="520"><path d="M 450 700 L 70 0" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="&amp;" horiz-adv-x="660"><path d="M 590 0 L 190 470 A 150 140 0 1 0 400 480 L 130 220 A 160 160 0 0 1 370 10 L 550 230" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="(" horiz-adv-x="300"><path d="M 230 720 C 20 520 20 180 230 -20" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode=")" horiz-adv-x="300"><path d="M 70 720 C 280 520 280 180 70 -20" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <glyph unicode="%" horiz-adv-x="660"><path d="M 590 700 L 70 0 M 170 700 A 100 120 0 1 1 170 460 A 100 120 0 1 1 170 700 M 490 240 A 100 120 0 1 1 490 0 A 100 120 0 1 1 490 240" fill="none" stroke="currentColor" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/></glyph>
+  <hkern u1="A" u2="V" k="60"/>
+  <hkern u1="V" u2="A" k="60"/>
+  <hkern u1="L" u2="T" k="60"/>
+  <hkern u1="T" u2="a" k="50"/>
+  <hkern u1="A" u2="Y" k="50"/>
+  <hkern u1="Y" u2="a" k="50"/>
+  <hkern u1="r" u2="a" k="20"/>
+</font>
+</defs>
+</svg>
