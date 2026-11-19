@@ -278,7 +278,7 @@ pub fn view<'a>(patch: &'a Patch, panel: Option<&'a Panel>, bg: Color) -> Elemen
         None => center(
             text(format!("{} has no ControlPanel. Its macros are under Settings.", patch.name))
                 .size(12.5)
-                .color(theme::FRAME_MUTED),
+                .color(theme::c().frame_muted),
         )
         .into(),
     };
@@ -316,7 +316,7 @@ impl<M> canvas::Program<M> for Corners {
                 p.arc_to(c, b, r);
                 p.close();
             });
-            frame.fill(&path, theme::FRAME);
+            frame.fill(&path, theme::c().frame);
         }
         vec![frame.into_geometry()]
     }

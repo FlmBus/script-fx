@@ -1,4 +1,5 @@
 //! The chat sheet: a paper card floating over the right side of the patch window.
+//! Chats are global (not per patch); for now there is one, "Main".
 //! Listen lives here: a capture's analysis is posted into the chat and attached to the next
 //! message. No LLM is connected yet; sending says so instead of pretending.
 
@@ -80,15 +81,15 @@ impl Chat {
         None
     }
 
-    pub fn view<'a>(&'a self, patch_name: &'a str, listen: Status, seconds: f32) -> Element<'a, Message> {
-        let header = sheet::header("Chat", patch_name, Message::Close);
+    pub fn view<'a>(&'a self, listen: Status, seconds: f32) -> Element<'a, Message> {
+        let header = sheet::header("Chat", "Main", Message::Close);
 
         let body: Element<'a, Message> = if self.log.is_empty() {
             container(
-                text("Ask for changes to this patch. Listen captures what your track sounds like before and after the chain; the capture goes with your next message.")
+                text("Ask for a new patch or changes to the loaded one. Listen captures what your track sounds like before and after the chain; the capture goes with your next message.")
                     .size(12)
                     .font(theme::font::PAPER)
-                    .color(theme::PAPER_MUTED)
+                    .color(theme::c().paper_muted)
                     .line_height(1.5),
             )
             .padding(16)
@@ -108,11 +109,11 @@ impl Chat {
         let listen_row: Element<'a, Message> = match listen {
             Status::Idle => row![
                 sheet::small(
-                    row![icons::icon(icons::HEADPHONES, 11.0, 2.2, theme::SIGNAL_INK), sheet::label("Listen")].spacing(6).align_y(Center),
+                    row![icons::icon(icons::HEADPHONES, 11.0, 2.2, theme::c().signal_ink), sheet::label("Listen")].spacing(6).align_y(Center),
                     Some(Message::Listen)
                 ),
                 sheet::small(sheet::label(format!("{:.0} s ▾", seconds)), Some(Message::CycleLength)),
-                text("captures attach to the next message").size(11).font(theme::font::PAPER).color(theme::PAPER_MUTED),
+                text("captures attach to the next message").size(11).font(theme::font::PAPER).color(theme::c().paper_muted),
             ]
             .spacing(5)
             .align_y(Center)
@@ -124,8 +125,8 @@ impl Chat {
                     _ => "Analyzing…".to_string(),
                 };
                 let mut r = row![
-                    icons::icon(icons::HEADPHONES, 11.0, 2.2, theme::SIGNAL_INK),
-                    text(what).size(11.5).font(theme::font::PAPER).color(theme::PAPER_INK),
+                    icons::icon(icons::HEADPHONES, 11.0, 2.2, theme::c().signal_ink),
+                    text(what).size(11.5).font(theme::font::PAPER).color(theme::c().paper_ink),
                     space::horizontal(),
                 ]
                 .spacing(6)
@@ -142,7 +143,7 @@ impl Chat {
             footer = footer.push(
                 row![
                     capture_chip(c),
-                    button(container(icons::icon(icons::CLOSE, 9.0, 2.5, theme::PAPER_MUTED)).center(Fill))
+                    button(container(icons::icon(icons::CLOSE, 9.0, 2.5, theme::c().paper_muted)).center(Fill))
                         .on_press(Message::Detach)
                         .width(20)
                         .height(20)
@@ -156,7 +157,7 @@ impl Chat {
         footer = footer.push(
             row![
                 text_editor(&self.draft)
-                    .placeholder("Ask for changes to this patch…")
+                    .placeholder("Ask for a patch or a change…")
                     .on_action(Message::Edit)
                     .key_binding(|key| {
                         // Enter sends, Shift+Enter inserts a newline.
@@ -187,8 +188,8 @@ impl Chat {
 fn capture_chip<'a>(c: &CaptureResult) -> Element<'a, Message> {
     container(
         row![
-            icons::icon(icons::HEADPHONES, 11.0, 2.2, theme::SIGNAL_INK),
-            text(format!("Capture · {}", c.label())).size(11).font(theme::font::PAPER).color(nice_plug_iced::iced::color!(0x47443e))
+            icons::icon(icons::HEADPHONES, 11.0, 2.2, theme::c().signal_ink),
+            text(format!("Capture · {}", c.label())).size(11).font(theme::font::PAPER).color(theme::c().paper_ink_3)
         ]
         .spacing(6)
         .align_y(Center),
@@ -204,11 +205,11 @@ fn capture_chip<'a>(c: &CaptureResult) -> Element<'a, Message> {
 fn entry(e: &Entry) -> Element<'_, Message> {
     match e {
         Entry::User { text: body, capture } => {
-            let bubble = container(text(body.as_str()).size(12.5).font(theme::font::PAPER).color(theme::ON_PAPER_INK).line_height(1.45))
+            let bubble = container(text(body.as_str()).size(12.5).font(theme::font::PAPER).color(theme::c().on_paper_ink).line_height(1.45))
                 .padding(Padding { top: 8.0, bottom: 8.0, left: 12.0, right: 12.0 })
                 .max_width(270)
                 .style(|_: &Theme| container::Style {
-                    background: Some(theme::PAPER_INK.into()),
+                    background: Some(theme::c().paper_ink.into()),
                     border: Border { radius: theme::radius(14.0).bottom_right(4.0), ..Default::default() },
                     ..Default::default()
                 });
@@ -219,7 +220,7 @@ fn entry(e: &Entry) -> Element<'_, Message> {
             container(col).width(Fill).align_x(Right).into()
         }
         Entry::Reply(md) => container(markdown::view(md.items(), sheet::markdown_settings()).map(|_| Message::Link))
-            .style(|_: &Theme| container::Style { text_color: Some(theme::PAPER_INK_2), ..Default::default() })
+            .style(|_: &Theme| container::Style { text_color: Some(theme::c().paper_ink_2), ..Default::default() })
             .into(),
     }
 }

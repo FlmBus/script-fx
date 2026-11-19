@@ -207,10 +207,10 @@ fn scan_library(new_fonts: &mut Vec<Vec<u8>>) -> Vec<PatchInfo> {
             let folder = dir.file_name()?.to_str()?.to_string();
             Some(match Patch::load(&dir) {
                 Ok(p) => {
-                    let accent = hex(p.theme.library_accent()).unwrap_or(super::theme::FRAME_INK_2);
+                    let accent = hex(p.theme.library_accent()).unwrap_or(super::theme::c().frame_ink_2);
                     PatchInfo {
                     accent,
-                    bg: hex(p.theme.library_bg()).unwrap_or(super::theme::FRAME_RAISED),
+                    bg: hex(p.theme.library_bg()).unwrap_or(super::theme::c().frame_raised),
                     ink: hex(p.theme.library_ink()),
                     brand: brand::load(&dir, &p.theme, &p.name, accent, new_fonts),
                     name: p.name,
@@ -221,8 +221,8 @@ fn scan_library(new_fonts: &mut Vec<Vec<u8>>) -> Vec<PatchInfo> {
                 Err(_) => PatchInfo {
                     name: folder.clone(),
                     folder,
-                    accent: super::theme::FRAME_MUTED,
-                    bg: super::theme::FRAME_RAISED,
+                    accent: super::theme::c().frame_muted,
+                    bg: super::theme::c().frame_raised,
                     broken: true,
                     ink: None,
                     brand: Brand { font: None, title: None, logo: None },

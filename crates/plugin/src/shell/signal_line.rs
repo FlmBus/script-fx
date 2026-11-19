@@ -51,16 +51,16 @@ pub fn view<'a, M: 'a>(patch: Option<&'a Patch>, values: &Values) -> Element<'a,
 
 fn label<'a, M: 'a>(s: &'a str) -> container::Container<'a, M> {
     // label-caps; iced text has no letter-spacing yet.
-    container(text(s).size(10).font(theme::font::SANS_SEMIBOLD).color(theme::FRAME_SUBTLE))
+    container(text(s).size(10).font(theme::font::SANS_SEMIBOLD).color(theme::c().frame_subtle))
 }
 
 fn wire<'a, M: 'a>(width: impl Into<Length>) -> Element<'a, M> {
-    container(space::horizontal().width(width).height(1)).style(theme::rule(theme::FRAME_WIRE)).into()
+    container(space::horizontal().width(width).height(1)).style(theme::rule(theme::c().frame_wire)).into()
 }
 
 fn vbar<'a, M: 'a>() -> Element<'a, M> {
     // From the centre of the first lane to the centre of the last.
-    container(container(space::vertical().width(1)).style(theme::rule(theme::FRAME_WIRE)))
+    container(container(space::vertical().width(1)).style(theme::rule(theme::c().frame_wire)))
         .padding(Padding { top: LANE_H / 2.0, bottom: LANE_H / 2.0, ..Padding::ZERO })
         .height(Fill)
         .into()
@@ -91,8 +91,8 @@ fn flatten(chain: &[BlockSpec]) -> Vec<&BlockSpec> {
 
 fn led_color(led: Led) -> Color {
     match led {
-        Led::Ok => theme::LED_OK,
-        Led::Reduce => theme::LED_REDUCE,
+        Led::Ok => theme::c().led_ok,
+        Led::Reduce => theme::c().led_reduce,
     }
 }
 
@@ -103,13 +103,13 @@ fn node<'a, M: 'a>(name: &'a str, led: Led) -> Element<'a, M> {
         border: Border { radius: theme::radius(3.0), ..Default::default() },
         ..Default::default()
     });
-    container(row![dot, text(name).size(11).color(theme::FRAME_INK_3)].spacing(6).align_y(Center))
+    container(row![dot, text(name).size(11).color(theme::c().frame_ink_3)].spacing(6).align_y(Center))
         .height(theme::SIZE_NODE)
         .padding(Padding { left: 10.0, right: 10.0, ..Padding::ZERO })
         .align_y(Center)
         .style(|_: &Theme| container::Style {
-            background: Some(theme::FRAME_NODE.into()),
-            border: Border { radius: theme::radius(theme::RADIUS_CONTROL), width: 1.0, color: theme::FRAME_HAIRLINE_STRONG },
+            background: Some(theme::c().frame_node.into()),
+            border: Border { radius: theme::radius(theme::RADIUS_CONTROL), width: 1.0, color: theme::c().frame_hairline_strong },
             ..Default::default()
         })
         .into()

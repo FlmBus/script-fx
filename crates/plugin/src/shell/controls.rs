@@ -65,7 +65,7 @@ pub fn view<'a>(patch: &'a Patch, values: &'a Values, hot_reload: bool) -> Eleme
             .font(theme::font::PAPER)
             .style(paper_checkbox),
     );
-    list = list.push(text(patch.dir.display().to_string()).size(11).font(theme::font::PAPER_MONO).color(theme::PAPER_MUTED));
+    list = list.push(text(patch.dir.display().to_string()).size(11).font(theme::font::PAPER_MONO).color(theme::c().paper_muted));
     if let Some(a) = &patch.author {
         list = list.push(muted(format!("by {a}")));
     }
@@ -76,9 +76,9 @@ pub fn view<'a>(patch: &'a Patch, values: &'a Values, hot_reload: bool) -> Eleme
 fn control<'a>(name: &'a str, value: String, widget: Element<'a, Message>) -> Element<'a, Message> {
     column![
         row![
-            text(name).size(12.5).font(theme::font::PAPER_SEMIBOLD).color(theme::PAPER_INK),
+            text(name).size(12.5).font(theme::font::PAPER_SEMIBOLD).color(theme::c().paper_ink),
             space::horizontal(),
-            text(value).size(11.5).font(theme::font::PAPER_MONO).color(theme::PAPER_INK_2),
+            text(value).size(11.5).font(theme::font::PAPER_MONO).color(theme::c().paper_ink_2),
         ]
         .align_y(Center),
         widget,
@@ -88,23 +88,23 @@ fn control<'a>(name: &'a str, value: String, widget: Element<'a, Message>) -> El
 }
 
 fn muted<'a>(s: impl text::IntoFragment<'a>) -> Element<'a, Message> {
-    text(s).size(11.5).font(theme::font::PAPER).color(theme::PAPER_MUTED).into()
+    text(s).size(11.5).font(theme::font::PAPER).color(theme::c().paper_muted).into()
 }
 
 fn paper_slider(_: &Theme, status: slider::Status) -> slider::Style {
     let handle = match status {
-        slider::Status::Hovered | slider::Status::Dragged => theme::PAPER_INK,
-        _ => theme::PAPER_INK_2,
+        slider::Status::Hovered | slider::Status::Dragged => theme::c().paper_ink,
+        _ => theme::c().paper_ink_2,
     };
     slider::Style {
         rail: slider::Rail {
-            backgrounds: (Background::Color(theme::PAPER_INK), Background::Color(theme::PAPER_LINE)),
+            backgrounds: (Background::Color(theme::c().paper_ink), Background::Color(theme::c().paper_line)),
             width: 3.0,
             border: Border { radius: theme::radius(2.0), ..Default::default() },
         },
         handle: slider::Handle {
             shape: slider::HandleShape::Circle { radius: 6.0 },
-            background: Background::Color(theme::PAPER_RAISED),
+            background: Background::Color(theme::c().paper_raised),
             border_width: 2.0,
             border_color: handle,
         },
@@ -117,9 +117,9 @@ fn paper_checkbox(_: &Theme, status: checkbox::Status) -> checkbox::Style {
         checkbox::Status::Active { is_checked: true } | checkbox::Status::Hovered { is_checked: true } | checkbox::Status::Disabled { is_checked: true }
     );
     checkbox::Style {
-        background: if checked { theme::PAPER_INK.into() } else { theme::PAPER_RAISED.into() },
-        icon_color: theme::PAPER,
-        border: Border { radius: theme::radius(4.0), width: 1.0, color: if checked { theme::PAPER_INK } else { theme::PAPER_LINE } },
-        text_color: Some(theme::PAPER_INK),
+        background: if checked { theme::c().paper_ink.into() } else { theme::c().paper_raised.into() },
+        icon_color: theme::c().paper,
+        border: Border { radius: theme::radius(4.0), width: 1.0, color: if checked { theme::c().paper_ink } else { theme::c().paper_line } },
+        text_color: Some(theme::c().paper_ink),
     }
 }

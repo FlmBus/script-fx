@@ -16,6 +16,7 @@ use patch::{MACRO_SLOTS, Patch};
 
 mod listen;
 mod shell;
+mod user_settings;
 
 /// Listen/capture states (`Shared::listen_state`).
 pub const LISTEN_IDLE: u8 = 0;
@@ -353,7 +354,8 @@ impl Default for ScriptFx {
             params: Arc::new(FxParams::default()),
             editor_state: IcedEditorState::from_size(
                 nice_plug::editor::dpi::LogicalSize::new(WINDOW_SIZE.0, WINDOW_SIZE.1),
-                1.0,
+                // The user's UI scale opens the window at that size; the shell changes it live.
+                user_settings::UserSettings::load().ui_scale,
             ),
             notifier: PollSubNotifier::new(),
             shared: Arc::new(Shared {

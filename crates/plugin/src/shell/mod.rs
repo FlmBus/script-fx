@@ -1,9 +1,10 @@
 //! The shell: the plugin's own UI (iced), in the "ScriptFX Shell" design system.
-//! Library | patch window (ControlPanel + notch + paper sheets) over the signal line.
+//! Top bar over: library | patch window (ControlPanel + notch + paper sheets) over the signal line.
 //!
 //! One module per section, each with its own state, `Message`, `update` and `view`:
+//! - `top_bar`      plugin name, UI scale, passive mode, the (global) chat
 //! - `library`      patch list in the sidebar
-//! - `notch`        snapshot selector, save, load / reload, chat, settings
+//! - `notch`        reload / snapshot selector, save, load / patch controls
 //! - `stage`        the patch window: the ControlPanel and its pointer input
 //! - `chat`         the chat sheet (Listen lives here)
 //! - `controls`     the controls sheet (macros, params, patch settings)
@@ -29,6 +30,7 @@ mod sheet;
 mod signal_line;
 mod slide;
 mod stage;
+mod top_bar;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -44,6 +46,7 @@ use nice_plug_iced::{
 };
 
 use crate::listen::Listen;
+use crate::user_settings::{self, UserSettings};
 use crate::{FxParams, Shared};
 use session::Session;
 
@@ -67,6 +70,7 @@ pub fn create(
     create_iced_editor(editor_state, Plugin { params, shared }, notifier, settings, |persistent, ctx| {
         let mut app = application(persistent, ctx, Shell::new, Shell::update, Shell::view)
             .theme(Shell::theme)
+            .scale_factor(Shell::scale_factor)
             .style(Shell::style)
             .subscription(Shell::subscription)
             .default_font(theme::font::SANS);
@@ -99,12 +103,19 @@ pub struct Shell {
     now: Instant,
     /// Macro slot being dragged on the controls sheet (host gesture open).
     dragging_macro: Option<usize>,
+    /// Passive mode (not built yet: the top bar's switch is disabled).
+    passive: bool,
+    /// Per-user settings (UI scale), saved on change.
+    settings: UserSettings,
     dev_stats: bool,
+    /// Dev aid: `SCRIPTFX_DEV_RESCALE=1.5` sets the UI scale 1 s after opening (like −/+).
+    dev_rescale: Option<(Instant, f32)>,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Frame(Instant),
+    TopBar(top_bar::Message),
     Library(library::Message),
     Notch(notch::Message),
     Chat(chat::Message),
@@ -130,7 +141,10 @@ impl Shell {
             slide: Animation::new(false).duration(Duration::from_millis(260)).easing(Easing::EaseOutCubic),
             now: Instant::now(),
             dragging_macro: None,
+            passive: false,
+            settings: { let s = UserSettings::load(); apply_theme(s.theme); s },
             dev_stats: std::env::var_os("SCRIPTFX_DEV_STATS").is_some(),
+            dev_rescale: std::env::var("SCRIPTFX_DEV_RESCALE").ok().and_then(|s| s.parse().ok()).map(|v| (Instant::now() + Duration::from_secs(1), v)),
         }
     }
 
@@ -138,18 +152,24 @@ impl Shell {
         Some(Theme::custom(
             "ScriptFX Shell",
             iced::theme::Palette {
-                background: theme::FRAME,
-                text: theme::FRAME_INK_3,
-                primary: theme::FRAME_INVERT,
-                success: theme::LED_OK,
-                warning: theme::LED_REDUCE,
-                danger: theme::LED_CLIP,
+                background: theme::c().frame,
+                text: theme::c().frame_ink_3,
+                primary: theme::c().frame_invert,
+                success: theme::c().led_ok,
+                warning: theme::c().led_reduce,
+                danger: theme::c().led_clip,
             },
         ))
     }
 
+    /// The user's UI scale, on top of the system's. When it changes, iced resizes the window
+    /// (through the host) and lays the shell out at the new scale.
+    fn scale_factor(&self) -> f32 {
+        self.settings.ui_scale
+    }
+
     fn style(&self, _: &Theme) -> iced::theme::Style {
-        iced::theme::Style { background_color: theme::FRAME, text_color: theme::FRAME_INK_3 }
+        iced::theme::Style { background_color: theme::c().frame, text_color: theme::c().frame_ink_3 }
     }
 
     /// The frame clock drives everything that moves: meters, animated components, the sheet
@@ -171,6 +191,8 @@ impl Shell {
         let ctx = &self.ctx.nice_context.clone();
         match message {
             Message::Frame(now) => {
+                // "System" follows the OS while open (read off-thread, see theme::system_is_light).
+                apply_theme(self.settings.theme);
                 self.now = now;
                 if !self.restored {
                     self.restored = true;
@@ -189,11 +211,18 @@ impl Shell {
                         self.open_sheet(Some(Sheet::Chat));
                     }
                 }
+                if let Some((at, v)) = self.dev_rescale {
+                    if now >= at {
+                        self.dev_rescale = None;
+                        self.set_ui_scale(v);
+                    }
+                }
                 self.session.tick(ctx, &params, &shared);
                 if let Some(result) = self.listen.poll(&shared) {
                     self.chat.capture_done(result);
                     self.open_sheet(Some(Sheet::Chat));
                 }
+                icons::set_scale(self.ctx.window_size().scale_factor as f32);
                 let scale = stage::panel_fit().0 * self.ctx.window_size().scale_factor as f32;
                 let Session { current, values, .. } = &mut self.session;
                 if let Some(cur) = current {
@@ -202,6 +231,17 @@ impl Shell {
                     }
                 }
             }
+            Message::TopBar(msg) => match msg {
+                top_bar::Message::TogglePassive => self.passive = !self.passive,
+                top_bar::Message::ToggleChat => self.toggle_sheet(Sheet::Chat),
+                top_bar::Message::ScaleDown => self.set_ui_scale(self.settings.ui_scale - user_settings::UI_SCALE_STEP),
+                top_bar::Message::ScaleUp => self.set_ui_scale(self.settings.ui_scale + user_settings::UI_SCALE_STEP),
+                top_bar::Message::SetTheme(mode) => {
+                    self.settings.theme = mode;
+                    apply_theme(mode);
+                    self.settings.save();
+                }
+            },
             Message::Library(msg) => match self.library.update(msg) {
                 Some(library::Event::Load(folder)) => {
                     self.session.load(ctx, &params, &shared, &folder, true);
@@ -209,13 +249,15 @@ impl Shell {
                 }
                 Some(library::Event::Unload) => {
                     self.session.unload(ctx, &params, &shared);
-                    self.open_sheet(None);
+                    // The chat is global and stays open; the controls belong to the patch.
+                    if self.sheet == Some(Sheet::Controls) {
+                        self.open_sheet(None);
+                    }
                 }
                 None => {}
             },
             Message::Notch(msg) => match msg {
                 notch::Message::Reload => self.session.reload(ctx, &params, &shared),
-                notch::Message::ToggleChat => self.toggle_sheet(Sheet::Chat),
                 notch::Message::ToggleControls => self.toggle_sheet(Sheet::Controls),
             },
             Message::Chat(msg) => match self.chat.update(msg) {
@@ -283,6 +325,17 @@ impl Shell {
         }
     }
 
+    fn set_ui_scale(&mut self, v: f32) {
+        let v = user_settings::snap_ui_scale(v);
+        if v == self.settings.ui_scale {
+            return;
+        }
+        self.settings.ui_scale = v;
+        // Remembered for the next window open; `scale_factor()` resizes this one.
+        self.ctx.set_user_scale_factor(v);
+        self.settings.save();
+    }
+
     fn reveal_current(&mut self) {
         if let Some(cur) = &self.session.current {
             self.library.reveal(&cur.folder);
@@ -313,48 +366,53 @@ impl Shell {
         let main: Element<'_, Message> = match &s.current {
             Some(_) => column![self.window(), signal_line::view(s.current.as_ref().map(|c| &c.patch), &s.values)].into(),
             None => {
-                let empty = container(self.empty.view().map(Message::Empty)).padding(Padding {
+                // The card slides aside with an open sheet, like the notch.
+                let empty = container(self.empty.view(self.slide_t() * sheet_width()).map(Message::Empty)).padding(Padding {
                     top: theme::SPACE_GUTTER,
                     right: theme::SPACE_GUTTER,
                     bottom: theme::SPACE_GUTTER,
                     left: 0.0,
                 });
-                stack![empty, self.error_card()].into()
+                let mut layers = stack![empty].width(Fill).height(Fill);
+                if let Some(sheet) = self.sheet_layer() {
+                    layers = layers.push(container(sheet).padding(Padding { top: theme::SPACE_GUTTER, right: theme::SPACE_GUTTER, ..Padding::ZERO }));
+                }
+                layers.push(self.error_card()).into()
             }
         };
 
-        container(row![library, main]).style(theme::frame).width(Fill).height(Fill).into()
+        let top_bar = top_bar::view(top_bar::Props {
+            passive: self.passive,
+            passive_available: false,
+            ui_scale: self.settings.ui_scale,
+            theme: self.settings.theme,
+            chat_open: self.sheet == Some(Sheet::Chat),
+        })
+        .map(Message::TopBar);
+        container(column![top_bar, row![library, main]]).style(theme::frame).width(Fill).height(Fill).into()
     }
 
     /// The patch window with the shell's two intrusions: the notch and a paper sheet.
     fn window(&self) -> Element<'_, Message> {
         let Some(cur) = &self.session.current else { return column![].into() };
-        let bg = session::hex(cur.patch.theme.color("bg")).unwrap_or(theme::FRAME_RAISED);
+        let bg = session::hex(cur.patch.theme.color("bg")).unwrap_or(theme::c().frame_raised);
 
-        // 0 = sheet hidden, 1 = fully in. While a sheet is open the notch centres on the part
-        // of the window it leaves visible, gliding along with it.
-        let t: f32 = self.slide.interpolate(0.0, 1.0, self.now);
-        let sheet_w = theme::SIZE_SHEET + 2.0 * theme::SPACE_2;
+        // While a sheet is open the notch centres on the part of the window it leaves visible,
+        // gliding along with it.
         let notch = notch::view(notch::Props {
             snapshot: "Init",
             sync: if self.session.error.is_some() { notch::Sync::Error } else { notch::Sync::Ok },
-            chat_open: self.sheet == Some(Sheet::Chat),
             controls_open: self.sheet == Some(Sheet::Controls),
         })
         .map(Message::Notch);
         let notch = container(notch)
             .width(Fill)
-            .padding(Padding { right: t * sheet_w, ..Padding::ZERO })
+            .padding(Padding { right: self.slide_t() * sheet_width(), ..Padding::ZERO })
             .align_x(alignment::Horizontal::Center);
 
         let mut layers = stack![stage::view(&cur.patch, cur.panel.as_ref(), bg).map(Message::Panel), notch].width(Fill).height(Fill);
-        if t > 0.0 {
-            let sheet: Element<'_, Message> = match self.shown {
-                Sheet::Chat => self.chat.view(&cur.patch.name, self.listen.status(&self.plugin.shared), self.listen.seconds).map(Message::Chat),
-                Sheet::Controls => controls::view(&cur.patch, &self.session.values, self.session.hot_reload).map(Message::Controls),
-            };
-            let sheet = container(sheet).height(Fill).padding(theme::SPACE_2);
-            layers = layers.push(slide::slide(sheet, sheet_w, (1.0 - t) * sheet_w));
+        if let Some(sheet) = self.sheet_layer() {
+            layers = layers.push(sheet);
         }
         layers = layers.push(self.error_card());
         if self.dev_stats {
@@ -368,19 +426,40 @@ impl Shell {
             .into()
     }
 
+    /// 0 = sheet hidden, 1 = fully in.
+    fn slide_t(&self) -> f32 {
+        self.slide.interpolate(0.0, 1.0, self.now)
+    }
+
+    /// The open (or sliding) paper sheet, over the right side of the window. The controls sheet
+    /// needs a patch; the chat (global) doesn't.
+    fn sheet_layer(&self) -> Option<Element<'_, Message>> {
+        let t = self.slide_t();
+        if t <= 0.0 {
+            return None;
+        }
+        let sheet: Element<'_, Message> = match (self.shown, &self.session.current) {
+            (Sheet::Chat, _) => self.chat.view(self.listen.status(&self.plugin.shared), self.listen.seconds).map(Message::Chat),
+            (Sheet::Controls, Some(cur)) => controls::view(&cur.patch, &self.session.values, self.session.hot_reload).map(Message::Controls),
+            (Sheet::Controls, None) => return None,
+        };
+        let sheet = container(sheet).height(Fill).padding(theme::SPACE_2);
+        Some(slide::slide(sheet, sheet_width(), (1.0 - t) * sheet_width()).into())
+    }
+
     /// The last load error, as a paper card at the bottom left of the window.
     fn error_card(&self) -> Element<'_, Message> {
         let Some(err) = &self.session.error else { return column![].into() };
         let card = container(
             row![
                 column![
-                    text("Couldn't load the patch").size(12.5).font(theme::font::PAPER_SEMIBOLD).color(theme::PAPER_INK),
-                    text(err.as_str()).size(11).font(theme::font::PAPER_MONO).color(theme::PAPER_INK_2),
-                    text("The previous version keeps running. Fix the file and it reloads.").size(11).font(theme::font::PAPER).color(theme::PAPER_MUTED),
+                    text("Couldn't load the patch").size(12.5).font(theme::font::PAPER_SEMIBOLD).color(theme::c().paper_ink),
+                    text(err.as_str()).size(11).font(theme::font::PAPER_MONO).color(theme::c().paper_ink_2),
+                    text("The previous version keeps running. Fix the file and it reloads.").size(11).font(theme::font::PAPER).color(theme::c().paper_muted),
                 ]
                 .spacing(4)
                 .width(Fill),
-                button(container(icons::icon(icons::CLOSE, 10.0, 2.5, theme::PAPER_INK)).center(Fill))
+                button(container(icons::icon(icons::CLOSE, 10.0, 2.5, theme::c().paper_ink)).center(Fill))
                     .on_press(Message::DismissError)
                     .width(24)
                     .height(24)
@@ -392,7 +471,7 @@ impl Shell {
         .padding(12)
         .max_width(520)
         .style(|t: &Theme| container::Style {
-            border: Border { radius: theme::radius(theme::RADIUS_FIELD), width: 1.0, color: theme::LED_CLIP },
+            border: Border { radius: theme::radius(theme::RADIUS_FIELD), width: 1.0, color: theme::c().led_clip },
             shadow: theme::paper_sheet(t).shadow,
             ..theme::paper_raised(t)
         });
@@ -408,7 +487,7 @@ impl Shell {
             let st = p.stats();
             s += &format!(" · panel {:.2} ms, {} components, {} rasters", st.total_us / 1000.0, st.nodes, st.rasters);
         }
-        container(text(s).size(10.5).font(theme::font::MONO).color(theme::alpha(theme::FRAME_INK, 0.7)))
+        container(text(s).size(10.5).font(theme::font::MONO).color(theme::alpha(theme::c().frame_ink, 0.7)))
             .width(Fill)
             .height(Fill)
             .padding(10)
@@ -416,6 +495,21 @@ impl Shell {
             .align_bottom(Fill)
             .into()
     }
+}
+
+/// Picks the palette for a theme mode.
+fn apply_theme(mode: user_settings::ThemeMode) {
+    use user_settings::ThemeMode::*;
+    theme::set_light(match mode {
+        System => theme::system_is_light(),
+        Dark => false,
+        Light => true,
+    });
+}
+
+/// A sheet plus its margin.
+fn sheet_width() -> f32 {
+    theme::SIZE_SHEET + 2.0 * theme::SPACE_2
 }
 
 /// ~60 Hz frame ticks from a helper thread (the thread-pool executor has no timers). The

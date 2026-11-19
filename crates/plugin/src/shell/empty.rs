@@ -1,19 +1,17 @@
-//! The window when no patch is loaded: build a patch from a description, or run as a passive
-//! listener. No notch: there is nothing to control. Building needs the LLM and passive mode
-//! isn't built yet, so those controls are disabled and say why.
+//! The window when no patch is loaded: build a patch from a description. No notch: there is
+//! nothing to control. Building needs the LLM, so those controls are disabled and say why.
+//! (Passive mode lives in the top bar.)
 
 use super::theme;
 use nice_plug_iced::iced::{
     Border, Element, Fill, Gradient, Padding, Shadow, Theme, Vector,
     gradient::Linear,
-    widget::{button, checkbox, column, container, row, space, text, text_input},
+    widget::{button, column, container, row, space, text, text_input},
 };
 
 #[derive(Default)]
 pub struct Empty {
     describe: String,
-    #[allow(dead_code)] // passive mode comes later
-    passive: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -31,10 +29,11 @@ impl Empty {
         None
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
+    /// `inset`: room on the right taken by an open sheet; the card centres in what's left.
+    pub fn view(&self, inset: f32) -> Element<'_, Message> {
         let intro = column![
-            text("No patch loaded").size(16).font(theme::font::SANS_SEMIBOLD).color(theme::FRAME_INK),
-            text("The signal passes through untouched. Pick a patch on the left, or describe a new one.").size(12).color(theme::FRAME_MUTED),
+            text("No patch loaded").size(16).font(theme::font::SANS_SEMIBOLD).color(theme::c().frame_ink),
+            text("The signal passes through untouched. Pick a patch on the left, or describe a new one.").size(12).color(theme::c().frame_muted),
         ]
         .spacing(5)
         .padding(Padding { top: 16.0, right: 18.0, bottom: 10.0, left: 18.0 });
@@ -46,7 +45,7 @@ impl Empty {
                 .padding(Padding { top: 10.0, bottom: 10.0, left: 12.0, right: 12.0 })
                 .style(theme::frame_input),
             row![
-                text("needs the LLM (not connected yet)").size(11).color(theme::FRAME_SUBTLE),
+                text("needs the LLM (not connected yet)").size(11).color(theme::c().frame_subtle),
                 space::horizontal(),
                 button(text("Listen first").size(12.5))
                     .height(32)
@@ -63,55 +62,26 @@ impl Empty {
         .spacing(8)
         .padding(Padding { top: 0.0, right: 18.0, bottom: 14.0, left: 18.0 });
 
-        let passive = row![
-            checkbox(self.passive)
-                .size(14)
-                .style(|_: &Theme, status| checkbox::Style {
-                    background: if matches!(status, checkbox::Status::Active { is_checked: true } | checkbox::Status::Hovered { is_checked: true }) {
-                        theme::FRAME_INVERT.into()
-                    } else {
-                        theme::FRAME_FIELD.into()
-                    },
-                    icon_color: theme::ON_FRAME_INVERT,
-                    border: Border { radius: theme::radius(4.0), width: 1.0, color: theme::FRAME_HAIRLINE_STRONG },
-                    text_color: None,
-                }),
-            column![
-                text("Passive listener (coming later)").size(12).font(theme::font::SANS_SEMIBOLD).color(theme::FRAME_INK),
-                text("Don't process. Share this channel's audio with the other ScriptFX instances, e.g. on the master.")
-                    .size(12)
-                    .color(theme::FRAME_MUTED)
-                    .line_height(1.4),
-            ]
-            .spacing(3),
-        ]
-        .spacing(10)
-        .padding(Padding { top: 12.0, right: 18.0, bottom: 14.0, left: 18.0 });
-
-        let card = container(column![intro, build, rule(), passive])
+        let card = container(column![intro, build])
             .width(440)
             .style(|_: &Theme| container::Style {
-                background: Some(theme::FRAME_RAISED.into()),
-                border: Border { radius: theme::radius(18.0), width: 1.0, color: theme::FRAME_HAIRLINE_STRONG },
-                shadow: Shadow { color: theme::alpha(nice_plug_iced::iced::Color::BLACK, 0.5), offset: Vector::new(0.0, 24.0), blur_radius: 60.0 },
+                background: Some(theme::c().frame_raised.into()),
+                border: Border { radius: theme::radius(18.0), width: 1.0, color: theme::c().frame_hairline_strong },
+                shadow: Shadow { color: theme::shadow(0.5), offset: Vector::new(0.0, 24.0), blur_radius: 60.0 },
                 ..Default::default()
             });
 
-        container(card)
+        container(container(card).center(Fill).padding(Padding { right: inset, ..Padding::ZERO }))
             .center(Fill)
             .style(|_: &Theme| container::Style {
                 background: Some(
-                    Gradient::Linear(Linear::new(std::f32::consts::PI).add_stop(0.0, nice_plug_iced::iced::color!(0x1a1a1d)).add_stop(0.7, nice_plug_iced::iced::color!(0x0f0f11))).into(),
+                    Gradient::Linear(Linear::new(std::f32::consts::PI).add_stop(0.0, theme::c().frame_backdrop.0).add_stop(0.7, theme::c().frame_backdrop.1)).into(),
                 ),
-                border: Border { radius: theme::radius(theme::RADIUS_WINDOW), width: 1.0, color: theme::FRAME_HAIRLINE },
+                border: Border { radius: theme::radius(theme::RADIUS_WINDOW), width: 1.0, color: theme::c().frame_hairline },
                 ..Default::default()
             })
             .into()
     }
-}
-
-fn rule<'a>() -> Element<'a, Message> {
-    container(space::horizontal().height(1)).style(theme::rule(theme::FRAME_HAIRLINE)).into()
 }
 
 fn rounded(

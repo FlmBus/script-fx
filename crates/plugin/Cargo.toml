@@ -23,6 +23,7 @@ ttf-parser = "0.25"
 rtrb = "0.4.1"
 serde_json = "1.0.154"
 ui-components = { version = "0.1.0", path = "../ui-components" }
+dark-light = "3.0.0"
 
 [lib]
 crate-type = ["cdylib", "lib"]

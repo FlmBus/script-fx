@@ -1,44 +1,207 @@
 //! Design tokens of the "ScriptFX Shell" design system (tokens.json) and the shared widget
 //! styles built from them. Sections never hard-code a colour; they use these.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use nice_plug_iced::iced::{
     Background, Border, Color, Shadow, Theme, Vector, border, color,
     widget::{button, container, scrollable, text_editor, text_input},
 };
 
 // ---- colour -------------------------------------------------------------------------------------
+//
+// Two palettes with the same tokens (the design system's "dark" and "light" themes); sections
+// read the current one through `c()`, so a mode switch restyles everything on the next frame.
+// The sheets ("paper": chat, controls) follow the mode like everything else.
+// Patch-owned colours (library cards, ControlPanels) don't change with the mode.
 
-pub const FRAME: Color = color!(0x0b0b0c);
-pub const FRAME_RAISED: Color = color!(0x141416);
-pub const FRAME_NODE: Color = color!(0x161618);
-pub const FRAME_CONTROL: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.08);
-pub const FRAME_FIELD: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.05);
-pub const FRAME_HAIRLINE: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.06);
-pub const FRAME_HAIRLINE_STRONG: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.09);
-pub const FRAME_WIRE: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.18);
-pub const FRAME_INK: Color = color!(0xfafafa);
-pub const FRAME_INK_2: Color = color!(0xe4e4e7);
-pub const FRAME_INK_3: Color = color!(0xd4d4d8);
-pub const FRAME_MUTED: Color = color!(0xa1a1aa);
-pub const FRAME_SUBTLE: Color = color!(0x8b8b92);
-pub const FRAME_INVERT: Color = color!(0xf4f4f5);
-pub const ON_FRAME_INVERT: Color = FRAME;
+pub struct Palette {
+    pub frame: Color,
+    pub frame_raised: Color,
+    pub frame_node: Color,
+    pub frame_control: Color,
+    pub frame_field: Color,
+    pub frame_hairline: Color,
+    pub frame_hairline_strong: Color,
+    pub frame_wire: Color,
+    pub frame_ink: Color,
+    pub frame_ink_2: Color,
+    pub frame_ink_3: Color,
+    pub frame_muted: Color,
+    pub frame_subtle: Color,
+    /// Hover wash on transparent frame buttons.
+    pub frame_hover: Color,
+    pub frame_invert: Color,
+    pub frame_invert_hover: Color,
+    pub on_frame_invert: Color,
+    /// Focus ring and text selection in frame inputs.
+    pub frame_focus: Color,
+    pub frame_selection: Color,
+    /// The empty-state backdrop (top → bottom).
+    pub frame_backdrop: (Color, Color),
+    /// Thumb colour of frame scrollbars (alpha applied on top).
+    pub frame_scroll: Color,
 
-pub const PAPER: Color = color!(0xf7f6f2);
-pub const PAPER_RAISED: Color = color!(0xffffff);
-pub const PAPER_LINE: Color = color!(0xd6d3cb);
-pub const PAPER_DIVIDER: Color = color!(0xe3e0d9);
-pub const PAPER_INK: Color = color!(0x1a1a1a);
-pub const PAPER_INK_2: Color = color!(0x2b2a27);
-pub const PAPER_MUTED: Color = color!(0x625e56);
-pub const ON_PAPER_INK: Color = PAPER;
+    pub paper: Color,
+    pub paper_raised: Color,
+    pub paper_hover: Color,
+    pub paper_line: Color,
+    pub paper_divider: Color,
+    pub paper_ink: Color,
+    pub paper_ink_2: Color,
+    pub paper_ink_3: Color,
+    pub paper_muted: Color,
+    pub on_paper_ink: Color,
+    /// The sheet's outer edge.
+    pub paper_edge: Color,
 
-pub const SIGNAL: Color = color!(0xff5a1f);
-pub const SIGNAL_INK: Color = color!(0xc2410c);
+    pub signal: Color,
+    pub signal_hover: Color,
+    pub signal_pressed: Color,
+    pub on_signal: Color,
+    pub signal_ink: Color,
 
-pub const LED_OK: Color = color!(0x4ade80);
-pub const LED_REDUCE: Color = color!(0xfbbf24);
-pub const LED_CLIP: Color = color!(0xf87171);
+    pub led_ok: Color,
+    pub led_reduce: Color,
+    pub led_clip: Color,
+
+    /// Shadow colour and strength (multiplies each shadow's alpha): softer on the light frame.
+    pub shadow: Color,
+    pub shadow_strength: f32,
+}
+
+pub const DARK: Palette = Palette {
+    frame: color!(0x0b0b0c),
+    frame_raised: color!(0x141416),
+    frame_node: color!(0x161618),
+    frame_control: Color::from_rgba(1.0, 1.0, 1.0, 0.08),
+    frame_field: Color::from_rgba(1.0, 1.0, 1.0, 0.05),
+    frame_hairline: Color::from_rgba(1.0, 1.0, 1.0, 0.06),
+    frame_hairline_strong: Color::from_rgba(1.0, 1.0, 1.0, 0.09),
+    frame_wire: Color::from_rgba(1.0, 1.0, 1.0, 0.18),
+    frame_ink: color!(0xfafafa),
+    frame_ink_2: color!(0xe4e4e7),
+    frame_ink_3: color!(0xd4d4d8),
+    frame_muted: color!(0xa1a1aa),
+    frame_subtle: color!(0x8b8b92),
+    frame_hover: Color::from_rgba(1.0, 1.0, 1.0, 0.06),
+    frame_invert: color!(0xf4f4f5),
+    frame_invert_hover: color!(0xffffff),
+    on_frame_invert: color!(0x0b0b0c),
+    frame_focus: Color::from_rgba(1.0, 1.0, 1.0, 0.22),
+    frame_selection: Color::from_rgba(1.0, 1.0, 1.0, 0.25),
+    frame_backdrop: (color!(0x1a1a1d), color!(0x0f0f11)),
+    frame_scroll: Color::WHITE,
+
+    paper: color!(0x1c1c1f),
+    paper_raised: color!(0x26262a),
+    paper_hover: color!(0x2e2e33),
+    paper_line: color!(0x3a3a40),
+    paper_divider: color!(0x2e2e33),
+    paper_ink: color!(0xf4f4f5),
+    paper_ink_2: color!(0xe4e4e7),
+    paper_ink_3: color!(0xc4c4cb),
+    paper_muted: color!(0xa1a1aa),
+    on_paper_ink: color!(0x1c1c1f),
+    paper_edge: Color::from_rgba(1.0, 1.0, 1.0, 0.08),
+
+    signal: color!(0xff5a1f),
+    signal_hover: color!(0xff6d38),
+    signal_pressed: color!(0xf04d12),
+    on_signal: color!(0x1a1a1a),
+    signal_ink: color!(0xfb923c),
+
+    led_ok: color!(0x4ade80),
+    led_reduce: color!(0xfbbf24),
+    led_clip: color!(0xf87171),
+
+    shadow: Color::BLACK,
+    shadow_strength: 1.0,
+};
+
+pub const LIGHT: Palette = Palette {
+    frame: color!(0xe7e7ea),
+    frame_raised: color!(0xf4f4f6),
+    frame_node: color!(0xf7f7f9),
+    frame_control: Color::from_rgba(0.0, 0.0, 0.0, 0.06),
+    frame_field: Color::from_rgba(0.0, 0.0, 0.0, 0.04),
+    frame_hairline: Color::from_rgba(0.0, 0.0, 0.0, 0.08),
+    frame_hairline_strong: Color::from_rgba(0.0, 0.0, 0.0, 0.13),
+    frame_wire: Color::from_rgba(0.0, 0.0, 0.0, 0.22),
+    frame_ink: color!(0x18181b),
+    frame_ink_2: color!(0x27272a),
+    frame_ink_3: color!(0x3f3f46),
+    frame_muted: color!(0x52525b),
+    frame_subtle: color!(0x5f5f67),
+    frame_hover: Color::from_rgba(0.0, 0.0, 0.0, 0.06),
+    frame_invert: color!(0x18181b),
+    frame_invert_hover: color!(0x000000),
+    on_frame_invert: color!(0xfafafa),
+    frame_focus: Color::from_rgba(0.0, 0.0, 0.0, 0.3),
+    frame_selection: Color::from_rgba(0.0, 0.0, 0.0, 0.18),
+    frame_backdrop: (color!(0xf2f2f4), color!(0xe0e0e4)),
+    frame_scroll: Color::BLACK,
+
+    paper: color!(0xf7f6f2),
+    paper_raised: color!(0xffffff),
+    paper_hover: color!(0xfbfaf7),
+    paper_line: color!(0xd6d3cb),
+    paper_divider: color!(0xe3e0d9),
+    paper_ink: color!(0x1a1a1a),
+    paper_ink_2: color!(0x2b2a27),
+    paper_ink_3: color!(0x47443e),
+    paper_muted: color!(0x625e56),
+    on_paper_ink: color!(0xf7f6f2),
+    paper_edge: Color::from_rgba(0.0, 0.0, 0.0, 0.08),
+
+    signal: color!(0xff5a1f),
+    signal_hover: color!(0xff6d38),
+    signal_pressed: color!(0xf04d12),
+    on_signal: color!(0x1a1a1a),
+    signal_ink: color!(0xc2410c),
+
+    led_ok: color!(0x15803d),
+    led_reduce: color!(0xb45309),
+    led_clip: color!(0xdc2626),
+
+    shadow: color!(0x1a1a24),
+    shadow_strength: 0.4,
+};
+
+static LIGHT_MODE: AtomicBool = AtomicBool::new(false);
+
+/// A shadow colour at `a` (the dark-mode alpha), scaled for the current mode.
+pub fn shadow(a: f32) -> Color {
+    alpha(c().shadow, a * c().shadow_strength)
+}
+
+/// The current palette.
+pub fn c() -> &'static Palette {
+    if LIGHT_MODE.load(Ordering::Relaxed) { &LIGHT } else { &DARK }
+}
+
+/// Switches the palette for the whole process (all ScriptFX windows share one look).
+pub fn set_light(light: bool) {
+    LIGHT_MODE.store(light, Ordering::Relaxed);
+}
+
+/// The OS's dark/light setting, for the "System" mode. Always read on a helper thread, every few
+/// seconds (the D-Bus portal call on Linux can block for a long time when no portal answers, so
+/// never on the UI thread); dark until the first answer. A change in the OS shows up while open.
+pub fn system_is_light() -> bool {
+    static SYSTEM_LIGHT: AtomicBool = AtomicBool::new(false);
+    static WATCH: std::sync::Once = std::sync::Once::new();
+    WATCH.call_once(|| {
+        let _ = std::thread::Builder::new().name("scriptfx-theme-watch".into()).spawn(|| {
+            loop {
+                let light = matches!(dark_light::detect(), Ok(dark_light::Mode::Light));
+                SYSTEM_LIGHT.store(light, Ordering::Relaxed);
+                std::thread::sleep(std::time::Duration::from_secs(3));
+            }
+        });
+    });
+    SYSTEM_LIGHT.load(Ordering::Relaxed)
+}
 
 // ---- spacing, radius, size ----------------------------------------------------------------------
 
@@ -60,16 +223,19 @@ pub const RADIUS_FIELD: f32 = 12.0;
 pub const RADIUS_BUTTON: f32 = 8.0;
 pub const RADIUS_PILL: f32 = 999.0;
 
+pub const SIZE_TOP_BAR: f32 = 34.0;
 pub const SIZE_SIDEBAR: f32 = 214.0;
 pub const SIZE_SHEET: f32 = 340.0;
 pub const SIZE_CONTROL: f32 = 30.0;
 pub const SIZE_NODE: f32 = 22.0;
 pub const SIZE_SIGNAL_LINE: f32 = 52.0;
 
-/// The patch window's size: the editor minus sidebar, gutters and signal line (fixed window).
+/// The patch window's size: the editor minus top bar, sidebar, gutters and signal line (fixed
+/// window). The sizes are chosen so this is exactly the ControlPanel's 3:2 (816×544): no
+/// letterbox bars around the panel (`stage_fits_the_panel` checks it).
 pub fn stage_size() -> (f32, f32) {
     let (w, h) = crate::WINDOW_SIZE;
-    (w - SIZE_SIDEBAR - SPACE_GUTTER, h - SPACE_GUTTER - SIZE_SIGNAL_LINE)
+    (w - SIZE_SIDEBAR - SPACE_GUTTER, h - SIZE_TOP_BAR - SPACE_GUTTER - SIZE_SIGNAL_LINE)
 }
 
 // ---- type ---------------------------------------------------------------------------------------
@@ -122,24 +288,24 @@ pub fn radius(r: f32) -> border::Radius {
 // ---- surfaces -----------------------------------------------------------------------------------
 
 pub fn frame(_: &Theme) -> container::Style {
-    container::Style { background: Some(FRAME.into()), text_color: Some(FRAME_INK_3), ..Default::default() }
+    container::Style { background: Some(c().frame.into()), text_color: Some(c().frame_ink_3), ..Default::default() }
 }
 
 pub fn paper_sheet(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(PAPER.into()),
-        text_color: Some(PAPER_INK),
-        border: Border { radius: radius(RADIUS_WINDOW), width: 1.0, color: alpha(Color::WHITE, 0.1) },
+        background: Some(c().paper.into()),
+        text_color: Some(c().paper_ink),
+        border: Border { radius: radius(RADIUS_WINDOW), width: 1.0, color: c().paper_edge },
         // shadow-sheet: 0 24px 60px rgba(0,0,0,0.55)
-        shadow: Shadow { color: alpha(Color::BLACK, 0.55), offset: Vector::new(0.0, 24.0), blur_radius: 60.0 },
+        shadow: Shadow { color: shadow(0.55), offset: Vector::new(0.0, 24.0), blur_radius: 60.0 },
         snap: true,
     }
 }
 
 pub fn paper_raised(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(PAPER_RAISED.into()),
-        border: Border { radius: radius(RADIUS_FIELD), width: 1.0, color: PAPER_LINE },
+        background: Some(c().paper_raised.into()),
+        border: Border { radius: radius(RADIUS_FIELD), width: 1.0, color: c().paper_line },
         ..Default::default()
     }
 }
@@ -164,20 +330,20 @@ pub fn frame_ghost(filled: bool) -> impl Fn(&Theme, button::Status) -> button::S
     move |_, status| {
         if status == button::Status::Disabled {
             return button::Style {
-                background: filled.then(|| FRAME_FIELD.into()),
-                text_color: alpha(FRAME_INK_2, 0.35),
+                background: filled.then(|| c().frame_field.into()),
+                text_color: alpha(c().frame_ink_2, 0.35),
                 border: Border { radius: radius(RADIUS_CONTROL), ..Default::default() },
                 ..Default::default()
             };
         }
-        let base = if filled { FRAME_CONTROL } else { Color::TRANSPARENT };
+        let base = if filled { c().frame_control } else { Color::TRANSPARENT };
         let bg = match status {
-            button::Status::Hovered | button::Status::Pressed if !filled => alpha(Color::WHITE, 0.06),
+            button::Status::Hovered | button::Status::Pressed if !filled => c().frame_hover,
             _ => hovered(base, status, 0.05),
         };
         button::Style {
             background: Some(bg.into()),
-            text_color: FRAME_INK_2,
+            text_color: c().frame_ink_2,
             border: Border { radius: radius(RADIUS_CONTROL), ..Default::default() },
             ..Default::default()
         }
@@ -187,13 +353,13 @@ pub fn frame_ghost(filled: bool) -> impl Fn(&Theme, button::Status) -> button::S
 /// Frame primary: the one strong action per view (Build patch, Chat toggle while open).
 pub fn frame_primary(_: &Theme, status: button::Status) -> button::Style {
     let bg = match status {
-        button::Status::Hovered => color!(0xffffff),
-        button::Status::Disabled => alpha(FRAME_INVERT, 0.25),
-        _ => FRAME_INVERT,
+        button::Status::Hovered => c().frame_invert_hover,
+        button::Status::Disabled => alpha(c().frame_invert, 0.25),
+        _ => c().frame_invert,
     };
     button::Style {
         background: Some(bg.into()),
-        text_color: if status == button::Status::Disabled { alpha(FRAME_INK, 0.45) } else { ON_FRAME_INVERT },
+        text_color: if status == button::Status::Disabled { alpha(c().frame_ink, 0.45) } else { c().on_frame_invert },
         border: Border { radius: radius(RADIUS_CONTROL), ..Default::default() },
         ..Default::default()
     }
@@ -202,14 +368,14 @@ pub fn frame_primary(_: &Theme, status: button::Status) -> button::Style {
 /// Paper small: History, Undo, Save as snapshot, Listen.
 pub fn paper_small(_: &Theme, status: button::Status) -> button::Style {
     let bg = match status {
-        button::Status::Hovered => color!(0xfbfaf7),
-        button::Status::Pressed => PAPER_DIVIDER,
-        _ => PAPER_RAISED,
+        button::Status::Hovered => c().paper_hover,
+        button::Status::Pressed => c().paper_divider,
+        _ => c().paper_raised,
     };
     button::Style {
         background: Some(bg.into()),
-        text_color: if status == button::Status::Disabled { PAPER_MUTED } else { PAPER_INK },
-        border: Border { radius: radius(RADIUS_BUTTON), width: 1.0, color: PAPER_LINE },
+        text_color: if status == button::Status::Disabled { c().paper_muted } else { c().paper_ink },
+        border: Border { radius: radius(RADIUS_BUTTON), width: 1.0, color: c().paper_line },
         ..Default::default()
     }
 }
@@ -217,13 +383,13 @@ pub fn paper_small(_: &Theme, status: button::Status) -> button::Style {
 /// Signal: Send only. The single orange in the shell.
 pub fn signal(_: &Theme, status: button::Status) -> button::Style {
     let bg = match status {
-        button::Status::Hovered => color!(0xff6d38),
-        button::Status::Pressed => color!(0xf04d12),
-        _ => SIGNAL,
+        button::Status::Hovered => c().signal_hover,
+        button::Status::Pressed => c().signal_pressed,
+        _ => c().signal,
     };
     button::Style {
         background: Some(bg.into()),
-        text_color: PAPER_INK,
+        text_color: c().on_signal,
         border: Border { radius: radius(RADIUS_FIELD), ..Default::default() },
         ..Default::default()
     }
@@ -233,10 +399,10 @@ pub fn signal(_: &Theme, status: button::Status) -> button::Style {
 pub fn paper_bare(_: &Theme, status: button::Status) -> button::Style {
     button::Style {
         background: match status {
-            button::Status::Hovered | button::Status::Pressed => Some(alpha(PAPER_INK, 0.06).into()),
+            button::Status::Hovered | button::Status::Pressed => Some(alpha(c().paper_ink, 0.06).into()),
             _ => None,
         },
-        text_color: PAPER_INK,
+        text_color: c().paper_ink,
         border: Border { radius: radius(RADIUS_BUTTON), ..Default::default() },
         ..Default::default()
     }
@@ -247,31 +413,31 @@ pub fn paper_bare(_: &Theme, status: button::Status) -> button::Style {
 pub fn frame_input(_: &Theme, status: text_input::Status) -> text_input::Style {
     let focused = matches!(status, text_input::Status::Focused { .. });
     text_input::Style {
-        background: Background::Color(FRAME_FIELD),
+        background: Background::Color(c().frame_field),
         border: Border {
             radius: radius(RADIUS_CONTROL),
             width: 1.0,
-            color: if focused { alpha(Color::WHITE, 0.22) } else { FRAME_HAIRLINE_STRONG },
+            color: if focused { c().frame_focus } else { c().frame_hairline_strong },
         },
-        icon: FRAME_MUTED,
-        placeholder: FRAME_SUBTLE,
-        value: FRAME_INK,
-        selection: alpha(Color::WHITE, 0.25),
+        icon: c().frame_muted,
+        placeholder: c().frame_subtle,
+        value: c().frame_ink,
+        selection: c().frame_selection,
     }
 }
 
 pub fn paper_editor(_: &Theme, status: text_editor::Status) -> text_editor::Style {
     let focused = matches!(status, text_editor::Status::Focused { .. });
     text_editor::Style {
-        background: Background::Color(PAPER_RAISED),
+        background: Background::Color(c().paper_raised),
         border: Border {
             radius: radius(RADIUS_FIELD),
             width: 1.0,
-            color: if focused { PAPER_MUTED } else { PAPER_LINE },
+            color: if focused { c().paper_muted } else { c().paper_line },
         },
-        placeholder: PAPER_MUTED,
-        value: PAPER_INK,
-        selection: alpha(SIGNAL, 0.3),
+        placeholder: c().paper_muted,
+        value: c().paper_ink,
+        selection: alpha(c().signal, 0.3),
     }
 }
 
@@ -305,10 +471,10 @@ fn scrollbar(ink: Color, idle: f32, hover: f32) -> impl Fn(&Theme, scrollable::S
             horizontal_rail: rail,
             gap: None,
             auto_scroll: scrollable::AutoScroll {
-                background: Background::Color(PAPER_RAISED),
-                border: Border { radius: radius(RADIUS_PILL), width: 1.0, color: PAPER_LINE },
+                background: Background::Color(c().paper_raised),
+                border: Border { radius: radius(RADIUS_PILL), width: 1.0, color: c().paper_line },
                 shadow: Shadow::default(),
-                icon: PAPER_INK,
+                icon: c().paper_ink,
             },
         }
     }
@@ -316,10 +482,19 @@ fn scrollbar(ink: Color, idle: f32, hover: f32) -> impl Fn(&Theme, scrollable::S
 
 /// On paper (the sheets).
 pub fn paper_scrollbar(t: &Theme, s: scrollable::Status) -> scrollable::Style {
-    scrollbar(PAPER_INK, 0.18, 0.45)(t, s)
+    scrollbar(c().paper_ink, 0.18, 0.45)(t, s)
 }
 
 /// On the frame (the library).
 pub fn frame_scrollbar(t: &Theme, s: scrollable::Status) -> scrollable::Style {
-    scrollbar(Color::WHITE, 0.12, 0.3)(t, s)
+    scrollbar(c().frame_scroll, 0.12, 0.3)(t, s)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn stage_fits_the_panel() {
+        let (w, h) = super::stage_size();
+        assert_eq!(w * ui_components::HEIGHT, h * ui_components::WIDTH, "stage {w}×{h} isn't the panel's aspect ratio");
+    }
 }

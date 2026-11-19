@@ -16,10 +16,10 @@ pub fn frame<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> Element<'a, M> {
 /// "Title · subtitle", close button.
 pub fn header<'a, M: Clone + 'a>(title: &'a str, subtitle: &'a str, close: M) -> Element<'a, M> {
     row![
-        text(title).size(13.5).font(theme::font::PAPER_SEMIBOLD).color(theme::PAPER_INK),
-        text(format!("· {subtitle}")).size(12).font(theme::font::PAPER).color(theme::PAPER_MUTED),
+        text(title).size(13.5).font(theme::font::PAPER_SEMIBOLD).color(theme::c().paper_ink),
+        text(format!("· {subtitle}")).size(12).font(theme::font::PAPER).color(theme::c().paper_muted),
         space::horizontal(),
-        button(container(icons::icon(icons::CLOSE, 11.0, 2.5, theme::PAPER_INK)).center(Fill))
+        button(container(icons::icon(icons::CLOSE, 11.0, 2.5, theme::c().paper_ink)).center(Fill))
             .on_press(close)
             .width(28)
             .height(26)
@@ -49,11 +49,11 @@ pub fn small<'a, M: Clone + 'a>(content: impl Into<Element<'a, M>>, msg: Option<
 }
 
 pub fn divider<'a, M: 'a>() -> Element<'a, M> {
-    container(space::horizontal().height(1)).style(theme::rule(theme::PAPER_DIVIDER)).into()
+    container(space::horizontal().height(1)).style(theme::rule(theme::c().paper_divider)).into()
 }
 
 pub fn section_title<'a, M: 'a>(s: &'a str) -> Element<'a, M> {
-    text(s).size(11).font(theme::font::PAPER_SEMIBOLD).color(theme::PAPER_MUTED).into()
+    text(s).size(11).font(theme::font::PAPER_SEMIBOLD).color(theme::c().paper_muted).into()
 }
 
 pub fn markdown_settings() -> markdown::Settings {
@@ -63,13 +63,13 @@ pub fn markdown_settings() -> markdown::Settings {
             font: theme::font::PAPER,
             inline_code_font: theme::font::PAPER_MONO,
             code_block_font: theme::font::PAPER_MONO,
-            inline_code_color: theme::PAPER_INK,
+            inline_code_color: theme::c().paper_ink,
             inline_code_highlight: markdown::Highlight {
-                background: theme::PAPER_DIVIDER.into(),
+                background: theme::c().paper_divider.into(),
                 border: Border { radius: theme::radius(4.0), ..Default::default() },
             },
             inline_code_padding: Padding { left: 2.0, right: 2.0, ..Padding::ZERO },
-            link_color: theme::SIGNAL_INK,
+            link_color: theme::c().signal_ink,
         },
     )
 }

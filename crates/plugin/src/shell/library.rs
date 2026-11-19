@@ -56,9 +56,9 @@ impl Library {
 
     pub fn view<'a>(&'a self, patches: &'a [PatchInfo], loaded: Option<&'a str>) -> Element<'a, Message> {
         let header = row![
-            text("Patches").size(12.5).font(theme::font::SANS_SEMIBOLD).color(theme::FRAME_INK),
+            text("Patches").size(12.5).font(theme::font::SANS_SEMIBOLD).color(theme::c().frame_ink),
             space::horizontal(),
-            button(container(icons::icon(icons::PLUS, 12.0, 2.2, theme::FRAME_MUTED)).center(Fill))
+            button(container(icons::icon(icons::PLUS, 12.0, 2.2, theme::c().frame_muted)).center(Fill))
                 .on_press(Message::NewPatch)
                 .width(28)
                 .height(28)
@@ -71,7 +71,7 @@ impl Library {
         ]
         .spacing(2)
         .align_y(Center)
-        .height(46)
+        .height(36)
         .padding(Padding { left: 16.0, right: 8.0, ..Padding::ZERO });
 
         let cards = column(patches.iter().map(|p| self.card(p, loaded == Some(p.folder.as_str()))))
@@ -104,7 +104,7 @@ impl Library {
             None => text(&p.name)
                 .size(if p.brand.font.is_some() { 13 } else { 12 })
                 .font(p.brand.font.unwrap_or(theme::font::SANS_SEMIBOLD))
-                .color(if p.broken { theme::FRAME_MUTED } else { accent })
+                .color(if p.broken { theme::c().frame_muted } else { accent })
                 .wrapping(text::Wrapping::None)
                 .into(),
             },
@@ -155,7 +155,7 @@ impl Library {
                     radius: theme::radius(theme::RADIUS_SECTION),
                     width: 1.0,
                     // Loaded: a ring in the patch's own accent; idle: ring-idle.
-                    color: if active { theme::alpha(accent, 0.8) } else { theme::FRAME_HAIRLINE },
+                    color: if active { theme::alpha(accent, 0.8) } else { theme::c().frame_hairline },
                 },
                 shadow: if active {
                     Shadow { color: theme::alpha(accent, 0.3), offset: Vector::new(0.0, 4.0), blur_radius: 12.0 }
