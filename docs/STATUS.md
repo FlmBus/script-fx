@@ -449,6 +449,11 @@ Principle (Flemming, 2026-11-19): patches are isolated from the shell and from e
 - Macro targets directly on block settings (`{ block = "fet", setting = "threshold", ... }`) to cut param boilerplate
 - Crossfade on graph swap (no click on patch switch / hot reload)
 - Sidechain input (host aux bus): then `Ducker`, keyed compressors, "low band keyed by …"; modulators (LFO/envelope/step sequencer as sources driving params, planned next)
+- **Sidechain in + out to/from other tracks** (Flemming, 2026-11-19; mechanism open). In: the
+  host's sidechain input bus (VST3/CLAP aux in, the DAW routes it), usable as a key or modulation
+  source anywhere in the chain. Out: aux output buses the DAW routes to other tracks (overlaps with
+  "multi-output taps"), and/or direct instance-to-instance sharing in-process (same registry as
+  passive mode). Check how each host routes plugin sidechains (Reaper, Studio One, Fender Studio).
 - Rider: relative target (follow the input level) instead of an absolute dBFS
 
 ### Platform / build
