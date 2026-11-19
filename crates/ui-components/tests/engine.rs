@@ -71,6 +71,29 @@ fn local_state_and_reload() {
     assert!(ui.hit(165.0, 390.0).is_none(), "tab state survives a reload");
 }
 
+/// Layers may overflow their component (glows), never the panel: Junkyard's filtered full-size
+/// background once smeared outside the panel over the shell.
+#[test]
+fn no_layer_leaves_the_panel() {
+    let patches = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../patches");
+    for name in ["junkyard-amp", "neon-saturator", "tape-glow", "clean-gain", "bass-helper"] {
+        let mut ui = Ui::load(&patches.join(name)).unwrap();
+        for scale in [1.0, 1.5, 2.0] {
+            let bound = |_: &str| Some(Bound { value: 0.5, display: String::new(), locked: false });
+            let (meter, series) = (|_: &str| Some(0.5), |_: &str| None);
+            ui.update(&Inputs { time: 0.0, hover: None, active: None, bound: &bound, meter: &meter, series: &series }, scale);
+            for l in ui.layers().iter().filter(|l| l.pixmap.is_some()) {
+                let r = l.rect;
+                assert!(
+                    r.x >= 0.0 && r.y >= 0.0 && r.x + r.w <= ui_components::WIDTH && r.y + r.h <= ui_components::HEIGHT,
+                    "{name} @{scale}x: layer {:?} at {r:?} leaves the 840×560 panel",
+                    l.kind
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn lua_knows_the_panel_size() {
     let rt = patch::runtime::Runtime::new(&fixture("numbers")).unwrap();

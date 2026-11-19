@@ -540,14 +540,18 @@ impl Ui {
         // and soft shadows naturally reach past it (a dragged Neon knob's glow was cut at the
         // top), and authors shouldn't have to pad every component for them. The cap keeps a
         // runaway component from producing a huge layer. Hit testing stays the component box.
+        // Never past the panel's own edges, though: a full-size background with blur or shadow
+        // filters (Junkyard) would otherwise smear outside the panel, over the shell.
         const OVERFLOW: f32 = 32.0;
+        let (left, top) = ((-OVERFLOW).max(-n.abs.x), (-OVERFLOW).max(-n.abs.y));
+        let (right, bottom) = ((w + OVERFLOW).min(WIDTH - n.abs.x), (h + OVERFLOW).min(HEIGHT - n.abs.y));
         let bbox = tree.root().abs_layer_bounding_box();
         let (cx0, cy0, cx1, cy1) = match bbox {
             Some(b) => (
-                ((b.left().max(-OVERFLOW) * scale).floor() / scale),
-                ((b.top().max(-OVERFLOW) * scale).floor() / scale),
-                ((b.right().min(w + OVERFLOW) * scale).ceil() / scale),
-                ((b.bottom().min(h + OVERFLOW) * scale).ceil() / scale),
+                ((b.left().max(left) * scale).floor() / scale),
+                ((b.top().max(top) * scale).floor() / scale),
+                ((b.right().min(right) * scale).ceil() / scale),
+                ((b.bottom().min(bottom) * scale).ceil() / scale),
             ),
             None => (0.0, 0.0, 0.0, 0.0),
         };
