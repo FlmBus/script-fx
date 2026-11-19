@@ -105,6 +105,24 @@ impl ParamSpec {
     pub fn display(&self, normalized: f32) -> String {
         self.display_plain(self.plain(normalized))
     }
+    /// Typed text → plain value in range: `"6"`, `"6 dB"`, `"-3,5"`, `"−12dB"`. `None` if there
+    /// is no number.
+    pub fn parse_plain(&self, text: &str) -> Option<f32> {
+        let v = parse_number(text)?;
+        Some(v.clamp(self.min.min(self.max), self.min.max(self.max)))
+    }
+}
+
+/// The leading number of typed text: sign, digits, one decimal separator (`.` or `,`); the
+/// unit after it is ignored. Accepts the typographic minus (`−`) the displays use.
+pub fn parse_number(text: &str) -> Option<f32> {
+    let t = text.trim().replace('−', "-").replace(',', ".");
+    let end = t
+        .char_indices()
+        .find(|&(i, c)| !(c.is_ascii_digit() || c == '.' || ((c == '-' || c == '+') && i == 0)))
+        .map_or(t.len(), |(i, _)| i);
+    let v: f32 = t[..end].parse().ok()?;
+    v.is_finite().then_some(v)
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq)]
@@ -410,6 +428,24 @@ impl Patch {
             _ => format!("{:.0}%", v * 100.0),
         }
     }
+
+    /// Typed text → normalized macro value, the inverse of [`macro_text`](Self::macro_text):
+    /// in the driven param's unit if the macro drives exactly one, else percent.
+    pub fn macro_from_text(&self, slot: usize, text: &str) -> Option<f32> {
+        match self.macros.get(slot)?.targets.as_slice() {
+            [t] => {
+                let i = self.param_index(&t.param)?;
+                match self.controls[i] {
+                    Control::Macro { from, to, curve, .. } => {
+                        let plain = parse_number(text)?.clamp(from.min(to), from.max(to));
+                        Some(curve.invert(from, to, plain).clamp(0.0, 1.0))
+                    }
+                    Control::Free => None,
+                }
+            }
+            _ => Some((parse_number(text)? / 100.0).clamp(0.0, 1.0)),
+        }
+    }
 }
 
 fn opt_from_lua<T: serde::de::DeserializeOwned + Default>(
@@ -594,6 +630,23 @@ mod tests {
         p.compute_params(&v.macros.clone(), &free, &mut v.params);
         assert_eq!(p.params[0].display(v.params[0]), "6.0 dB");
         assert_eq!(p.macro_display(0, &v), "50%");
+    }
+
+    #[test]
+    fn typed_values_parse_back() {
+        for (text, want) in [("6", Some(6.0)), ("6.5 dB", Some(6.5)), ("-3,5dB", Some(-3.5)), ("−12 dB", Some(-12.0)), ("+2", Some(2.0)), ("dB", None), ("", None)] {
+            assert_eq!(parse_number(text), want, "{text:?}");
+        }
+        let p = load(BASE).unwrap();
+        // xover: a free param, 100..500 Hz, clamped into range
+        assert_eq!(p.params[1].parse_plain("300 Hz"), Some(300.0));
+        assert_eq!(p.params[1].parse_plain("9999"), Some(500.0));
+        // drv drives one param (0..10): typed in that param's unit
+        assert_eq!(p.macro_from_text(1, "5"), Some(0.5));
+        assert_eq!(p.macro_from_text(1, "20"), Some(1.0));
+        // character drives two: percent, like its display
+        assert_eq!(p.macro_from_text(0, "25%"), Some(0.25));
+        assert_eq!(p.macro_from_text(0, "abc"), None);
     }
 
     /// Each case: (replace this, with that, expected error substring).
