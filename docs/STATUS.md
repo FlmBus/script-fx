@@ -1,10 +1,51 @@
 # ScriptFX: status, decisions & next steps
 
-_Last updated: 2026-11-18 (new shell in iced on nice-plug, in the "ScriptFX Shell" design system). Read this first when picking the project back up. Technical
+_Last updated: 2026-11-19 (decisions: global chats, graph editor; before: new shell in iced on nice-plug, in the "ScriptFX Shell" design system). Read this first when picking the project back up. Technical
 details, measurements and run instructions are in [`README.md`](../README.md)._
 
 ## Where we left off
 
+0. **Polish pass on the shell** (2026-11-19, Flemming's list; two sessions, merged).
+   - **Top bar across the window** (`shell/top_bar.rs`, 34 px): "ScriptFX" left; right: UI
+     scale stepper, passive-mode switch (disabled, "soon" badge), **Chat** (global, see Decisions).
+     The library header shrank to 36 px to sit under it.
+   - **Letterbox gone:** the stage is now exactly 816×544 (3:2) at 1040×640, so the 840×560 panel
+     fills it; test `stage_fits_the_panel` guards it.
+   - **Notch = one row** of equal-height controls in groups split by hairlines: reload + LED |
+     snapshot selector, save, load | patch controls. Chat moved out to the top bar.
+   - **Chat is global:** opens from the top bar, also with no patch loaded (the empty card slides
+     aside); unloading a patch keeps it open. Still one chat ("Main"), not saved yet.
+   - **Passive mode** left the empty screen (now in the top bar).
+   - **UI scale 50–200 % in 25 % steps** (`user_settings.rs`: `<data dir>/ScriptFX/settings.json`,
+     keeps unknown keys, atomic write). Resizes the window (iced's `scale_factor` → host resize),
+     doesn't scale inside a fixed one. Live resizing needed a baseview patch (fixed-size windows
+     silently dropped app resizes; `vendor/baseview/PATCHES.md` #2). Checked in the standalone:
+     opening at 150 %, and live 100 → 150 % and 150 → 75 % (`SCRIPTFX_DEV_RESCALE`).
+     **Not checked:** in a host (resize via ConfigureNotify → `request_resize`), and first open at
+     ≠ 100 % there: nice-plug-iced's `Editor::size()` reports the size without the zoom, which
+     may need a vendored patch.
+   - Neon Saturator meters: no box, bars and scale straight on the background.
+   - **Theme switch: System / Light / Dark** (top bar, per user in `settings.json` as `"theme"`,
+     default System). `theme.rs` holds two palettes with the same tokens (`DARK`, `LIGHT`);
+     sections read the current one via `theme::c()`, so a switch restyles everything next frame.
+     The sheets follow the mode too (dark sheets in dark, warm paper in light; Flemming's call
+     after trying dark sheets on the light frame). Patch colours (library cards, ControlPanels)
+     never change. System reads the OS through `dark-light` (XDG portal on Linux) on a helper
+     thread every 3 s, never on the UI thread; checked here (portal says dark → dark). Shadows go
+     through `theme::shadow()` (softer in light). The design system "ScriptFX Shell" has both
+     themes now (42 colour tokens incl. hover/focus/edge/signal states, contrast notes); its
+     README's layout parts (notch contents, no top bar) are still from before this pass.
+   - **Fractional UI scales (125/150 %):** the notch is one canvas silhouette (flares + body as a
+     single path, quarter circles as Béziers) under the controls, so no seam lines where the
+     flares meet the body. Icons are rasterised at the exact physical size (resvg, cached) and
+     shown as pixel-snapped images instead of iced SVGs, which blurred or lost thin strokes.
+   - **Knob glow cut off** (Neon, Bass Helper): `SVG.arc{glow}` sized its blur filter relative
+     to the arc's own bounding box, so a short arc (knob turned down) clipped its glow into a box,
+     worst on hover. The filter region is now absolute (`userSpaceOnUse`, circle + 3σ), in the
+     shared prelude, so every patch's glowing arcs get it. Second cause (dragging): the engine
+     clipped each layer to its component's box, and the drag glow reaches ~21 px past an arc
+     10 px from the edge. Layers may now overflow their box by up to 32 px (hit areas unchanged).
+   - Library scrolling: thin scrollbar appears with 15 patches; wheel scrolling needs a hand check.
 0. **New shell built** (iced on nice-plug, design system "ScriptFX Shell", skin Matte + Paper
    chat; research + spike: [`research/shell-ui-toolkit.md`](research/shell-ui-toolkit.md)).
    - Framework moved **nih-plug → nice-plug 0.4.2** (vendored; our runtime-parameter-name patch
@@ -115,7 +156,7 @@ patches, informed by an analysis of the actual audio on the track (and the mix).
 | **Theme** | a patch's colours (ControlPanel only, never the shell) | `Theme` |
 | **Listen / Capture / Analysis** | the action / recorded audio / analysis result | `listen.rs`, `crates/analysis` |
 | **Passive mode** | the instance only listens (no patch, passthrough) and shares its audio with other instances. First use: the master; later other channels | not implemented yet |
-| **Chat** | conversation with the LLM, captures as attachments | not implemented yet |
+| **Chat** | conversation with the LLM, captures as attachments. **Global** (not per patch): one default chat, more can be opened | not implemented yet |
 
 Avoid: "preset" (ambiguous between patch and snapshot), "editor"/"chrome" (use shell), "panel" alone (use ControlPanel), "master mode" (use passive mode).
 
@@ -142,6 +183,8 @@ Avoid: "preset" (ambiguous between patch and snapshot), "editor"/"chrome" (use s
 | Strict patches | unknown fields are errors | catches typos (`treshold`), important for LLM output |
 | Listen / analysis | user-triggered capture of the chain's **input and output** (10/20/30 s, silence skipped) → **all** analyses always go to the LLM (~2.5–3k tokens). A summarising LLM pass is a later optimisation | |
 | Mix context | only **current track + master** (no buses: buses/sends would skew a track-vs-bus comparison). The master instance runs in **passive mode** | universally applicable, fewer options |
+| Chat model | **Global chats**, stored in the user data dir (with model auth/config); one default chat, more allowed (decided 2026-11-19) | per-patch chats would have to be saved per patch; a chat can span several patches |
+| Patch kinds | **Graph patches** get a visual graph editor: a new, data-only chain definition next to the coded Luau patches (decided 2026-11-19; design open, see "Direction") | Luau code can't be edited visually (loops/helpers don't round-trip) |
 | LLM integration (planned) | **Layer 1**: the user attaches a capture to the prompt. **Layer 2**: the LLM gets tools: `get_analysis(section, detail)` and `request_listen(where)` → closed loop: write a patch, listen to the output, compare, adjust | the LLM can't press play; the human always plays the track |
 
 ## Shell layout
@@ -219,7 +262,7 @@ hit areas are rectangles; `measure_text()` helper if layouts need text widths.
   `Component.define`/`SVG.*`/`Util.*` lives in `patch/src/ui_prelude.luau`; engine with per-layer cache, content-bbox crop, hit testing, local state, error isolation, bundled
   fonts, sandboxed images); examples `stress` (benchmarks) and `render` (PNG + per-layer cost); tests incl. locale regression
 - `crates/analysis`: loudness (EBU R128, verified against ffmpeg), 1/3-oct spectrum, tilt, centroid, energy shares, resonances, dynamics (percentiles, per-band spread, onsets, attack), stereo, pitch (YIN)
-- `crates/plugin` (package `scriptfx`): nice-plug plugin, iced shell (`src/shell/`, see "Where we left off"), host-name updates, lock-free capture, Listen; dev env vars `SCRIPTFX_PATCHES`, `SCRIPTFX_DEV_PATCH`, `SCRIPTFX_DEV_SHEET`, `SCRIPTFX_DEV_STATS`, `SCRIPTFX_TEST_INPUT`, `SCRIPTFX_DEV_AUTOLISTEN`
+- `crates/plugin` (package `scriptfx`): nice-plug plugin, iced shell (`src/shell/`, see "Where we left off"), host-name updates, lock-free capture, Listen; dev env vars `SCRIPTFX_PATCHES`, `SCRIPTFX_DEV_PATCH`, `SCRIPTFX_DEV_SHEET`, `SCRIPTFX_DEV_STATS`, `SCRIPTFX_DEV_RESCALE`, `SCRIPTFX_TEST_INPUT`, `SCRIPTFX_DEV_AUTOLISTEN`
 - patches (all with component UIs): `tape-glow`, `clean-gain`, `bass-helper`, `neon-saturator`, `junkyard-amp`
 - `vendor/baseview` (0.4.2): X11 frame pacing by timer; `vendor/iced_wgpu` (0.14.0): frame timing; `vendor/nice-plug*`: runtime param names
 - `spikes/shell-iced`: the shell spike (throwaway, own workspace)
@@ -237,29 +280,33 @@ hit areas are rectangles; `measure_text()` helper if layouts need text widths.
 ## TODO (prioritised)
 
 ### Flemming's list (2026-11-19)
-- **Scrollable library:** already scrolls (thin frame scrollbar, appears when the cards overflow);
-  check by hand with more patches than fit.
-- **Notch layout:** the notch itself looks good, but the controls inside it look messy (alignment,
-  spacing, sizes of row 1 vs row 2). Rework the arrangement.
-- **Passive mode is too hidden** (a disabled checkbox on the empty screen). Give it a central,
-  prominent place; maybe bring a top bar back.
+- ~~Scrollable library~~ (scrollbar checked with 15 patches; wheel by hand still open).
+- ~~Notch layout~~ (done 2026-11-19: one row, see "Where we left off").
+- ~~Passive mode is too hidden~~ (done 2026-11-19: switch in the top bar; the mode itself isn't built).
 - **LLM research:**
   - cheap or ideally free language models for this job (writing Luau patches, reading analysis JSON);
   - how to implement it: support all providers (one API layer) or pick a free one for now;
-  - chat model: per patch, one global chat, or tabs for several chats? If global: the chat button
-    moves to the top bar, next to passive mode.
+  - chat model: **decided 2026-11-19: global.** One default chat, more can be opened; chats, model
+    auth and LLM config live in the user data dir, not in the patch or the DAW project. The chat
+    button moves out of the notch into a top bar, next to passive mode.
+  - **Adapter decision (2026-11-19):** own `Backend`/tool layer in a new `crates/llm`; patch-domain
+    tools (`read_patch`, `write_patch`, `validate_patch`, `delete_patch`, later `render_panel`) are
+    ours and run either in-process over HTTP (genai, or a minimal OpenAI-compatible client) or inside
+    an installed CLI (`claude -p`, `codex exec`) for plan-backed quotas; ACP
+    (`agent-client-protocol`) later for "any installed agent". Verification is always the loader +
+    diff, not the backend. Research, candidates, the file-access reasoning (studio Mac has no AI
+    software) and the Claude subscription/ToS caveat: [`research/llm-adapter.md`](research/llm-adapter.md).
 - **Standard library of ready-to-use, generic panels** (patches without their own UI get a good
   panel for free).
-- **Dark bars at the top/bottom of panels:** probably the letterbox. The ControlPanel is fixed
-  840×560 (3:2), the stage is 816×578, so the panel is scaled to 816×544 and the remaining 17 px
-  above and below are filled with `colors.bg`, which doesn't match the panel's own background.
-  Options: fit the stage to 3:2, let the panel background fill the whole stage, or scale to cover.
-- **Neon Saturator meters:** the boxes around the meter bars look ugly; draw the bars straight on
-  the background like Clean Gain does.
+- ~~Dark bars at the top/bottom of panels~~ (done 2026-11-19: stage is exactly 3:2).
+- ~~Neon Saturator meters~~ (done 2026-11-19).
+- ~~UI scaling~~ (done 2026-11-19: resizes the window; host checks open, see "Where we left off").
 
 ### Next up
 1. **Hands-on check of the new shell in Reaper and Carla**: knob drag/double-click on all five
    panels, chat typing (Enter/Shift+Enter, selection, clipboard, dead keys), Listen in the chat,
+   top bar (chat toggle, UI scale −/+ live and reopening at ≠ 100 %, host accepts the resize),
+   library wheel scrolling with many patches,
    controls sheet sliders (host automation gestures, names), hot reload + error card, unload →
    empty state, close/reopen ×10, two instances, HiDPI.
 2. **Snapshots** (saved values of a patch): notch selector/save/load and the library rows are
@@ -284,7 +331,16 @@ Research (precedents, Kontakt, WebAssembly/WebGL, threat model, spikes, decision
 ReaScripts and Max for Live share fully unsafe code; Kontakt (the closest product, with Komplete UI's
 reactive components and Canvas paint callbacks) and Roblox share code safely through the API boundary.
 Recommendation: grow visuals through safe primitives (canvas/paths, filmstrips, maybe shaders); put
-anything unsafe behind an opt-in "trusted patch" capability. Awaiting Flemming's call.
+anything unsafe behind an opt-in "trusted patch" capability.
+
+**Decided (Flemming, 2026-11-19): there will be a graph editor for patches**, implemented as its own
+kind of chain definition (data, no logic), next to the coded Luau patches. How exactly is open:
+- format and where it lives (a Luau table of data, or JSON; a file in the patch folder);
+- how the two kinds relate: can a graph patch have a coded ControlPanel, or does it always get a
+  generic one? Can a Luau patch be converted to a graph (only when it has no logic)?
+- macros/params in the graph (nodes, or a side panel);
+- what the LLM writes for which kind; the graph is easier to validate and diff;
+- the editor itself (a shell view; nodes from the block catalogue, routing blocks as containers?).
 
 Three routes:
 1. **Stay as is (middle ground):** sandboxed Luau, declarative chains, component UIs drawn as SVG.
@@ -332,8 +388,10 @@ into it, anywhere in the chain. The Listen feature could tap into the chain thro
 not only at the plugin's input/output.
 
 ### UI redesign (plugin chrome)
-- **Chat** (decided: drawer per patch, opened from the pill; captures as message attachments; Listen lives in the chat).
-- **Open question: persist chats?** Options: (a) not at all, (b) in the plugin state (travels with the DAW project; watch the state size), (c) in the data dir next to the patch (e.g. `<patch>/chat.json`, survives across projects), (d) both. Also: should a generated patch carry its chat history?
+- **Chat** (decided 2026-11-19: **global**, one default chat + optional more, opened from the top bar; captures as message attachments; Listen lives in the chat). The sheet stays a drawer over the patch window.
+- **Persist chats: decided 2026-11-19, in the user data dir** (with model auth and LLM config; keys
+  in the OS keychain per `research/llm-adapter.md`). Open: should a generated patch link back to
+  the chat that made it?
 - Shell follow-ups: letter-spacing (IN/OUT, tracked titles) isn't supported by iced text;
   accessibility labels for icon buttons (no iced equivalent yet); full font files (the bundled
   ones are Latin subsets, "→" falls back); per-node clip LEDs (no per-block peaks); library card
@@ -362,8 +420,9 @@ Principle (Flemming, 2026-11-19): patches are isolated from the shell and from e
   images and `theme` paths confined to the patch folder; panel SVG text uses a per-patch font
   database (bundled + the patch's `fonts/`); patch fonts in the shell get private family names
   (patch folder + content hash), so they can't restyle the shell or each other (fixed 2026-11-19).
-- **Not yet:** chat log and the attached capture are per plugin instance and survive a patch
-  switch (the design says chat is per patch); captures go to one shared folder; param values of
+- **Not yet:** chat log and the attached capture are per plugin instance (chats are global by
+  design now, so surviving a patch switch is right; they still need saving to the user data dir);
+  captures go to one shared folder; param values of
   a patch are dropped on switch (fine now, needed per patch once snapshots exist).
 - **Entry file renamed `patch.luau` → `init.luau`** (2026-11-19): less opinionated (it doesn't
   have to contain the whole patch). The patch folder is loaded as a Luau module (`require` of the
