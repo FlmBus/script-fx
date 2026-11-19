@@ -5,6 +5,28 @@ details, measurements and run instructions are in [`README.md`](../README.md)._
 
 ## Where we left off
 
+0. **Top bar = title bar + sheet openers** (2026-11-19, after the polish pass). "ScriptFX"
+   wordmark centred like a window title; on the right Controls · Chat · ⚙ (all sheet openers in
+   one place; Controls is disabled without a patch). New **settings sheet** (`shell/settings.rs`):
+   theme (Auto/Light/Dark), interface size (− 100 % +), passive listener (disabled, "coming
+   later"); these left the top bar. The notch is now reload | snapshots only. Icons: gear
+   (Lucide, ISC) for settings, sliders for the patch controls; the old sunburst icon is gone.
+   `SCRIPTFX_DEV_SHEET=settings` opens it. Design-system README not updated for this yet.
+   - **Library = a sheet on the left** ("Patches" at the left of the top bar), so the title and
+     the notch share the window's centre axis. Sheets have two slots now: left (library) and
+     right (controls, chat, settings), mutually exclusive (Flemming); the notch and the empty
+     card centre between them. A fresh instance (no patch) opens the library. The window is
+     **836 × 640** (was 1040): the panel keeps its 816 × 544, the sidebar column is gone.
+     `SCRIPTFX_DEV_SHEET=library`. Idea (Flemming): general sheets left, panel sheets right.
+   - **Panel input:** a click (left or right) into the panel closes open sheets and the value
+     entry; Escape too. Sheets mark their area as occupied, so clicks on their blank space don't
+     fall through to the panel. **Knobs:** wheel turns them (2 % per notch), **Shift** = 5× finer
+     for wheel and drag; **right-click** opens a value entry next to the knob (current value
+     selected; typed in the control's unit, "6", "6 dB", "-3,5"; percent for a macro driving
+     several params; Enter applies, Escape/click elsewhere cancels; a non-number shows a hint).
+     Parsing: `patch::parse_number`, `ParamSpec::parse_plain`, `Patch::macro_from_text` (tested);
+     pointer logic tested on Neon (`stage::tests`). Not checked by hand: real wheel/Shift/right-
+     click in a host (hosts may eat Escape or keystrokes). `SCRIPTFX_DEV_SHEET=entry`.
 0. **Polish pass on the shell** (2026-11-19, Flemming's list; two sessions, merged).
    - **Top bar across the window** (`shell/top_bar.rs`, 34 px): "ScriptFX" left; right: UI
      scale stepper, passive-mode switch (disabled, "soon" badge), **Chat** (global, see Decisions).
@@ -44,7 +66,9 @@ details, measurements and run instructions are in [`README.md`](../README.md)._
      worst on hover. The filter region is now absolute (`userSpaceOnUse`, circle + 3σ), in the
      shared prelude, so every patch's glowing arcs get it. Second cause (dragging): the engine
      clipped each layer to its component's box, and the drag glow reaches ~21 px past an arc
-     10 px from the edge. Layers may now overflow their box by up to 32 px (hit areas unchanged).
+     10 px from the edge. Layers may now overflow their box by up to 32 px (hit areas unchanged),
+     but never the panel's edges (Junkyard's filtered background smeared over the shell;
+     `no_layer_leaves_the_panel` checks all factory patches at 1×, 1.5×, 2×).
    - Library scrolling: thin scrollbar appears with 15 patches; wheel scrolling needs a hand check.
 0. **New shell built** (iced on nice-plug, design system "ScriptFX Shell", skin Matte + Paper
    chat; research + spike: [`research/shell-ui-toolkit.md`](research/shell-ui-toolkit.md)).
