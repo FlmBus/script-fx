@@ -192,18 +192,28 @@ impl SizingStateShared {
     }
 
     pub fn resize_from_handler(&self, size: Size, window: &XcbWindow) -> PlatformResult<()> {
-        let new_size = self.sizing_strategy.adjust_size(size, self.window_size()).physical;
+        // PATCH(scriptfx): a fixed window can't be resized by the *user*, but the app may resize
+        // it (e.g. a UI scale option). `adjust_size` returns the current size for fixed windows,
+        // which silently dropped every such request; fixed windows have no min/max to clamp to.
+        let new_size = if self.sizing_strategy.is_resizable() {
+            self.sizing_strategy.adjust_size(size, self.window_size()).physical
+        } else {
+            size.to_physical(self.scale_factor())
+        };
 
         if new_size == self.window_size.get().cast() {
             return Ok(());
         }
 
-        window.resize(new_size)?.check()?;
-
+        // PATCH(scriptfx): size hints first. A fixed window's hints are min = max = its size; the
+        // window manager clamps a configure request to the hints it has, so resizing before
+        // updating them was ignored (the window kept its old size).
         if !self.sizing_strategy.is_resizable() {
             let size_hints = get_size_hints(&self.sizing_strategy, new_size, self.scale_factor());
             window.set_size_hints(size_hints)?.check()?;
         }
+
+        window.resize(new_size)?.check()?;
 
         // This will trigger a `ConfigureNotify` event which will in turn change `self.window_info`
         // and notify the window handler about it
@@ -227,11 +237,12 @@ impl SizingStateShared {
             return Ok(());
         }
 
-        shared.xcb_window.resize(new_size.cast())?.check()?; // Will not call handler, as size is the same as above.
+        // PATCH(scriptfx): size hints before the resize, see `resize_from_handler`.
         if !self.sizing_strategy.is_resizable() {
             let size_hints = get_size_hints(&self.sizing_strategy, new_size, self.scale_factor());
             shared.xcb_window.set_size_hints(size_hints)?.check()?;
         }
+        shared.xcb_window.resize(new_size.cast())?.check()?; // Will not call handler, as size is the same as above.
 
         // These come from the Host, no need to notify it about the new size
 
