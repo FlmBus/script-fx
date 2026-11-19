@@ -6,15 +6,18 @@ local MeterFrame = Component.define {
   render = function(p: Props<{ label: string, color: string }>)
     local w, h = p.width, p.height
     local top, bar = 56, h - 86
+    -- No box: label, scale and grooves sit straight on the background (like Clean Gain).
     local parts = {
-      SVG.rect { x = 0, y = 0, w = w, h = h, rx = 8, fill = "#080414", stroke = "#ffffff", width = 1, opacity = 0.85 },
       SVG.text { x = w / 2, y = 20, text = p.label, size = 11, weight = "bold", anchor = "middle", fill = p.color },
     }
     for _, db in ipairs({ 0, -6, -12, -18, -24, -40 }) do
-      parts[#parts + 1] = SVG.text { x = 8, y = top + bar * (-db / 60) + 3, text = tostring(db), size = 9, fill = "#c9b8e8" }
+      local y = top + bar * (-db / 60)
+      parts[#parts + 1] = SVG.text { x = 8, y = y + 3, text = tostring(db), size = 9, fill = "#c9b8e8", opacity = 0.8 }
+      parts[#parts + 1] = SVG.rect { x = 26, y = y, w = 5, h = 1, fill = "#c9b8e8", opacity = 0.35 }
     end
     for _, x in ipairs({ 36, 46 }) do
-      parts[#parts + 1] = SVG.rect { x = x, y = top, w = 6, h = bar, rx = 3, fill = "#ffffff", opacity = 0.06 }
+      parts[#parts + 1] = SVG.rect { x = x, y = top, w = 6, h = bar, rx = 3, fill = "#000000", opacity = 0.35 }
+      parts[#parts + 1] = SVG.rect { x = x, y = top, w = 6, h = bar, rx = 3, fill = "none", stroke = "#ffffff", width = 0.5, opacity = 0.12 }
     end
     return parts
   end,
