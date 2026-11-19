@@ -1,8 +1,7 @@
 //! The control notch: a tab of frame material hanging from the window's top edge, joined to
-//! it by concave flares. One row of equal-height controls in three groups:
-//! reload (+ sync LED) | snapshot selector, save, load | patch controls.
-//! The chat is global, so it lives in the top bar, not here.
-//! Stateless: the shell owns everything it shows.
+//! it by concave flares. One row of equal-height controls in two groups: reload (+ sync LED) |
+//! snapshot selector, save, load. The sheet openers (controls, chat, settings) live in the
+//! top bar. Stateless: the shell owns everything it shows.
 //! Snapshots don't exist yet: the selector shows "Init", Save and Load are disabled.
 
 use super::{icons, theme};
@@ -15,7 +14,6 @@ use nice_plug_iced::iced::{
 #[derive(Debug, Clone)]
 pub enum Message {
     Reload,
-    ToggleControls,
 }
 
 /// The patch file's state, shown by the LED on Reload.
@@ -30,7 +28,6 @@ pub enum Sync {
 pub struct Props<'a> {
     pub snapshot: &'a str,
     pub sync: Sync,
-    pub controls_open: bool,
 }
 
 pub fn view<'a>(p: Props<'a>) -> Element<'a, Message> {
@@ -64,16 +61,10 @@ pub fn view<'a>(p: Props<'a>) -> Element<'a, Message> {
     let save = square(icons::icon(icons::SAVE, 13.0, 2.0, off), None, false);
     let load = square(icons::icon(icons::FOLDER, 13.0, 2.0, off), None, false);
 
-    // The patch's controls sheet (highlighted while open).
-    let settings_ink = if p.controls_open { theme::c().on_frame_invert } else { ink };
-    let settings = square(icons::icon(icons::SETTINGS, 13.0, 2.2, settings_ink), Some(Message::ToggleControls), p.controls_open);
-
     let controls = row![
         reload,
         divider(),
         row![selector, save, load].spacing(theme::SPACE_HAIR),
-        divider(),
-        settings,
     ]
     .spacing(theme::SPACE_2)
     .align_y(Center);

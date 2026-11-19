@@ -39,8 +39,6 @@ pub struct Palette {
     pub frame_selection: Color,
     /// The empty-state backdrop (top → bottom).
     pub frame_backdrop: (Color, Color),
-    /// Thumb colour of frame scrollbars (alpha applied on top).
-    pub frame_scroll: Color,
 
     pub paper: Color,
     pub paper_raised: Color,
@@ -91,7 +89,6 @@ pub const DARK: Palette = Palette {
     frame_focus: Color::from_rgba(1.0, 1.0, 1.0, 0.22),
     frame_selection: Color::from_rgba(1.0, 1.0, 1.0, 0.25),
     frame_backdrop: (color!(0x1a1a1d), color!(0x0f0f11)),
-    frame_scroll: Color::WHITE,
 
     paper: color!(0x1c1c1f),
     paper_raised: color!(0x26262a),
@@ -140,7 +137,6 @@ pub const LIGHT: Palette = Palette {
     frame_focus: Color::from_rgba(0.0, 0.0, 0.0, 0.3),
     frame_selection: Color::from_rgba(0.0, 0.0, 0.0, 0.18),
     frame_backdrop: (color!(0xf2f2f4), color!(0xe0e0e4)),
-    frame_scroll: Color::BLACK,
 
     paper: color!(0xf7f6f2),
     paper_raised: color!(0xffffff),
@@ -224,18 +220,19 @@ pub const RADIUS_BUTTON: f32 = 8.0;
 pub const RADIUS_PILL: f32 = 999.0;
 
 pub const SIZE_TOP_BAR: f32 = 34.0;
-pub const SIZE_SIDEBAR: f32 = 214.0;
+/// The library sheet (left).
+pub const SIZE_LIBRARY: f32 = 248.0;
 pub const SIZE_SHEET: f32 = 340.0;
 pub const SIZE_CONTROL: f32 = 30.0;
 pub const SIZE_NODE: f32 = 22.0;
 pub const SIZE_SIGNAL_LINE: f32 = 52.0;
 
-/// The patch window's size: the editor minus top bar, sidebar, gutters and signal line (fixed
-/// window). The sizes are chosen so this is exactly the ControlPanel's 3:2 (816×544): no
-/// letterbox bars around the panel (`stage_fits_the_panel` checks it).
+/// The patch window's size: the editor minus top bar, gutters and signal line (fixed window).
+/// The sizes are chosen so this is exactly the ControlPanel's 3:2 (816×544): no letterbox
+/// bars around the panel (`stage_fits_the_panel` checks it).
 pub fn stage_size() -> (f32, f32) {
     let (w, h) = crate::WINDOW_SIZE;
-    (w - SIZE_SIDEBAR - SPACE_GUTTER, h - SIZE_TOP_BAR - SPACE_GUTTER - SIZE_SIGNAL_LINE)
+    (w - 2.0 * SPACE_GUTTER, h - SIZE_TOP_BAR - SPACE_GUTTER - SIZE_SIGNAL_LINE)
 }
 
 // ---- type ---------------------------------------------------------------------------------------
@@ -485,10 +482,6 @@ pub fn paper_scrollbar(t: &Theme, s: scrollable::Status) -> scrollable::Style {
     scrollbar(c().paper_ink, 0.18, 0.45)(t, s)
 }
 
-/// On the frame (the library).
-pub fn frame_scrollbar(t: &Theme, s: scrollable::Status) -> scrollable::Style {
-    scrollbar(c().frame_scroll, 0.12, 0.3)(t, s)
-}
 
 #[cfg(test)]
 mod tests {

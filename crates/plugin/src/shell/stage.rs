@@ -1,6 +1,7 @@
 //! The stage: the patch window. Shows the patch's ControlPanel (component layers, rendered on
 //! the CPU by `ui_components`, one image per layer) scaled into the window, and turns pointer
-//! input into param changes (knob drag, button click, double-click reset). The window's
+//! input into param changes (knob drag and scroll, Shift = fine, button click, double-click
+//! reset, right-click = type a value). The window's
 //! rounded corners are frame-coloured masks on top, so patch art never needs to know about them.
 
 use std::collections::HashMap;
@@ -32,8 +33,9 @@ pub struct Panel {
     fine: bool,
 }
 
-#[derive(Clone, Copy)]
-enum Target {
+/// What a control changes.
+#[derive(Clone, Copy, Debug)]
+pub enum Target {
     Macro(usize),
     Param(usize),
 }
@@ -51,6 +53,8 @@ pub enum Change {
     EndMacro(usize),
     /// Free param, plain value.
     SetFree(usize, f32),
+    /// Right-click on a control: ask for a typed value (`at`: panel coordinates).
+    OpenEntry { target: Target, at: Point },
 }
 
 /// Pointer input over the panel, in panel coordinates (logical, 840×560).
@@ -58,6 +62,9 @@ pub enum Change {
 pub enum Pointer {
     Moved(Point),
     Pressed(Point),
+    RightPressed(Point),
+    /// Wheel over the panel: notches (up = positive).
+    Scrolled(Point, f32),
     Released,
     Left,
     Fine(bool),
@@ -65,6 +72,10 @@ pub enum Pointer {
 
 /// Pixels of drag (panel units) for the full 0..1 range.
 const DRAG_RANGE: f32 = 200.0;
+/// Value change per wheel notch (50 notches for the full range).
+const SCROLL_STEP: f32 = 0.02;
+/// Shift: drag and scroll this much finer.
+const FINE: f32 = 0.2;
 
 impl Panel {
     pub fn load(dir: &std::path::Path) -> Result<Self, String> {
@@ -145,7 +156,7 @@ impl Panel {
             }
             Pointer::Moved(p) => {
                 if let Some(d) = &mut self.drag {
-                    let fine = if self.fine { 0.2 } else { 1.0 };
+                    let fine = if self.fine { FINE } else { 1.0 };
                     let v = (d.start - (p.y - d.start_y) * fine / DRAG_RANGE).clamp(0.0, 1.0);
                     out.push(match d.target {
                         Target::Macro(slot) => Change::SetMacro(slot, v),
@@ -193,6 +204,31 @@ impl Panel {
                     let _ = self.ui.click(hit.id);
                 }
                 self.hover = Some(hit);
+            }
+            Pointer::Scrolled(p, notches) => {
+                let Some(hit) = self.ui.hit(p.x, p.y) else { return out };
+                let Some(t) = hit.bind.as_deref().and_then(|b| target(patch, &patch.resolve_source(b).ok()?)) else { return out };
+                if hit.kind != "knob" || self.drag.is_some() {
+                    return out;
+                }
+                let step = notches * SCROLL_STEP * if self.fine { FINE } else { 1.0 };
+                match t {
+                    Target::Macro(slot) => {
+                        let v = (values.macros[slot] + step).clamp(0.0, 1.0);
+                        out.extend([Change::BeginMacro(slot), Change::SetMacro(slot, v), Change::EndMacro(slot)]);
+                    }
+                    Target::Param(i) => {
+                        let v = (values.params.get(i).copied().unwrap_or(0.0) + step).clamp(0.0, 1.0);
+                        out.push(Change::SetFree(i, patch.params[i].plain(v)));
+                    }
+                }
+                self.hover = Some(hit);
+            }
+            Pointer::RightPressed(p) => {
+                let Some(hit) = self.ui.hit(p.x, p.y) else { return out };
+                if let Some(t) = hit.bind.as_deref().and_then(|b| target(patch, &patch.resolve_source(b).ok()?)) {
+                    out.push(Change::OpenEntry { target: t, at: p });
+                }
             }
             Pointer::Released => {
                 if let Some(Drag { target: Target::Macro(slot), .. }) = self.drag.take() {
@@ -374,7 +410,8 @@ impl Widget<Pointer, Theme, Renderer> for PointerArea {
         };
         match event {
             Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                let inside = bounds.contains(*position);
+                // `position_over` is None while a layer above (a sheet) covers the point.
+                let inside = cursor.position_over(bounds).is_some();
                 if inside || state.pressed {
                     shell.publish(Pointer::Moved(to_panel(*position)));
                 } else if state.inside {
@@ -390,6 +427,23 @@ impl Widget<Pointer, Theme, Renderer> for PointerArea {
                 if let Some(p) = cursor.position_over(bounds) {
                     state.pressed = true;
                     shell.publish(Pointer::Pressed(to_panel(p)));
+                    shell.capture_event();
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
+                if let Some(p) = cursor.position_over(bounds) {
+                    shell.publish(Pointer::RightPressed(to_panel(p)));
+                    shell.capture_event();
+                }
+            }
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                if let Some(p) = cursor.position_over(bounds) {
+                    // Some systems turn Shift+wheel into horizontal scrolling.
+                    let notches = match *delta {
+                        mouse::ScrollDelta::Lines { x, y } => if y != 0.0 { y } else { x },
+                        mouse::ScrollDelta::Pixels { x, y } => (if y != 0.0 { y } else { x }) / 40.0,
+                    };
+                    shell.publish(Pointer::Scrolled(to_panel(p), notches));
                     shell.capture_event();
                 }
             }
@@ -410,5 +464,45 @@ impl Widget<Pointer, Theme, Renderer> for PointerArea {
 impl<'a> From<PointerArea> for Element<'a, Pointer> {
     fn from(p: PointerArea) -> Self {
         Element::new(p)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Neon Saturator's Tape knob (macro slot 0) sits around (165, 388) in the panel.
+    fn neon() -> (Patch, Panel, Values) {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../patches/neon-saturator");
+        let patch = Patch::load(&dir).unwrap();
+        let mut panel = Panel::load(&dir).unwrap();
+        let mut values = Values { params: vec![0.0; patch.params.len()], ..Default::default() };
+        values.macros[0] = 0.5;
+        panel.update(&patch, &values, 1.0);
+        (patch, panel, values)
+    }
+
+    fn set_macro(changes: &[Change]) -> Option<f32> {
+        changes.iter().find_map(|c| if let Change::SetMacro(0, v) = c { Some(*v) } else { None })
+    }
+
+    #[test]
+    fn wheel_turns_a_knob_shift_finer() {
+        let (patch, mut panel, values) = neon();
+        let at = Point::new(165.0, 388.0);
+        let coarse = set_macro(&panel.pointer(Pointer::Scrolled(at, 1.0), &patch, &values)).expect("scroll changes Tape");
+        assert!((coarse - (0.5 + SCROLL_STEP)).abs() < 1e-6);
+        panel.pointer(Pointer::Fine(true), &patch, &values);
+        let fine = set_macro(&panel.pointer(Pointer::Scrolled(at, -1.0), &patch, &values)).unwrap();
+        assert!((fine - (0.5 - SCROLL_STEP * FINE)).abs() < 1e-6);
+        // Wheel over empty panel space changes nothing.
+        assert!(panel.pointer(Pointer::Scrolled(Point::new(5.0, 5.0), 1.0), &patch, &values).is_empty());
+    }
+
+    #[test]
+    fn right_click_asks_for_a_value() {
+        let (patch, mut panel, values) = neon();
+        let out = panel.pointer(Pointer::RightPressed(Point::new(165.0, 388.0)), &patch, &values);
+        assert!(matches!(out.as_slice(), [Change::OpenEntry { target: Target::Macro(0), .. }]));
     }
 }

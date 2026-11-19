@@ -29,8 +29,8 @@ impl Empty {
         None
     }
 
-    /// `inset`: room on the right taken by an open sheet; the card centres in what's left.
-    pub fn view(&self, inset: f32) -> Element<'_, Message> {
+    /// `left`/`right`: room taken by open sheets; the card centres in what's left.
+    pub fn view(&self, left: f32, right: f32) -> Element<'_, Message> {
         let intro = column![
             text("No patch loaded").size(16).font(theme::font::SANS_SEMIBOLD).color(theme::c().frame_ink),
             text("The signal passes through untouched. Pick a patch on the left, or describe a new one.").size(12).color(theme::c().frame_muted),
@@ -71,7 +71,7 @@ impl Empty {
                 ..Default::default()
             });
 
-        container(container(card).center(Fill).padding(Padding { right: inset, ..Padding::ZERO }))
+        container(container(card).center(Fill).padding(Padding { left, right, ..Padding::ZERO }))
             .center(Fill)
             .style(|_: &Theme| container::Style {
                 background: Some(

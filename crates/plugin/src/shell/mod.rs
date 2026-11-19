@@ -1,15 +1,18 @@
 //! The shell: the plugin's own UI (iced), in the "ScriptFX Shell" design system.
-//! Top bar over: library | patch window (ControlPanel + notch + paper sheets) over the signal line.
+//! Top bar over the patch window (ControlPanel + notch, sheets floating over it on both sides)
+//! over the signal line.
 //!
 //! One module per section, each with its own state, `Message`, `update` and `view`:
-//! - `top_bar`      plugin name, UI scale, passive mode, the (global) chat
-//! - `library`      patch list in the sidebar
-//! - `notch`        reload / snapshot selector, save, load / patch controls
+//! - `top_bar`      the wordmark, sheet openers (library left; controls, chat, settings right)
+//! - `library`      the patch library (sheet, left)
+//! - `notch`        reload / snapshot selector, save, load
 //! - `stage`        the patch window: the ControlPanel and its pointer input
 //! - `chat`         the chat sheet (Listen lives here)
 //! - `controls`     the controls sheet (macros, params, patch settings)
+//! - `settings`     the settings sheet (theme, interface size, passive mode)
 //! - `signal_line`  IN → blocks → OUT (view only)
 //! - `empty`        the window when no patch is loaded
+//! - `entry`        typing a value (right-click a knob)
 //!
 //! `session` holds the non-UI state (library scan, loaded patch, hot reload, values).
 //! This file owns what several sections share (which sheet is open, the frame clock), routes
@@ -22,10 +25,12 @@ mod brand;
 mod chat;
 mod controls;
 mod empty;
+mod entry;
 mod icons;
 mod library;
 mod notch;
 mod session;
+mod settings;
 mod sheet;
 mod signal_line;
 mod slide;
@@ -41,7 +46,7 @@ use nice_plug_iced::{
         self, Border, Element, Fill, Padding, PollSubNotifier, Subscription, Task, Theme, alignment,
         animation::{Animation, Easing},
         futures::{Stream, channel::mpsc},
-        widget::{button, column, container, row, stack, text},
+        widget::{button, column, container, pin, row, stack, text},
     },
 };
 
@@ -85,6 +90,7 @@ pub fn create(
 enum Sheet {
     Chat,
     Controls,
+    Settings,
 }
 
 pub struct Shell {
@@ -96,7 +102,10 @@ pub struct Shell {
     chat: chat::Chat,
     empty: empty::Empty,
     listen: Listen,
-    /// The open sheet; `shown` keeps the last one drawn while it slides out.
+    /// The library sheet (left slot) and its slide.
+    library_open: bool,
+    library_slide: Animation<bool>,
+    /// The open right-hand sheet; `shown` keeps the last one drawn while it slides out.
     sheet: Option<Sheet>,
     shown: Sheet,
     slide: Animation<bool>,
@@ -110,6 +119,10 @@ pub struct Shell {
     dev_stats: bool,
     /// Dev aid: `SCRIPTFX_DEV_RESCALE=1.5` sets the UI scale 1 s after opening (like −/+).
     dev_rescale: Option<(Instant, f32)>,
+    /// The open value entry (right-click on a knob).
+    entry: Option<entry::Entry>,
+    /// Tasks produced while handling a message (focus the value entry).
+    tasks: Vec<Task<Message>>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,9 +133,13 @@ pub enum Message {
     Notch(notch::Message),
     Chat(chat::Message),
     Controls(controls::Message),
+    Settings(settings::Message),
     Empty(empty::Message),
     Panel(stage::Pointer),
     DismissError,
+    Entry(entry::Message),
+    /// Escape anywhere (also when a text field has the focus).
+    Escape,
 }
 
 impl Shell {
@@ -139,11 +156,15 @@ impl Shell {
             sheet: None,
             shown: Sheet::Chat,
             slide: Animation::new(false).duration(Duration::from_millis(260)).easing(Easing::EaseOutCubic),
+            library_open: false,
+            library_slide: Animation::new(false).duration(Duration::from_millis(260)).easing(Easing::EaseOutCubic),
             now: Instant::now(),
             dragging_macro: None,
             passive: false,
             settings: { let s = UserSettings::load(); apply_theme(s.theme); s },
             dev_stats: std::env::var_os("SCRIPTFX_DEV_STATS").is_some(),
+            entry: None,
+            tasks: Vec::new(),
             dev_rescale: std::env::var("SCRIPTFX_DEV_RESCALE").ok().and_then(|s| s.parse().ok()).map(|v| (Instant::now() + Duration::from_secs(1), v)),
         }
     }
@@ -175,14 +196,23 @@ impl Shell {
     /// The frame clock drives everything that moves: meters, animated components, the sheet
     /// slide, hot reload, Listen progress.
     fn subscription(&self) -> Subscription<Message> {
-        Subscription::run(frames).map(Message::Frame)
+        Subscription::batch([
+            Subscription::run(frames).map(Message::Frame),
+            iced::event::listen_with(|event, _, _| match event {
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape), .. }) => {
+                    Some(Message::Escape)
+                }
+                _ => None,
+            }),
+        ])
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
         self.handle(message);
         // Patch fonts found by a library scan: hand them to iced.
         let fonts = std::mem::take(&mut self.session.new_fonts);
-        Task::batch(fonts.into_iter().map(|bytes| iced::font::load(bytes).discard()))
+        let fonts = fonts.into_iter().map(|bytes| iced::font::load(bytes).discard());
+        Task::batch(fonts.chain(std::mem::take(&mut self.tasks)))
     }
 
     fn handle(&mut self, message: Message) {
@@ -198,10 +228,18 @@ impl Shell {
                     self.restored = true;
                     self.session.restore(ctx, &params, &shared);
                     self.reveal_current();
+                    // A fresh instance has no patch: show the library to pick one.
+                    if self.session.current.is_none() {
+                        self.set_library(true);
+                    }
                     // Dev aid: SCRIPTFX_DEV_SHEET=chat|controls opens a sheet at start.
                     match std::env::var("SCRIPTFX_DEV_SHEET").as_deref() {
                         Ok("chat") => self.open_sheet(Some(Sheet::Chat)),
                         Ok("controls") => self.open_sheet(Some(Sheet::Controls)),
+                        Ok("settings") => self.open_sheet(Some(Sheet::Settings)),
+                        Ok("library") => self.set_library(true),
+                        // The value entry of the first macro, as if right-clicked at Neon's Tape knob.
+                        Ok("entry") => self.open_entry(stage::Target::Macro(0), iced::Point::new(165.0, 388.0)),
                         _ => {}
                     }
                     // Dev aid: SCRIPTFX_DEV_AUTOLISTEN=10 starts a 10 s listen right away.
@@ -232,15 +270,10 @@ impl Shell {
                 }
             }
             Message::TopBar(msg) => match msg {
-                top_bar::Message::TogglePassive => self.passive = !self.passive,
+                top_bar::Message::ToggleLibrary => self.set_library(!self.library_open),
+                top_bar::Message::ToggleControls => self.toggle_sheet(Sheet::Controls),
                 top_bar::Message::ToggleChat => self.toggle_sheet(Sheet::Chat),
-                top_bar::Message::ScaleDown => self.set_ui_scale(self.settings.ui_scale - user_settings::UI_SCALE_STEP),
-                top_bar::Message::ScaleUp => self.set_ui_scale(self.settings.ui_scale + user_settings::UI_SCALE_STEP),
-                top_bar::Message::SetTheme(mode) => {
-                    self.settings.theme = mode;
-                    apply_theme(mode);
-                    self.settings.save();
-                }
+                top_bar::Message::ToggleSettings => self.toggle_sheet(Sheet::Settings),
             },
             Message::Library(msg) => match self.library.update(msg) {
                 Some(library::Event::Load(folder)) => {
@@ -249,16 +282,16 @@ impl Shell {
                 }
                 Some(library::Event::Unload) => {
                     self.session.unload(ctx, &params, &shared);
-                    // The chat is global and stays open; the controls belong to the patch.
+                    // Chat and settings stay open; the controls belong to the patch.
                     if self.sheet == Some(Sheet::Controls) {
                         self.open_sheet(None);
                     }
                 }
+                Some(library::Event::Close) => self.set_library(false),
                 None => {}
             },
             Message::Notch(msg) => match msg {
                 notch::Message::Reload => self.session.reload(ctx, &params, &shared),
-                notch::Message::ToggleControls => self.toggle_sheet(Sheet::Controls),
             },
             Message::Chat(msg) => match self.chat.update(msg) {
                 Some(chat::Event::Close) => self.open_sheet(None),
@@ -270,16 +303,49 @@ impl Shell {
                 None => {}
             },
             Message::Controls(msg) => self.controls(msg, &params, &shared),
+            Message::Settings(msg) => match msg {
+                settings::Message::Close => self.open_sheet(None),
+                settings::Message::SetTheme(mode) => {
+                    self.settings.theme = mode;
+                    apply_theme(mode);
+                    self.settings.save();
+                }
+                settings::Message::ScaleDown => self.set_ui_scale(self.settings.ui_scale - user_settings::UI_SCALE_STEP),
+                settings::Message::ScaleUp => self.set_ui_scale(self.settings.ui_scale + user_settings::UI_SCALE_STEP),
+                settings::Message::TogglePassive => self.passive = !self.passive,
+            },
             Message::Empty(msg) => match self.empty.update(msg) {
                 Some(e) => match e {},
                 None => {}
             },
             Message::Panel(ev) => {
+                // A click into the panel closes the sheets and a value entry.
+                if matches!(ev, stage::Pointer::Pressed(_) | stage::Pointer::RightPressed(_)) {
+                    self.set_library(false);
+                    self.open_sheet(None);
+                    self.entry = None;
+                }
                 let Some(cur) = &mut self.session.current else { return };
                 let Some(panel) = &mut cur.panel else { return };
                 let changes = panel.pointer(ev, &cur.patch, &self.session.values);
                 for c in changes {
-                    self.apply(c, &params, &shared);
+                    match c {
+                        stage::Change::OpenEntry { target, at } => self.open_entry(target, at),
+                        c => self.apply(c, &params, &shared),
+                    }
+                }
+            }
+            Message::Entry(entry::Message::Edit(text)) => {
+                if let Some(e) = &mut self.entry {
+                    e.text = text;
+                    e.invalid = false;
+                }
+            }
+            Message::Entry(entry::Message::Submit) => self.submit_entry(&params, &shared),
+            Message::Escape => {
+                if self.entry.take().is_none() {
+                    self.set_library(false);
+                    self.open_sheet(None);
                 }
             }
             Message::DismissError => self.session.error = None,
@@ -322,6 +388,7 @@ impl Shell {
             stage::Change::SetMacro(slot, v) => setter.set_parameter_normalized(&params.macros[slot].value, v),
             stage::Change::EndMacro(slot) => setter.end_set_parameter(&params.macros[slot].value),
             stage::Change::SetFree(i, plain) => self.session.set_free(params, shared, i, plain),
+            stage::Change::OpenEntry { .. } => {}
         }
     }
 
@@ -336,9 +403,55 @@ impl Shell {
         self.settings.save();
     }
 
+    /// Right-click on a control: a value entry with its current value, selected.
+    fn open_entry(&mut self, target: stage::Target, at: iced::Point) {
+        let Some(cur) = &self.session.current else { return };
+        let (p, v) = (&cur.patch, &self.session.values);
+        let (label, text) = match target {
+            stage::Target::Macro(slot) => (p.macros[slot].name.clone(), p.macro_text(slot, v.macros[slot])),
+            stage::Target::Param(i) => (p.params[i].name.clone(), p.params[i].display(v.params.get(i).copied().unwrap_or(0.0))),
+        };
+        self.entry = Some(entry::Entry { target, at, label, text, invalid: false });
+        self.tasks.push(iced::widget::operation::focus(entry::input_id()));
+        self.tasks.push(iced::widget::operation::select_all(entry::input_id()));
+    }
+
+    /// Enter in the value entry: parse in the control's unit and apply, or mark it invalid.
+    fn submit_entry(&mut self, params: &FxParams, shared: &Shared) {
+        let (Some(e), Some(cur)) = (&mut self.entry, &self.session.current) else { return };
+        let p = &cur.patch;
+        let changes = match e.target {
+            stage::Target::Macro(slot) => p
+                .macro_from_text(slot, &e.text)
+                .map(|v| vec![stage::Change::BeginMacro(slot), stage::Change::SetMacro(slot, v), stage::Change::EndMacro(slot)]),
+            stage::Target::Param(i) => p.params.get(i).and_then(|s| s.parse_plain(&e.text)).map(|v| vec![stage::Change::SetFree(i, v)]),
+        };
+        match changes {
+            Some(changes) => {
+                self.entry = None;
+                for c in changes {
+                    self.apply(c, params, shared);
+                }
+            }
+            None => e.invalid = true,
+        }
+    }
+
     fn reveal_current(&mut self) {
         if let Some(cur) = &self.session.current {
             self.library.reveal(&cur.folder);
+        }
+    }
+
+    /// Left and right sheets are exclusive: opening one closes the other (both slide).
+    fn set_library(&mut self, open: bool) {
+        if open {
+            self.open_sheet(None);
+        }
+        if self.library_open != open {
+            self.library_open = open;
+            self.now = Instant::now();
+            self.library_slide.go_mut(open, self.now);
         }
     }
 
@@ -346,7 +459,11 @@ impl Shell {
         self.open_sheet(if self.sheet == Some(s) { None } else { Some(s) });
     }
 
+    /// Opens a right-hand sheet (closing the library, see `set_library`), or closes it.
     fn open_sheet(&mut self, s: Option<Sheet>) {
+        if s.is_some() {
+            self.set_library(false);
+        }
         let was_open = self.sheet.is_some();
         self.sheet = s;
         if let Some(s) = s {
@@ -361,58 +478,60 @@ impl Shell {
 
     fn view(&self) -> Element<'_, Message> {
         let s = &self.session;
-        let library = self.library.view(&s.library, s.current.as_ref().map(|c| c.folder.as_str())).map(Message::Library);
+        let gutters = Padding { top: theme::SPACE_GUTTER, right: theme::SPACE_GUTTER, left: theme::SPACE_GUTTER, bottom: 0.0 };
 
         let main: Element<'_, Message> = match &s.current {
             Some(_) => column![self.window(), signal_line::view(s.current.as_ref().map(|c| &c.patch), &s.values)].into(),
             None => {
-                // The card slides aside with an open sheet, like the notch.
-                let empty = container(self.empty.view(self.slide_t() * sheet_width()).map(Message::Empty)).padding(Padding {
-                    top: theme::SPACE_GUTTER,
-                    right: theme::SPACE_GUTTER,
-                    bottom: theme::SPACE_GUTTER,
-                    left: 0.0,
-                });
-                let mut layers = stack![empty].width(Fill).height(Fill);
-                if let Some(sheet) = self.sheet_layer() {
-                    layers = layers.push(container(sheet).padding(Padding { top: theme::SPACE_GUTTER, right: theme::SPACE_GUTTER, ..Padding::ZERO }));
+                // The card slides aside with open sheets, like the notch.
+                let empty = self.empty.view(self.library_t() * library_width(), self.slide_t() * sheet_width()).map(Message::Empty);
+                let mut layers = stack![container(empty).padding(Padding { bottom: theme::SPACE_GUTTER, ..Padding::ZERO })].width(Fill).height(Fill);
+                for sheet in [self.library_layer(), self.sheet_layer()].into_iter().flatten() {
+                    layers = layers.push(sheet);
                 }
-                layers.push(self.error_card()).into()
+                container(layers.push(self.error_card())).padding(gutters).into()
             }
         };
 
         let top_bar = top_bar::view(top_bar::Props {
-            passive: self.passive,
-            passive_available: false,
-            ui_scale: self.settings.ui_scale,
-            theme: self.settings.theme,
+            library_open: self.library_open,
+            controls_available: s.current.is_some(),
+            controls_open: self.sheet == Some(Sheet::Controls),
             chat_open: self.sheet == Some(Sheet::Chat),
+            settings_open: self.sheet == Some(Sheet::Settings),
         })
         .map(Message::TopBar);
-        container(column![top_bar, row![library, main]]).style(theme::frame).width(Fill).height(Fill).into()
+        container(column![top_bar, main]).style(theme::frame).width(Fill).height(Fill).into()
     }
 
-    /// The patch window with the shell's two intrusions: the notch and a paper sheet.
+    /// The patch window with the shell's intrusions: the notch and the sheets.
     fn window(&self) -> Element<'_, Message> {
         let Some(cur) = &self.session.current else { return column![].into() };
         let bg = session::hex(cur.patch.theme.color("bg")).unwrap_or(theme::c().frame_raised);
 
-        // While a sheet is open the notch centres on the part of the window it leaves visible,
-        // gliding along with it.
+        // While sheets are open the notch centres on the part of the window they leave visible,
+        // gliding along with them.
         let notch = notch::view(notch::Props {
             snapshot: "Init",
             sync: if self.session.error.is_some() { notch::Sync::Error } else { notch::Sync::Ok },
-            controls_open: self.sheet == Some(Sheet::Controls),
         })
         .map(Message::Notch);
         let notch = container(notch)
             .width(Fill)
-            .padding(Padding { right: self.slide_t() * sheet_width(), ..Padding::ZERO })
+            .padding(Padding { left: self.library_t() * library_width(), right: self.slide_t() * sheet_width(), ..Padding::ZERO })
             .align_x(alignment::Horizontal::Center);
 
         let mut layers = stack![stage::view(&cur.patch, cur.panel.as_ref(), bg).map(Message::Panel), notch].width(Fill).height(Fill);
-        if let Some(sheet) = self.sheet_layer() {
+        for sheet in [self.library_layer(), self.sheet_layer()].into_iter().flatten() {
             layers = layers.push(sheet);
+        }
+        if let Some(e) = &self.entry {
+            // Right of the click point, clamped into the stage.
+            let (s, offset) = stage::panel_fit();
+            let (w, h) = theme::stage_size();
+            let x = (offset.x + e.at.x * s + 14.0).min(w - entry::SIZE.0 - 8.0).max(8.0);
+            let y = (offset.y + e.at.y * s - entry::SIZE.1 / 2.0).min(h - entry::SIZE.1 - 8.0).max(8.0);
+            layers = layers.push(pin(e.view().map(Message::Entry)).x(x).y(y));
         }
         layers = layers.push(self.error_card());
         if self.dev_stats {
@@ -420,19 +539,36 @@ impl Shell {
         }
 
         container(layers)
-            .padding(Padding { top: theme::SPACE_GUTTER, right: theme::SPACE_GUTTER, ..Padding::ZERO })
+            .padding(Padding { top: theme::SPACE_GUTTER, right: theme::SPACE_GUTTER, left: theme::SPACE_GUTTER, bottom: 0.0 })
             .width(Fill)
             .height(Fill)
             .into()
     }
 
-    /// 0 = sheet hidden, 1 = fully in.
+    /// 0 = right sheet hidden, 1 = fully in.
     fn slide_t(&self) -> f32 {
         self.slide.interpolate(0.0, 1.0, self.now)
     }
 
+    /// 0 = library hidden, 1 = fully in.
+    fn library_t(&self) -> f32 {
+        self.library_slide.interpolate(0.0, 1.0, self.now)
+    }
+
+    /// The library sheet, over the left side of the window.
+    fn library_layer(&self) -> Option<Element<'_, Message>> {
+        let t = self.library_t();
+        if t <= 0.0 {
+            return None;
+        }
+        let s = &self.session;
+        let sheet = self.library.view(&s.library, s.current.as_ref().map(|c| c.folder.as_str())).map(Message::Library);
+        let sheet = container(sheet).height(Fill).padding(theme::SPACE_2);
+        Some(slide::slide_left(sheet, library_width(), (1.0 - t) * library_width()).into())
+    }
+
     /// The open (or sliding) paper sheet, over the right side of the window. The controls sheet
-    /// needs a patch; the chat (global) doesn't.
+    /// needs a patch; the chat (global) and the settings don't.
     fn sheet_layer(&self) -> Option<Element<'_, Message>> {
         let t = self.slide_t();
         if t <= 0.0 {
@@ -442,6 +578,13 @@ impl Shell {
             (Sheet::Chat, _) => self.chat.view(self.listen.status(&self.plugin.shared), self.listen.seconds).map(Message::Chat),
             (Sheet::Controls, Some(cur)) => controls::view(&cur.patch, &self.session.values, self.session.hot_reload).map(Message::Controls),
             (Sheet::Controls, None) => return None,
+            (Sheet::Settings, _) => settings::view(settings::Props {
+                theme: self.settings.theme,
+                ui_scale: self.settings.ui_scale,
+                passive: self.passive,
+                passive_available: false,
+            })
+            .map(Message::Settings),
         };
         let sheet = container(sheet).height(Fill).padding(theme::SPACE_2);
         Some(slide::slide(sheet, sheet_width(), (1.0 - t) * sheet_width()).into())
@@ -507,7 +650,12 @@ fn apply_theme(mode: user_settings::ThemeMode) {
     });
 }
 
-/// A sheet plus its margin.
+/// The library sheet plus its margin.
+fn library_width() -> f32 {
+    theme::SIZE_LIBRARY + 2.0 * theme::SPACE_2
+}
+
+/// A right-hand sheet plus its margin.
 fn sheet_width() -> f32 {
     theme::SIZE_SHEET + 2.0 * theme::SPACE_2
 }

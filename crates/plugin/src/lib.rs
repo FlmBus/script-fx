@@ -38,7 +38,9 @@ pub struct CaptureBuf {
 }
 
 /// Editor window size (logical px), fixed.
-pub const WINDOW_SIZE: (f32, f32) = (1040.0, 640.0);
+/// 836 × 640: the patch window is exactly the 840×560 panel's 3:2 at 816×544 (see
+/// `theme::stage_size`). The library floats over it as a sheet, so it takes no column.
+pub const WINDOW_SIZE: (f32, f32) = (836.0, 640.0);
 const PEAK_DECAY_MS: f32 = 300.0;
 const GRAPH_QUEUE: usize = 16;
 

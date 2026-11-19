@@ -3,14 +3,24 @@
 
 use nice_plug_iced::iced::{
     Border, Center, Element, Fill, Padding,
-    widget::{Text, button, container, markdown, row, space, text},
+    mouse,
+    widget::{Text, button, container, markdown, mouse_area, row, space, text},
 };
 
 use super::{icons, theme};
 
 /// The paper card (size-sheet wide, full height).
-pub fn frame<'a, M: 'a>(content: impl Into<Element<'a, M>>) -> Element<'a, M> {
-    container(content).width(theme::SIZE_SHEET).height(Fill).clip(true).style(theme::paper_sheet).into()
+pub fn frame<'a, M: Clone + 'a>(content: impl Into<Element<'a, M>>) -> Element<'a, M> {
+    frame_width(content, theme::SIZE_SHEET)
+}
+
+/// The paper card at another width (the library).
+pub fn frame_width<'a, M: Clone + 'a>(content: impl Into<Element<'a, M>>, width: f32) -> Element<'a, M> {
+    // `Idle` marks the sheet as occupied, so the stack doesn't pass clicks on its blank space
+    // through to the panel below (a click on the panel closes the sheets).
+    mouse_area(container(content).width(width).height(Fill).clip(true).style(theme::paper_sheet))
+        .interaction(mouse::Interaction::Idle)
+        .into()
 }
 
 /// "Title · subtitle", close button.

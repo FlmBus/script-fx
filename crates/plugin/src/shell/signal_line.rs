@@ -44,7 +44,7 @@ pub fn view<'a, M: 'a>(patch: Option<&'a Patch>, values: &Values) -> Element<'a,
     container(line)
         .height(theme::SIZE_SIGNAL_LINE)
         .width(Fill)
-        .padding(Padding { left: 4.0, right: 16.0 + theme::SPACE_GUTTER, ..Padding::ZERO })
+        .padding(Padding { left: 16.0 + theme::SPACE_GUTTER, right: 16.0 + theme::SPACE_GUTTER, ..Padding::ZERO })
         .align_y(Center)
         .into()
 }

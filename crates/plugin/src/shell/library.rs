@@ -1,4 +1,4 @@
-//! The patch library in the sidebar: one card per patch folder, painted in the patch's own
+//! The patch library, a sheet on the left: one card per patch folder, painted in the patch's own
 //! colours, its snapshots listed inside. Snapshots don't exist yet, so every patch lists one:
 //! "Init" (the patch's defaults).
 
@@ -11,7 +11,7 @@ use nice_plug_iced::iced::{
 };
 
 use super::brand::Logo;
-use super::{icons, session::PatchInfo, theme};
+use super::{icons, session::PatchInfo, sheet, theme};
 
 pub struct Library {
     open: HashSet<String>,
@@ -23,12 +23,14 @@ pub enum Message {
     /// Load a patch with its defaults.
     Pick(String),
     NewPatch,
+    Close,
 }
 
 /// What the shell has to act on.
 pub enum Event {
     Load(String),
     Unload,
+    Close,
 }
 
 impl Library {
@@ -51,34 +53,35 @@ impl Library {
             }
             Message::Pick(f) => Some(Event::Load(f)),
             Message::NewPatch => Some(Event::Unload),
+            Message::Close => Some(Event::Close),
         }
     }
 
     pub fn view<'a>(&'a self, patches: &'a [PatchInfo], loaded: Option<&'a str>) -> Element<'a, Message> {
+        let c = theme::c();
+        let small = |icon: &'static str, msg: Message| {
+            button(container(icons::icon(icon, 11.0, 2.5, c.paper_ink)).center(Fill)).on_press(msg).width(28).height(26).padding(0).style(theme::paper_bare)
+        };
         let header = row![
-            text("Patches").size(12.5).font(theme::font::SANS_SEMIBOLD).color(theme::c().frame_ink),
+            text("Patches").size(13.5).font(theme::font::PAPER_SEMIBOLD).color(c.paper_ink),
+            text(format!("· {}", patches.len())).size(12).font(theme::font::PAPER).color(c.paper_muted),
             space::horizontal(),
-            button(container(icons::icon(icons::PLUS, 12.0, 2.2, theme::c().frame_muted)).center(Fill))
-                .on_press(Message::NewPatch)
-                .width(28)
-                .height(28)
-                .padding(0)
-                .style(|t, s| {
-                    let mut st = theme::frame_ghost(false)(t, s);
-                    st.border.radius = theme::radius(8.0);
-                    st
-                }),
+            small(icons::PLUS, Message::NewPatch),
+            small(icons::CLOSE, Message::Close),
         ]
-        .spacing(2)
+        .spacing(6)
         .align_y(Center)
-        .height(36)
+        .height(48)
         .padding(Padding { left: 16.0, right: 8.0, ..Padding::ZERO });
 
         let cards = column(patches.iter().map(|p| self.card(p, loaded == Some(p.folder.as_str()))))
             .spacing(theme::SPACE_2)
-            .padding(Padding { left: 12.0, right: 8.0, bottom: 10.0, top: 0.0 });
+            .padding(Padding { left: 12.0, right: 12.0, bottom: 12.0, top: 12.0 });
 
-        column![header, scrollable(cards).height(Fill).direction(theme::thin_scrollbar()).style(theme::frame_scrollbar)].width(theme::SIZE_SIDEBAR).into()
+        sheet::frame_width(
+            column![header, sheet::divider(), scrollable(cards).height(Fill).direction(theme::thin_scrollbar()).style(theme::paper_scrollbar)],
+            theme::SIZE_LIBRARY,
+        )
     }
 
     fn card<'a>(&self, p: &'a PatchInfo, active: bool) -> Element<'a, Message> {

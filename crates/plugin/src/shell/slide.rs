@@ -1,6 +1,6 @@
-//! `Slide`: fills its area, keeps its content at its own width against the right edge, shifted
-//! right by `offset`, and clips it to the area. Used to slide the chat sheet in from the window
-//! edge. (iced's `pin` squeezes content that doesn't fit; `float` doesn't clip.)
+//! `Slide`: fills its area, keeps its content at its own width against the right (or left) edge,
+//! pushed outwards by `offset`, and clips it to the area. Used to slide the sheets in from the
+//! window's edges. (iced's `pin` squeezes content that doesn't fit; `float` doesn't clip.)
 
 use nice_plug_iced::iced::{
     Element, Event, Length, Rectangle, Renderer, Size, Theme, Vector,
@@ -15,11 +15,18 @@ pub struct Slide<'a, M> {
     content: Element<'a, M>,
     width: f32,
     offset: f32,
+    left: bool,
 }
 
-/// `width`: the content's width; `offset`: how far it is pushed right (0 = fully in).
+/// Against the right edge. `width`: the content's width; `offset`: how far it is pushed out to
+/// the right (0 = fully in).
 pub fn slide<'a, M>(content: impl Into<Element<'a, M>>, width: f32, offset: f32) -> Slide<'a, M> {
-    Slide { content: content.into(), width, offset }
+    Slide { content: content.into(), width, offset, left: false }
+}
+
+/// Against the left edge, pushed out to the left by `offset`.
+pub fn slide_left<'a, M>(content: impl Into<Element<'a, M>>, width: f32, offset: f32) -> Slide<'a, M> {
+    Slide { content: content.into(), width, offset, left: true }
 }
 
 impl<M> Widget<M, Theme, Renderer> for Slide<'_, M> {
@@ -47,7 +54,7 @@ impl<M> Widget<M, Theme, Renderer> for Slide<'_, M> {
         let area = limits.width(Length::Fill).height(Length::Fill).max();
         let content_limits = layout::Limits::new(Size::ZERO, Size::new(self.width, area.height));
         let node = self.content.as_widget_mut().layout(tree, renderer, &content_limits);
-        let x = area.width - node.size().width + self.offset;
+        let x = if self.left { -self.offset } else { area.width - node.size().width + self.offset };
         layout::Node::with_children(area, vec![node.move_to((x, 0.0))])
     }
 
