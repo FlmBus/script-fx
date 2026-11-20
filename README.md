@@ -1,21 +1,30 @@
 # ScriptFX sandbox
 
-PoCs for a plugin whose effect patches are Lua scripts: Lua *describes* macros, theme and
-UI declaratively, and native Rust does the DSP and rendering.
+An effect plugin whose patches are **Luau scripts**: a patch *describes* its effect chain (native
+DSP blocks), its host-automatable macros, its theme and its own UI, and Rust does the DSP and
+rendering. The goal: an LLM in the plugin writes and adjusts patches, informed by an analysis of the
+track's audio. VST3 + CLAP + standalone, Linux / Windows / macOS.
+
+**Docs:** [`docs/STATUS.md`](docs/STATUS.md) (start here: where we are, next steps, decisions,
+glossary) · [`docs/HISTORY.md`](docs/HISTORY.md) (what each session built) ·
+[`docs/research/`](docs/research/) (concepts, research, [measurements](docs/research/findings.md)).
+
+> The chain editor work (chain view, block pages, Serum-style modulation, the knob cell) lives on
+> branch `notch-drawer` (worktree `.claude/worktrees/notch-drawer`), not merged yet. This README
+> and STATUS describe that branch; on `main`, params are still declared with `Param.new`.
 
 ```
-crates/patch         patch model (params + macros + chain), sandboxed Luau runtime + require, patch & UI API (src/*.luau)
+crates/patch         patch model (params, macros + modulation slots, chain), sandboxed Luau runtime + require, patch & UI API (src/*.luau)
+crates/dsp           native DSP: compiles a patch's chain into a graph (no alloc/locks/Lua on the audio thread); `preview` = curves for the UI
 crates/analysis      offline analysis of a capture → LLM-friendly JSON (loudness/LUFS, spectrum, dynamics, stereo, pitch)
-crates/dsp           native DSP: compiles a patch's chain into a graph (no alloc/locks/Lua on the audio thread)
-crates/ui-components reactive Lua components → SVG → one cached layer per component (the patch UI: its `panel`)
-crates/plugin        package `scriptfx`: nice-plug plugin (VST3/CLAP/standalone), iced shell + component panel
+crates/ui-components reactive Luau components → SVG → one cached layer per component (a patch's ControlPanel)
+crates/plugin        package `scriptfx`: nice-plug plugin (VST3/CLAP/standalone) + the iced shell (src/shell/, one module per section)
 crates/xtask         `cargo xtask bundle` (nice-plug-xtask)
 vendor/nice-plug*    patched nice-plug (runtime parameter names), see vendor/nice-plug/PATCHES.md
-vendor/baseview      patched baseview (X11 frame pacing), see vendor/baseview/PATCHES.md
-vendor/iced_wgpu     patched iced_wgpu (frame timing), see vendor/iced_wgpu/PATCHES.md
+vendor/baseview      patched baseview (X11 frame pacing, app resize), see vendor/baseview/PATCHES.md
+vendor/iced_wgpu     patched iced_wgpu (frame timing, post-process pass for the zoom blur), see vendor/iced_wgpu/PATCHES.md
 spikes/shell-iced    the shell spike (throwaway, own workspace)
-patches/             tape-glow (multi-target macro, reels/VU), clean-gain (minimal, fader),
-                     bass-helper (punch → FET → opto → band split: ride / parallel grit → EQ; live block meters),
+patches/             factory patches: tape-glow, clean-gain, bass-helper (band split, live block meters),
                      neon-saturator, junkyard-amp (component UI stress/fire tests)
 patches/.types       Luau type definitions (scriptfx.d.luau) → type checking + autocomplete; doubles as API spec for an LLM
 ```
@@ -23,7 +32,7 @@ patches/.types       Luau type definitions (scriptfx.d.luau) → type checking +
 ## Build & run
 
 ```sh
-export CARGO_TARGET_DIR=/tmp/scriptfx-target     # /home was full; tmpfs build dir
+export CARGO_TARGET_DIR=/tmp/scriptfx-target     # /home is nearly full: tmpfs build dir
 cargo test --workspace
 cargo xtask bundle scriptfx --release            # → $CARGO_TARGET_DIR/bundled/ScriptFX.{vst3,clap}
 
@@ -31,6 +40,7 @@ cargo xtask bundle scriptfx --release            # → $CARGO_TARGET_DIR/bundled
 cp -r $CARGO_TARGET_DIR/bundled/ScriptFX.vst3 ~/.vst3/ && cp $CARGO_TARGET_DIR/bundled/ScriptFX.clap ~/.clap/
 
 # standalone
+cargo build --release -p scriptfx --bin scriptfx
 SCRIPTFX_PATCHES=$PWD/patches $CARGO_TARGET_DIR/release/scriptfx -b alsa   # -b dummy: UI only
 
 # headless render + per-layer cost of a patch UI
@@ -47,18 +57,31 @@ Lua 5.4 files next to a `.luau` of the same name are renamed to `.lua.bak` (they
 
 **Listen** (chat sheet): waits for signal, records N seconds of the chain's input *and* output
 (silence skipped), analyses both off the audio thread, posts the result into the chat and attaches
-it to the next message. Saved to `<data dir>/ScriptFX/captures/capture-<time>/` (`analysis.json`, `input.wav`, `output.wav`).
-Loudness verified against ffmpeg's `ebur128` (identical LUFS, ±0.1 dB true peak / LRA).
-`cargo run --release -p analysis --example analyze -- file.wav` analyses a WAV from the command line.
+it to the next message. Saved to `<data dir>/ScriptFX/captures/capture-<time>/` (`analysis.json`,
+`input.wav`, `output.wav`). `cargo run --release -p analysis --example analyze -- file.wav`
+analyses a WAV from the command line.
 
-Dev aids: `SCRIPTFX_TEST_INPUT=file.wav` (float WAV at the host rate, looped as input),
-`SCRIPTFX_DEV_PATCH=<folder>` (a fresh instance loads this patch instead of starting empty),
-`SCRIPTFX_DEV_SHEET=chat|controls` (open a sheet), `SCRIPTFX_DEV_AUTOLISTEN=10` (start a 10 s
-listen when the editor opens), `SCRIPTFX_DEV_STATS=1` (fps, render CPU, GPU time, panel stats).
+**Dev aids** (environment variables):
+
+| Variable | Effect |
+|---|---|
+| `SCRIPTFX_DEV_PATCH=<folder>` | a fresh instance loads this patch instead of starting empty |
+| `SCRIPTFX_DEV_VIEW=chain` | start in the chain view |
+| `SCRIPTFX_DEV_SHEET=chat\|controls\|settings\|library\|drawer\|entry` | open it at start |
+| `SCRIPTFX_DEV_ZOOM_MS=2000` | slow down the chain → block page zoom to look at it |
+| `SCRIPTFX_DEV_RESCALE=1.5` | set the UI scale 1 s after opening |
+| `SCRIPTFX_DEV_AUTOLISTEN=10` | start a 10 s listen when the editor opens |
+| `SCRIPTFX_DEV_STATS=1` | fps, render CPU, GPU time, panel stats |
+| `SCRIPTFX_FRAME_US=16667` | the shell's frame interval |
+| `SCRIPTFX_TEST_INPUT=file.wav` | float WAV at the host rate, looped as input |
+
+**Testing the UI on Linux:** run the standalone off-screen on Xvfb (`Xvfb :99`, then
+`DISPLAY=:99 WAYLAND_DISPLAY= WGPU_BACKEND=vulkan`); xdotool clicks and drags work there (they don't
+reach XWayland windows on the desktop), screenshots with `import -window root`.
 
 **CI** (`.github/workflows/build.yml`): tests, then VST3 + CLAP bundles for Linux x86_64,
 Windows x86_64 and macOS universal (arm64 + x86_64, ad-hoc signed, not notarized → remove
-quarantine, see the README in the artifact).
+quarantine, see the README in the artifact). Written, not run yet (the repo isn't on GitHub).
 
 ## Patch model
 
@@ -71,29 +94,25 @@ init files, elsewhere `"./x"`) and passes the real objects into the UI. Construc
 ```lua
 local ui = require("@self/ui")
 
-local drive = Param.new("drive", "Drive", { min = 0, max = 24, unit = "dB", default = 6 })
-local tone  = Param.new("tone",  "Tone",  { min = 500, max = 20000, unit = "Hz", default = 8000 })
-
--- host-automatable (max 16), name shows up in the DAW; drives 1..n params
-local character = Macro.new("character", "Character", { default = 0.3 })
-  :drives(drive, { from = 0,     to = 18 })
-  :drives(tone,  { from = 16000, to = 2500, curve = "exp" })
-
+-- Blocks own their knobs (params): `tape.params.amount`, `tone.params.freq`. Settings given as
+-- numbers are the knobs' start values.
+local tape = Blocks.Drive.new("tape", { amount = 6 })
+local tone = Blocks.LowPass.new("tone", { freq = 8000 })
 local comp = Blocks.FETCompressor.new("comp", { threshold = -18 })   -- metered: the UI can show it
-local chain = Chain.new({
-  Blocks.Drive.new("tape", { amount = drive }),
-  Blocks.LowPass.new("tone", { freq = tone }),
-  comp,
-})
+local chain = Chain.new({ tape, tone, comp })
 chain:add(Blocks.Gain.new("out", { db = -3 }))   -- it's code: loops and helper functions work
+
+-- Host-automatable (max 16), name shows up in the DAW; drives 1..n params.
+local character = Macro.new("character", "Character", { default = 0.3 })
+  :drives(tape.params.amount, { from = 0,     to = 18 })
+  :drives(tone.params.freq,   { from = 16000, to = 2500, curve = "exp" })
 
 return Patch.new("Tape Glow", {
   chain = chain, macros = { character },
   theme = { colors = { accent = "#ff8a3d", bg = "#17141c" }, fonts = { title = Font.new("fonts/Title.ttf") } },
-  panel = ui.Panel.new({ character = character, drive = drive, gr = comp }),
+  panel = ui.Panel.new({ character = character, drive = tape.params.amount, gr = comp }),
 })
 ```
-
 **Theme** = the patch's design tokens, shared by the library card and the ControlPanel (`p.theme`):
 `colors` (`"#rrggbb"`), `fonts` (`Font.new(path)`: .ttf/.otf, .svg SVG font, .fnt BMFont image font)
 and `images` (`Image.new(path)`: .svg/.png) with the patch's own names. The shell uses
@@ -117,10 +136,16 @@ local Panel = Component.define({
 return { Panel = Panel }
 ```
 
-- Params are objects, not strings: block settings, macros and UI components reference them
-  directly; the patch collects every param it reaches (no separate list). A param is either
-  **free** (own value, editable, persisted) or **driven by exactly one macro** (locked; dragging
-  its knob moves the macro).
+- **Params are block knobs**, objects, not strings: macros and UI components reference them
+  directly (`tape.params.amount`). Every param has a base value of its own (editable, saved with
+  the project).
+- **Modulation works like Serum's** ([`docs/research/serum-modulation.md`](docs/research/serum-modulation.md)):
+  each macro → param link is a slot with an amount (−100…+100 % of the knob's travel), uni/bi,
+  curve, invert and bypass. The slots' deltas add up on the knob's base in normalized space, are
+  clamped, and only then go through the knob's lin/log scale. Several macros may drive one knob.
+  `drives(param, { from, to })` sets the knob's base to `from` and the amount to the way from
+  `from` to `to`; in the shell, each slot gets a meta knob (amount, menu) and the knob shows the
+  range arc and a live dot. Slot edits are saved per DAW project.
 - Host slots stay fixed ("Macro 1..16" IDs); the `macros` list order assigns them. Automation stays
   on the slot across patch changes (same contract as e.g. Serum's macros).
 - Blocks, by category (the definitions file documents each as `--- <Category> · …`, shown on
@@ -152,7 +177,7 @@ return { Panel = Panel }
     `mix` (2 branches).
 - Oversampling per block, implemented once (`dsp/src/oversample.rs`, the `Oversampled` node): every
   block takes `oversampling = 1|2|4|8` (a routing block oversamples its whole subtree; nested
-  factors multiply, max 8×). Nonlinear blocks (`BlockKind::is_nonlinear`, today `Drive`) default to
+  factors multiply, max 8×). Nonlinear blocks (`BlockKind::is_nonlinear`: the distortion family) default to
   ≥ 88 kHz (2× at 44.1/48 kHz, none at 88.2 kHz+). Neighbouring blocks with the same factor share
   one up/down pair; blocks without their own setting between two of them join in.
   - Filters: linear-phase FIR halfbands (Kaiser, 71/23/19 taps per 2× stage, polyphase), ≥ 90 dB
@@ -166,7 +191,9 @@ return { Panel = Panel }
     Drive aliasing at 10.5 kHz (7.5 kHz, +24 dB): −25 dB → −65 dB.
 - UI: `Component.define`, instances via `X.new(...)`, drawing via `SVG.*`. `bind` takes a Macro or
   Param, `source` a metered block (compressors, rider, transient) or `Meters.IN/OUT`. Every
-  ControlPanel is 840×560 logical units (`UI.WIDTH/HEIGHT`), scaled by the shell.
+  ControlPanel is 840×560 logical units (`UI.WIDTH/HEIGHT`), scaled by the shell. A patch without
+  one shows its macros as plain knobs in its theme (the shell's Surface view). Planned: this
+  becomes the default panel, and panels get renamed to surfaces.
 - **Two layers of checking:**
   - *Editor / CI:* `luau-lsp` type-checks against `patches/.types/scriptfx.d.luau` (strict mode via
     `patches/.luaurc`): wrong prop types, missing props, a string where a Macro belongs, a
@@ -185,96 +212,3 @@ return { Panel = Panel }
     (`luau-lsp lsp --definitions=@scriptfx=<repo>/patches/.types/scriptfx.d.luau`), because the
     server ignores `types.definitionFiles` sent as LSP settings. Use the repo root as the project
     root, not the folder holding `patches/.luaurc`.
-
-## Findings: resvg/usvg (PoC #1, SVG panel + bindings — removed, superseded by components)
-
-**Mapping of the declarative model: very good.**
-- An SVG element `id` is the binding target. Designers keep using Inkscape/Figma; the Lua side
-  only names IDs. Theme → CSS classes via usvg's `style_sheet` option works without touching the SVG.
-- "Patch & reparse": bindings produce transform/style/text patches, which are spliced into the
-  original source at byte offsets (roxmltree positions) and then fully re-parsed. This is lossless,
-  so `xlink:href`, namespaces and existing `transform`/`style` attributes all survive. A DOM round-trip
-  with xmltree would have dropped namespace prefixes.
-- Hit areas for `drag` come from usvg bounding boxes and are refreshed after each render, so they
-  follow moving parts.
-- Validation at load time catches unknown macros/sources and escaping paths. Missing SVG IDs become warnings.
-
-**Security: good, with two things to configure explicitly.**
-- resvg has no scripting, network access or animation engine.
-- usvg's *default* `<image href>` resolver reads arbitrary local files, so it is replaced with one
-  restricted to the patch folder. DTDs are disabled for our own parse.
-- Lua (now Luau): sandbox mode (read-only globals/builtins), no `io/os/loadstring/getfenv/setfenv`,
-  `require` restricted to the patch folder, a 16 MB memory cap and an interrupt budget per call.
-
-**Performance: the weak spot.** Release build, 640×360 panel:
-
-| patch | lua animate | patch | usvg parse | resvg render | total @1x | total @2x |
-|---|---|---|---|---|---|---|
-| tape-glow (gradients, blur, text) | 22 µs | 15 µs | ~0.9 ms | ~4.2 ms | ~5.2 ms | ~13 ms |
-| clean-gain (flat) | – | 6 µs | 0.5 ms | 0.45 ms | 0.9 ms | 1.4 ms |
-
-- Lua per-frame scripting is essentially free (~25 µs), so a scripted UI thread is cheap.
-- The cost is the full-canvas CPU rasterization each frame. Removing blur and glow saves only
-  ~1 ms, so the canvas size dominates. Nothing renders when inputs are unchanged, but continuous
-  animation (reels) means a render every frame.
-- Next optimisation, if we keep resvg: split the document into static and dynamic runs, cache the
-  static layers as pixmaps and re-render only the dynamic nodes (`resvg::render_node`). Or move to a
-  GPU renderer with the same model (vello + vello_svg).
-
-**Fonts:** `load_system_fonts()` took **7.5 s cold** (73 ms warm). That's unacceptable in a DAW and
-also makes rendering differ between machines. Now the plugin bundles Noto Sans (≈2 ms) and patches can ship `fonts/`.
-
-## Findings: declarative chains (bass-helper)
-
-Engine: patch `chain` → `dsp::Graph` built off the audio thread → handed over through a
-lock-free queue (`rtrb`); replaced graphs travel back and are freed off the audio thread.
-32-sample sub-blocks, settings smoothed. Verified allocation-free (`assert_no_alloc` test over all patches).
-
-| patch | blocks | CPU (stereo 48 kHz, one core) |
-|---|---|---|
-| bass-helper | 11 (incl. split, 2 comps, rider, transient, drive, 4 EQ) | **0.7 %** |
-| tape-glow | 3 | 0.1 % |
-
-Macro sweeps on a synthetic bass line (`cargo run --release -p dsp --example bench`) show each
-macro does what it says (Transients: crest 10 → 19 dB; Stabilize: crest 13 → 10 dB at constant
-RMS; Drive: darker + denser; Boom/Click: band lifts).
-
-What it took / what's missing:
-- **Boilerplate**: every block setting a macro touches needs its own param
-  (bass-helper: 16 params for 7 macros). Idea: let macro targets address block settings
-  directly (`{ block = "fet", setting = "threshold", from = -4, to = -30 }`).
-- Settings are plain linear values: no expressions (e.g. "threshold relative to input level").
-  Auto-makeup had to become a block feature (static formula over-compensated by ~8 dB on quiet input).
-- Topology: serial, N-band split, parallel branches with crossfade (all nestable). Missing:
-  sidechain (e.g. low band keying the comp), modulators (LFO/envelope as sources), lookahead.
-- Graph swap resets DSP state → a click on patch switch / hot reload (needs a crossfade).
-- Drive aliased at high settings (fixed: per-block oversampling, see Patch model).
-
-## Integration findings (plugin framework + shell)
-
-- Shell: iced on nice-plug (see docs/research/shell-ui-toolkit.md). Component layers → one iced
-  image each, positioned in the stage; a small pointer widget turns input into param changes.
-- Macro sliders are auto-generated with patch units (controls sheet, Settings in the notch).
-- **Host params are fixed**: 16 slots; patches map their macros onto them in order. DAWs
-  don't tolerate parameter lists that change at runtime, but renaming is fine (automation is
-  keyed by ID). The vendored nice-plug is patched to push names (VST3 `kParamTitlesChanged`,
-  CLAP `RESCAN_INFO`). **Needs testing per host** (Reaper, Carla, Studio One 6, Fender Studio).
-- The patch name is persisted with the host project. Routing (macro → DSP) is applied in
-  `activate()` so audio is right even when the editor never opens.
-
-## Linux gotchas found on this machine (NVIDIA + Hyprland/XWayland + PipeWire)
-
-- The shell renders with wgpu (Vulkan), no GL: the old GLX problems on the NVIDIA proprietary
-  driver are gone, the standalone needs no Mesa workaround.
-- X11 frame pacing under XWayland: see vendor/baseview/PATCHES.md.
-- Standalone with **JACK backend on PipeWire never called `process()`**, so parameters never
-  updated. `-b alsa` works.
-- Tiling WMs resize the standalone window, but the editor stays 900×560 (top-left).
-
-## Next
-
-- [ ] Passive mode (master instance) + pulling the master capture into a track's listen
-- [ ] Macro targets on block settings directly (less param boilerplate)
-- [ ] Crossfade on graph swap
-- [ ] Verify host name updates: Reaper (VST3 + CLAP), Carla, Studio One 6 (mac), Fender Studio (win)
-- [ ] Investigate baseview GLX on NVIDIA

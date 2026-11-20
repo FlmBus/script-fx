@@ -1,12 +1,12 @@
 # Shell UI reboot: toolkit assessment, research, plan
 
 _2026-11-18. Question (Flemming): rebuild the shell UI with GPUI or one of the other contenders?
-Status: **decided: iced, spike done, built into the plugin** (2026-11-18; see STATUS "Where we left off").
+Status: **decided: iced, spike done, built into the plugin** (2026-11-18; what it built: [`../HISTORY.md`](../HISTORY.md), "New shell built").
 Later findings there supersede the frame-pacing notes below: vsync stays off in plugins; baseview's
 frame timer + a slow iced_baseview poll timer fix it (`vendor/baseview/PATCHES.md`).
 Flemming's goal: UI code that is clean, easy to understand, split into components or sections, and
 stays maintainable while we tinker. How the toolkit works inside doesn't matter._ Related: [`raster-ui-plan.md`](raster-ui-plan.md)
-(GPU layers + WGSL shaders), STATUS "Shell layout" (v7 mockup)._
+(GPU layers + WGSL shaders), HISTORY "Shell layout and patch UI, as decided then" (v7 mockup)._
 
 ## 1. Assessment: what we have, what the shell must do
 

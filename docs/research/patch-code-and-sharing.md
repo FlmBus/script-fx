@@ -1,6 +1,6 @@
 # How much code do patches get, and can they be shared safely?
 
-_Research notes, 2026-11-18. Feeds the "Direction" item in [`STATUS.md`](../STATUS.md)._
+_Research notes, 2026-11-18. Feeds "Open directions: Patch code and graph patches" in [`STATUS.md`](../STATUS.md)._
 
 ## The question
 
