@@ -2,7 +2,7 @@
 
 _2026-11-19. Question (Flemming): which platform abstraction/adapter should the LLM integration use,
 ideally one that also supports Claude Code subscriptions? Status: **research; recommendation at the
-end** (own trait + two adapter families, not one framework). Related: STATUS TODO "LLM research",
+end** (own trait + two adapter families, not one framework). Related: STATUS next steps "LLM integration",
 [`../STATUS.md`](../STATUS.md)._
 
 Prices, quotas and ToS below were read on 2026-11-18/19; free tiers move monthly, so re-check before
