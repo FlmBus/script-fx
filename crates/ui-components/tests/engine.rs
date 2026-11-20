@@ -18,14 +18,14 @@ fn frame(ui: &mut Ui, binds: &HashMap<String, f32>, hover: Option<u64>) {
 fn only_the_changed_leaf_rerenders() {
     let mut ui = Ui::load(&fixture("nested")).unwrap();
     let mut binds: HashMap<String, f32> =
-        ["low1", "low2", "low3", "low4", "high1", "high2", "high3", "high4"].iter().map(|k| (format!("param.{k}"), 0.4)).collect();
+        ["low1", "low2", "low3", "low4", "high1", "high2", "high3", "high4"].iter().map(|k| (format!("param.{k}.db"), 0.4)).collect();
     frame(&mut ui, &binds, None);
     assert!(ui.stats.renders >= 15, "first frame renders everything");
 
     frame(&mut ui, &binds, None);
     assert_eq!(ui.stats.renders, 0, "nothing changed");
 
-    binds.insert("param.low3".into(), 0.9);
+    binds.insert("param.low3.db".into(), 0.9);
     frame(&mut ui, &binds, None);
     assert_eq!(ui.stats.renders, 1, "only the knob bound to low3");
     assert_eq!(ui.stats.rasters, 1);

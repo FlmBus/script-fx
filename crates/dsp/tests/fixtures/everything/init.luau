@@ -1,10 +1,9 @@
 -- Every block from the distortion, filter, modulation, space, pitch, rhythm and
 -- dynamics catalogue at least once (allocation-free test, type check, bench).
-local cutoff = Param.new("cutoff", "Cutoff", { min = 200, max = 8000, default = 1200, unit = "Hz" })
-local stutter = Param.new("stutter", "Stutter", { min = 0, max = 1, default = 1 })
-local freeze = Param.new("freeze", "Freeze", { min = 0, max = 1, default = 0 })
-local sweep = Macro.new("sweep", "Sweep"):drives(cutoff, { from = 300, to = 6000, curve = "exp" })
-local hold = Macro.new("hold", "Hold"):drives(stutter)
+local morph = Blocks.MorphFilter.new("morph", { freq = 1200, morph = 30, resonance = 40 })
+local stutter = Blocks.Stutter.new("stutter", { active = 1, sync = "1/16" })
+local sweep = Macro.new("sweep", "Sweep"):drives(morph.params.freq, { from = 300, to = 6000, curve = "exp" })
+local hold = Macro.new("hold", "Hold"):drives(stutter.params.active)
 
 local chain = Chain.new({
   Blocks.Waveshaper.new("shape", { curve = function(x) return math.tanh(3 * x) / math.tanh(3) end, drive = 3 }),
@@ -14,7 +13,7 @@ local chain = Chain.new({
   Blocks.Bitcrusher.new("crush", { bits = 10, rate = 22050, mix = 20 }),
   Blocks.RingMod.new("ring", { freq = 220, mix = 10 }),
   Blocks.Tape.new("tape", { drive = 4, wow = 30, flutter = 30 }),
-  Blocks.MorphFilter.new("morph", { freq = cutoff, morph = 30, resonance = 40 }),
+  morph,
   Blocks.LadderFilter.new("ladder", { freq = 6000, resonance = 30, drive = 3 }),
   Blocks.CombFilter.new("comb", { freq = 110, feedback = 60, mix = 20 }),
   Blocks.Formant.new("vowel", { vowel = 1.5, mix = 30 }),
@@ -33,11 +32,11 @@ local chain = Chain.new({
       Blocks.Drive.new("echo_drive", { amount = 6 }),
     }),
   }),
-  Blocks.Reverb.new("verb", { size = 70, decay = 3, predelay = 20, mix = 20, freeze = freeze }),
+  Blocks.Reverb.new("verb", { size = 70, decay = 3, predelay = 20, mix = 20, freeze = 0 }),
   Blocks.Shimmer.new("shimmer", { decay = 5, mix = 15, amount = 60 }),
   Blocks.PitchShift.new("pitch", { semitones = -5, mix = 20 }),
   Blocks.Granular.new("grains", { density = 30, pitch = 12, jitter = 20, reverse = 30, mix = 20 }),
-  Blocks.Stutter.new("stutter", { active = stutter, sync = "1/16" }),
+  stutter,
   Blocks.Gate.new("gate", { threshold = -70, ratio = 3 }),
   Blocks.DeEsser.new("deess", { threshold = -30 }),
   Blocks.Limiter.new("limit", { ceiling = -0.5, lookahead = 1.5 }),

@@ -8,7 +8,7 @@ use std::time::{Instant, SystemTime};
 use nice_plug::context::gui::GuiContext;
 use nice_plug::prelude::*;
 use nice_plug_iced::iced::Color;
-use patch::{MACRO_SLOTS, Patch, Values};
+use patch::{MACRO_SLOTS, ModSettings, Patch, Values};
 
 use super::brand::{self, Brand};
 use super::stage::Panel;
@@ -85,10 +85,11 @@ impl Session {
     /// instead of keeping the values restored from the host project.
     pub fn load(&mut self, ctx: &GuiContext, params: &FxParams, shared: &Shared, folder: &str, reset: bool) {
         let dir = patches_root().join(folder);
-        let patch = match Patch::load(&dir) {
+        let mut patch = match Patch::load(&dir) {
             Ok(p) => p,
             Err(e) => {
                 self.error = Some(format!("{folder}: {e}").replace('\t', "  "));
+                nice_log!("patch error: {folder}: {e}");
                 return;
             }
         };
@@ -103,6 +104,7 @@ impl Session {
                 Ok(p) => Some(p),
                 Err(e) => {
                     self.error = Some(format!("{folder} (panel): {e}").replace('\t', "  "));
+                    nice_log!("panel error: {folder}: {e}");
                     return;
                 }
             }
@@ -119,6 +121,8 @@ impl Session {
                 stored.insert(p.id.clone(), p.default_plain());
             }
             drop(stored);
+            // A new patch starts with its own mappings.
+            params.mod_settings.write().unwrap().clear();
             for i in 0..patch.macros.len() {
                 let p = &params.macros[i].value;
                 setter.begin_set_parameter(p);
@@ -126,6 +130,7 @@ impl Session {
                 setter.end_set_parameter(p);
             }
         }
+        params.apply_mod_settings(&mut patch);
         self.free = params.free_values(&patch);
         shared.publish(&patch, &self.free);
         params.set_macro_names(&patch);
@@ -165,6 +170,16 @@ impl Session {
         params.param_values.write().unwrap().insert(spec.id.clone(), plain);
     }
 
+    /// A meta knob changed param `param`'s `k`-th modulation: the UI's patch, the playing graph,
+    /// and the project (saved with it).
+    pub fn set_mod(&mut self, params: &FxParams, shared: &Shared, param: usize, k: usize, settings: ModSettings) {
+        let Some(cur) = &mut self.current else { return };
+        let Some(m) = cur.patch.modulations.get_mut(param).and_then(|m| m.get_mut(k)) else { return };
+        m.settings = settings;
+        shared.set_mod(cur.patch.mod_index(param, k), settings);
+        params.mod_settings.write().unwrap().insert(cur.patch.mod_key(param, k), settings);
+    }
+
     /// Once per frame: hot reload, then the values the UI shows.
     pub fn tick(&mut self, ctx: &GuiContext, params: &FxParams, shared: &Shared) {
         self.poll_hot_reload(ctx, params, shared);
@@ -175,6 +190,8 @@ impl Session {
         if let Some(cur) = &self.current {
             let macros = self.values.macros;
             cur.patch.compute_params(&macros, &self.free, &mut self.values.params);
+            self.values.bases.clear();
+            self.values.bases.extend(cur.patch.params.iter().zip(&self.free).map(|(p, f)| p.normalize(*f)));
         }
         let level = |g: f32| ((util::gain_to_db(g) + 60.0) / 60.0).clamp(0.0, 1.0);
         self.values.meter_in = level(shared.meter_in.load(std::sync::atomic::Ordering::Relaxed));

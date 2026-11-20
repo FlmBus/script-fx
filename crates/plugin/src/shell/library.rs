@@ -7,11 +7,10 @@ use std::collections::HashSet;
 use nice_plug_iced::iced::{
     Border, Center, Color, Element, Fill, Gradient, Padding, Shadow, Theme, Vector,
     gradient::Linear,
-    widget::{button, column, container, image, row, scrollable, space, svg, text},
+    widget::{button, column, container, row, scrollable, space, text},
 };
 
-use super::brand::Logo;
-use super::{icons, session::PatchInfo, sheet, theme};
+use super::{brand, icons, session::PatchInfo, sheet, theme};
 
 pub struct Library {
     open: HashSet<String>,
@@ -90,28 +89,8 @@ impl Library {
         let (accent, bg) = (p.accent, p.bg);
 
         // The patch's own logo, else its name in its own font (SVG/BMFont: an image) and colour.
-        let title: Element<'a, Message> = match (&p.brand.logo, &p.brand.title) {
-            (None, Some((handle, w, h))) => {
-                let k = (150.0 / w).min(1.0);
-                image(handle.clone()).width(w * k).height(h * k).into()
-            }
-            _ => match &p.brand.logo {
-            Some((logo, aspect)) => {
-                let (h, max_w) = (14.0, 150.0);
-                let w = (h * aspect).min(max_w);
-                match logo {
-                    Logo::Svg(handle) => svg(handle.clone()).width(w).height(w / aspect).into(),
-                    Logo::Image(handle) => image(handle.clone()).width(w).height(w / aspect).into(),
-                }
-            }
-            None => text(&p.name)
-                .size(if p.brand.font.is_some() { 13 } else { 12 })
-                .font(p.brand.font.unwrap_or(theme::font::SANS_SEMIBOLD))
-                .color(if p.broken { theme::c().frame_muted } else { accent })
-                .wrapping(text::Wrapping::None)
-                .into(),
-            },
-        };
+        let colour = if p.broken { theme::c().frame_muted } else { accent };
+        let title = brand::title(&p.brand, &p.name, colour, 14.0, 150.0);
         let header = button(
             container(
                 row![

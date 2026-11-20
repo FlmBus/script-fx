@@ -16,6 +16,8 @@ nice-plug-iced = { version = "0.5.0", features = ["markdown", "svg", "canvas", "
 # Vendored + patched (frame timing for the dev readout and later the GPU budget),
 # see vendor/iced_wgpu/PATCHES.md.
 iced_wgpu = "0.14"
+# Text measuring at view time (the chain view sizes its nodes and cards), same version iced uses.
+iced_graphics = "0.14"
 patch = { version = "0.1.0", path = "../patch" }
 # Patch logos (SVG size, PNG decode) and fonts (family/weight), same versions ui-components uses.
 resvg = "0.50.0"
@@ -25,5 +27,16 @@ serde_json = "1.0.154"
 ui-components = { version = "0.1.0", path = "../ui-components" }
 dark-light = "3.0.0"
 
+# Diagnostics builds (`--features diagnostics`, `src/diag.rs`): a detailed log file.
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std", "tracing-log"], optional = true }
+
+[features]
+diagnostics = ["dep:tracing", "dep:tracing-subscriber"]
+
 [lib]
 crate-type = ["cdylib", "lib"]
+
+# Locking the pointer in place while a knob drags (`shell/pointer_lock.rs`): our own X connection.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13.2", default-features = false }

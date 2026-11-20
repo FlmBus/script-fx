@@ -3573,6 +3573,7 @@ dependencies = [
  "dirs",
  "dsp",
  "hound",
+ "iced_graphics",
  "iced_wgpu",
  "include_dir",
  "nice-plug",
@@ -3581,8 +3582,11 @@ dependencies = [
  "resvg 0.50.0",
  "rtrb",
  "serde_json",
+ "tracing",
+ "tracing-subscriber",
  "ttf-parser",
  "ui-components",
+ "x11rb",
 ]
 
 [[package]]

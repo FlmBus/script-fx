@@ -7,13 +7,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, RwLock};
 
-use dsp::{Atomics, Frame, Graph, SUB_BLOCK};
+use dsp::{Atomics, Frame, Graph, ModAtomics, SUB_BLOCK};
 use include_dir::{Dir, include_dir};
 use nice_plug::prelude::*;
 use nice_plug_iced::IcedEditorState;
 use nice_plug_iced::iced::PollSubNotifier;
-use patch::{MACRO_SLOTS, Patch};
+use patch::{MACRO_SLOTS, ModSettings, Patch};
 
+mod diag;
 mod listen;
 mod shell;
 mod user_settings;
@@ -38,9 +39,10 @@ pub struct CaptureBuf {
 }
 
 /// Editor window size (logical px), fixed.
-/// 836 × 640: the patch window is exactly the 840×560 panel's 3:2 at 816×544 (see
-/// `theme::stage_size`). The library floats over it as a sheet, so it takes no column.
-pub const WINDOW_SIZE: (f32, f32) = (836.0, 640.0);
+/// 836 × 598: the patch window is exactly the 840×560 panel's 3:2 at 816×544 (see
+/// `theme::stage_size`). The library floats over it as a sheet, so it takes no column; notch
+/// and drawer hang into it, so they take no row.
+pub const WINDOW_SIZE: (f32, f32) = (836.0, 598.0);
 const PEAK_DECAY_MS: f32 = 300.0;
 const GRAPH_QUEUE: usize = 16;
 
@@ -157,6 +159,7 @@ fn install_factory_patches(root: &Path) {
 struct Live {
     free: Atomics,
     meters: Atomics,
+    mods: ModAtomics,
 }
 
 /// State shared between audio thread, editor and `activate()`.
@@ -242,7 +245,7 @@ impl Shared {
     /// `Patch::empty()` = no patch (passthrough).
     pub fn publish(&self, patch: &Patch, free: &[f32]) {
         let graph = Box::new(Graph::build(patch, self.sample_rate.load(Ordering::Relaxed), free));
-        *self.live.lock().unwrap() = Some(Live { free: graph.free_values(), meters: graph.meters() });
+        *self.live.lock().unwrap() = Some(Live { free: graph.free_values(), meters: graph.meters(), mods: graph.mod_settings() });
         while self.garbage_rx.lock().unwrap().pop().is_ok() {}
         if self.graph_tx.lock().unwrap().push(graph).is_err() {
             nice_log!("graph queue full, dropping update");
@@ -254,6 +257,16 @@ impl Shared {
         if let Some(live) = &*self.live.lock().unwrap() {
             if let Some(v) = live.free.get(param) {
                 v.store(plain, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// A modulation's settings changed (meta knob): lock-free write into the playing graph.
+    /// `index`: [`Patch::mod_index`].
+    pub fn set_mod(&self, index: usize, settings: ModSettings) {
+        if let Some(live) = &*self.live.lock().unwrap() {
+            if let Some(m) = live.mods.get(index) {
+                m.store(settings.pack(), Ordering::Relaxed);
             }
         }
     }
@@ -284,6 +297,11 @@ pub struct FxParams {
     #[persist = "param-values"]
     pub param_values: RwLock<HashMap<String, f32>>,
 
+    /// The modulation slots' settings (amount, uni/bi, curve, bypass: the meta knobs), by
+    /// [`Patch::mod_key`]. Missing = what the patch defines.
+    #[persist = "mod-slots"]
+    pub mod_settings: RwLock<HashMap<String, ModSettings>>,
+
     /// Generic host-automatable slots. Hosts don't handle parameter lists that
     /// change at runtime, so patches map their macros onto these. Their names
     /// follow the patch via the patched nih-plug (`with_dynamic_name`).
@@ -300,6 +318,7 @@ impl Default for FxParams {
         Self {
             patch_name: RwLock::new(String::new()),
             param_values: RwLock::new(HashMap::new()),
+            mod_settings: RwLock::new(HashMap::new()),
             macros: std::array::from_fn(|i| MacroParams {
                 value: FloatParam::new(format!("Macro {}", i + 1), 0.0, FloatRange::Linear {
                     min: 0.0,
@@ -324,6 +343,18 @@ impl FxParams {
             .iter()
             .map(|p| stored.get(&p.id).copied().unwrap_or_else(|| p.default_plain()))
             .collect()
+    }
+
+    /// Puts the saved meta-knob settings into the patch's modulations (before building its graph).
+    pub fn apply_mod_settings(&self, patch: &mut Patch) {
+        let stored = self.mod_settings.read().unwrap();
+        for i in 0..patch.modulations.len() {
+            for k in 0..patch.modulations[i].len() {
+                if let Some(s) = stored.get(&patch.mod_key(i, k)) {
+                    patch.modulations[i][k].settings = *s;
+                }
+            }
+        }
     }
 
     /// Sets the host-visible macro names. Caller must request a rescan.
@@ -401,17 +432,30 @@ impl Plugin for ScriptFx {
         self.params.clone()
     }
 
+    /// Diagnostics builds log to a file (`diag.rs`); otherwise nice-plug's default.
+    fn setup_logger() -> Option<bool> {
+        diag::setup_logger()
+    }
+
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Self::Editor> {
         shell::create(self.editor_state.clone(), self.notifier.clone(), self.params.clone(), self.shared.clone())
     }
 
     fn activate(
         &mut self,
-        _layout: &AudioIOLayout,
+        layout: &AudioIOLayout,
         buffer_config: &BufferConfig,
         context: &mut impl ActivateContext<Self>,
     ) -> bool {
         let sr = buffer_config.sample_rate;
+        nice_log!(
+            "activate: {sr} Hz, buffers {}..{} samples, {:?} in / {:?} out, mode {:?}",
+            buffer_config.min_buffer_size.unwrap_or(0),
+            buffer_config.max_buffer_size,
+            layout.main_input_channels,
+            layout.main_output_channels,
+            buffer_config.process_mode
+        );
         self.shared.sample_rate.store(sr, Ordering::Relaxed);
         self.shared.allocate_capture(sr);
         if let Some(path) = std::env::var_os("SCRIPTFX_TEST_INPUT") {
@@ -441,12 +485,13 @@ impl Plugin for ScriptFx {
             return true;
         }
         match Patch::load(patches_root().join(&name)) {
-            Ok(p) => {
+            Ok(mut p) => {
+                self.params.apply_mod_settings(&mut p);
                 let graph = Box::new(Graph::build(&p, sr, &self.params.free_values(&p)));
                 // Oversampled blocks delay the signal; the host compensates.
                 context.set_latency_samples(graph.latency() as u32);
                 *self.shared.live.lock().unwrap() =
-                    Some(Live { free: graph.free_values(), meters: graph.meters() });
+                    Some(Live { free: graph.free_values(), meters: graph.meters(), mods: graph.mod_settings() });
                 self.graph = Some(graph);
                 self.params.set_macro_names(&p);
                 context.rescan_param_info();
@@ -462,6 +507,8 @@ impl Plugin for ScriptFx {
         _aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
+        let started = std::time::Instant::now();
+        let mut finite = true;
         // Swap in newly published graphs; old ones go back to be dropped elsewhere.
         while let Ok(next) = self.graph_rx.pop() {
             // Lock-free; nih-plug only tells the host if the latency changed.
@@ -512,6 +559,7 @@ impl Plugin for ScriptFx {
             if let Some(g) = &mut self.graph {
                 g.process(&macros, &mut frames[..n]);
             }
+            finite &= frames[..n].iter().all(|f| f[0].is_finite() && f[1].is_finite());
             self.shared.capture_block(&input[..n], &frames[..n]);
             for ch in 0..2 {
                 if let Some(s) = block.get_mut(ch) {
@@ -528,6 +576,10 @@ impl Plugin for ScriptFx {
 
         self.shared.meter_in.store(peak_in, Ordering::Relaxed);
         self.shared.meter_out.store(peak_out, Ordering::Relaxed);
+        // Timing against the buffer's real-time budget (diagnostics builds report it).
+        let sr = self.shared.sample_rate().max(1.0);
+        let budget = std::time::Duration::from_secs_f64(buffer.samples() as f64 / sr as f64);
+        diag::AUDIO.record(started.elapsed(), budget, finite);
         ProcessStatus::Normal
     }
 }

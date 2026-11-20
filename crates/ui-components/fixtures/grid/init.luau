@@ -1,6 +1,6 @@
 -- 120 knobs (12 x 10), each bound to its own parameter.
 local params = {}
-for i = 0, 119 do params[i] = Param.new("p" .. i, "P" .. i, { min = 0, max = 1 }) end
+for i = 0, 119 do params[i] = Blocks.Gain.new("g" .. i).params.db end
 
 local Knob = Component.define {
   name = "Knob", kind = "knob", size = { 64, 54 },

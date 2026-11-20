@@ -2,22 +2,22 @@
 
 local ui = require("@self/ui")
 
-local gain     = Param.new("gain",     "Gain",     { min = 0,   max = 36, unit = "dB", decimals = 1, default = 14 })
-local presence = Param.new("presence", "Presence", { min = -6,  max = 9,  unit = "dB", decimals = 1, default = 2 })
-local master   = Param.new("master",   "Master",   { min = -24, max = 6,  unit = "dB", decimals = 1, default = -6 })
+local preamp   = Blocks.Drive.new("preamp", { amount = 14, mix = 100 })
+local presence = Blocks.HighShelf.new("presence", { freq = 3500, q = 0.7, gain = 2 })
+local master   = Blocks.Gain.new("master", { db = -6 })
 
 local chain = Chain.new {
-  Blocks.HighPass.new("tight",    { freq = 90, q = 0.7 }),
-  Blocks.Drive.new("preamp",      { amount = gain, mix = 100 }),
-  Blocks.HighShelf.new("presence", { freq = 3500, q = 0.7, gain = presence }),
-  Blocks.LowPass.new("cab",       { freq = 5500, q = 0.8 }),
-  Blocks.Gain.new("master",       { db = master }),
+  Blocks.HighPass.new("tight", { freq = 90, q = 0.7 }),
+  preamp,
+  presence,
+  Blocks.LowPass.new("cab", { freq = 5500, q = 0.8 }),
+  master,
 }
 
 local macros = {
-  gain = Macro.new("gain", "Gain"):drives(gain),
-  presence = Macro.new("presence", "Presence"):drives(presence),
-  master = Macro.new("master", "Master"):drives(master),
+  gain = Macro.new("gain", "Gain"):drives(preamp.params.amount, { from = 0, to = 36 }),
+  presence = Macro.new("presence", "Presence"):drives(presence.params.gain, { from = -6, to = 9 }),
+  master = Macro.new("master", "Master"):drives(master.params.db, { from = -24, to = 6 }),
 }
 
 return Patch.new("Junkyard Amp", {

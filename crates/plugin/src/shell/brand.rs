@@ -13,9 +13,9 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use nice_plug_iced::iced::{
-    Color, Font,
+    Color, Element, Font,
     font::{Family, Stretch, Style, Weight},
-    widget::{image, svg},
+    widget::{image, svg, text},
 };
 
 #[derive(Clone)]
@@ -31,6 +31,33 @@ pub struct Brand {
     /// The title rendered in an SVG or BMFont font: image + logical size.
     pub title: Option<(image::Handle, f32, f32)>,
     pub logo: Option<(Logo, f32)>,
+}
+
+/// The patch's title as an element: its logo, else its name in its own font (an SVG/BMFont title
+/// is an image) in `colour`, else its name in the shell's font. `height`: the logo's height and
+/// the text's size (14 = the library card); `max_width` caps logos and title images.
+pub fn title<'a, M: 'a>(brand: &'a Brand, name: &'a str, colour: Color, height: f32, max_width: f32) -> Element<'a, M> {
+    let scale = height / 14.0;
+    match (&brand.logo, &brand.title) {
+        // Title images are rendered at OVERSAMPLE×, so they stay crisp up to that scale.
+        (None, Some((handle, w, h))) => {
+            let k = (max_width / w).min(scale.min(OVERSAMPLE));
+            image(handle.clone()).width(w * k).height(h * k).into()
+        }
+        (Some((logo, aspect)), _) => {
+            let w = (height * aspect).min(max_width);
+            match logo {
+                Logo::Svg(handle) => svg(handle.clone()).width(w).height(w / aspect).into(),
+                Logo::Image(handle) => image(handle.clone()).width(w).height(w / aspect).into(),
+            }
+        }
+        (None, None) => text(name)
+            .size(if brand.font.is_some() { height - 1.0 } else { height - 2.0 })
+            .font(brand.font.unwrap_or(super::theme::font::SANS_SEMIBOLD))
+            .color(colour)
+            .wrapping(text::Wrapping::None)
+            .into(),
+    }
 }
 
 /// Title size on the library card (logical px): SVG font em size, BMFont line height.

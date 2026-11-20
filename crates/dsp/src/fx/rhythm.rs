@@ -13,10 +13,10 @@ const FADE_MS: f32 = 2.0;
 pub(super) fn build(kind: &BlockKind, a: &Args) -> Box<dyn Fx> {
     match kind {
         BlockKind::Stutter { active, length, sync, mix } => Box::new(Stutter {
-            active: a.req(active),
-            length: a.p(length, 125.0),
+            active: a.p(active),
+            length: a.p(length),
             sync: *sync,
-            mix: a.p(mix, 100.0),
+            mix: a.p(mix),
             lines: [Line::new(a.samples(SLICE_MAX_MS)), Line::new(a.samples(SLICE_MAX_MS))],
             on: false,
             elapsed: 0,

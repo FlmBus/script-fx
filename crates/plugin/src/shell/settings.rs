@@ -9,7 +9,7 @@ use nice_plug_iced::iced::{
     widget::{button, column, container, row, scrollable, space, text},
 };
 
-use super::{icons, sheet, theme};
+use super::{icons, sheet, tabs, theme};
 use crate::user_settings::{self, ThemeMode};
 
 #[derive(Debug, Clone)]
@@ -104,10 +104,9 @@ fn segment_style(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     }
 }
 
-/// Auto | Light | Dark.
+/// Auto | Light | Dark, with the highlight sliding between them.
 fn theme_switch<'a>(mode: ThemeMode) -> Element<'a, Message> {
-    let segment = |m: ThemeMode| -> Element<'a, Message> {
-        let on = m == mode;
+    let segment = |m: ThemeMode, on: bool| -> Element<'a, Message> {
         let (icon, label) = match m {
             ThemeMode::System => (icons::AUTO, "Auto"),
             ThemeMode::Light => (icons::SUN, "Light"),
@@ -121,10 +120,18 @@ fn theme_switch<'a>(mode: ThemeMode) -> Element<'a, Message> {
         .on_press(Message::SetTheme(m))
         .height(24)
         .padding(Padding { left: 8.0, right: 9.0, ..Padding::ZERO })
-        .style(segment_style(on))
+        .style(tabs::style(on, segment_style(on)))
         .into()
     };
-    track(row(ThemeMode::ALL.into_iter().map(segment)).spacing(2).into())
+    let off = row(ThemeMode::ALL.into_iter().map(|m| segment(m, false))).spacing(2);
+    let on = row(ThemeMode::ALL.into_iter().map(|m| segment(m, true))).spacing(2);
+    let selected = ThemeMode::ALL.iter().position(|m| *m == mode);
+    let pill = tabs::Pill {
+        background: theme::c().paper_ink,
+        radius: theme::RADIUS_BUTTON - 2.0,
+        shadow: Default::default(),
+    };
+    track(tabs::tabs(off, on, selected, pill).into())
 }
 
 /// − 100 % +

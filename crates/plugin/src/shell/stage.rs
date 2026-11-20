@@ -14,12 +14,12 @@ use nice_plug_iced::iced::{
         widget::{Tree, tree},
     },
     keyboard,
-    widget::{canvas, center, column, container, image, pin, stack, text},
+    widget::{canvas, column, container, image, pin, stack},
 };
-use patch::{Control, Patch, Source, Values};
+use patch::{Patch, Source, Values};
 use ui_components::{Bound, Hit, Inputs};
 
-use super::theme;
+use super::{pointer_lock, theme};
 
 /// A ControlPanel and its interaction state.
 pub struct Panel {
@@ -42,8 +42,8 @@ pub enum Target {
 
 struct Drag {
     target: Target,
-    start: f32,
-    start_y: f32,
+    /// The value and the locked pointer.
+    drag: pointer_lock::Drag,
 }
 
 /// What the panel wants changed; the shell applies it (host params need the GUI context).
@@ -107,9 +107,12 @@ impl Panel {
                     Some(Bound { value: v, display: patch.macro_text(slot, v), locked: false })
                 }
                 Source::Param(i) => {
-                    let v = values.params.get(i).copied().unwrap_or(0.0);
-                    let locked = !matches!(patch.controls[i], Control::Free);
-                    Some(Bound { value: v, display: patch.params[i].display(v), locked })
+                    // A modulated param stays editable: the knob drags its base value. The text
+                    // says what's heard (after modulation): panels can't show the range arc or
+                    // the live dot, the shell never draws on patch art.
+                    let v = values.base(i);
+                    let heard = values.params.get(i).copied().unwrap_or(v);
+                    Some(Bound { value: v, display: patch.params[i].display(heard), locked: false })
                 }
                 _ => None,
             }
@@ -157,16 +160,12 @@ impl Panel {
             Pointer::Moved(p) => {
                 if let Some(d) = &mut self.drag {
                     let fine = if self.fine { FINE } else { 1.0 };
-                    let v = (d.start - (p.y - d.start_y) * fine / DRAG_RANGE).clamp(0.0, 1.0);
+                    // Relative to the last event: the pointer stays locked where it grabbed.
+                    let v = d.drag.moved(p.y, fine / DRAG_RANGE, 0.0..=1.0);
                     out.push(match d.target {
                         Target::Macro(slot) => Change::SetMacro(slot, v),
                         Target::Param(i) => Change::SetFree(i, patch.params[i].plain(v)),
                     });
-                    if self.fine {
-                        // Fine mode is relative: rebase so toggling shift doesn't jump.
-                        d.start = v;
-                        d.start_y = p.y;
-                    }
                 } else {
                     self.hover = self.ui.hit(p.x, p.y);
                 }
@@ -195,9 +194,9 @@ impl Panel {
                                 out.push(Change::BeginMacro(slot));
                                 values.macros[slot]
                             }
-                            Target::Param(i) => values.params.get(i).copied().unwrap_or(0.0),
+                            Target::Param(i) => values.base(i),
                         };
-                        self.drag = Some(Drag { target: t, start, start_y: p.y });
+                        self.drag = Some(Drag { target: t, drag: pointer_lock::Drag::start(start, p.y) });
                         self.active = Some(hit.id);
                     }
                 } else if hit.kind == "button" {
@@ -218,7 +217,7 @@ impl Panel {
                         out.extend([Change::BeginMacro(slot), Change::SetMacro(slot, v), Change::EndMacro(slot)]);
                     }
                     Target::Param(i) => {
-                        let v = (values.params.get(i).copied().unwrap_or(0.0) + step).clamp(0.0, 1.0);
+                        let v = (values.base(i) + step).clamp(0.0, 1.0);
                         out.push(Change::SetFree(i, patch.params[i].plain(v)));
                     }
                 }
@@ -241,15 +240,20 @@ impl Panel {
         out
     }
 
+    /// No hand over knobs and faders, hidden while dragging one; the hand stays for buttons.
     fn cursor(&self) -> mouse::Interaction {
         if self.drag.is_some() {
-            return mouse::Interaction::ResizingVertically;
+            return mouse::Interaction::Hidden;
         }
         match self.hover.as_ref().map(|h| h.kind.as_str()) {
-            Some("knob") => mouse::Interaction::ResizingVertically,
+            Some("knob" | "fader" | "slider") | None => mouse::Interaction::None,
             Some(_) => mouse::Interaction::Pointer,
-            None => mouse::Interaction::default(),
         }
+    }
+
+    /// Is a control being dragged (the shell hides the cursor meanwhile)?
+    pub fn dragging(&self) -> bool {
+        self.drag.is_some()
     }
 
     pub fn stats(&self) -> ui_components::FrameStats {
@@ -257,14 +261,12 @@ impl Panel {
     }
 }
 
-/// Resolves what a control drags: a macro-driven param drags its macro instead.
-fn target(patch: &Patch, src: &Source) -> Option<Target> {
+/// Resolves what a control drags. Params always drag their own base value, also when macros
+/// modulate them (the macros add offsets around it).
+fn target(_patch: &Patch, src: &Source) -> Option<Target> {
     match *src {
         Source::Macro(slot) => Some(Target::Macro(slot)),
-        Source::Param(i) => match patch.controls[i] {
-            Control::Free => Some(Target::Param(i)),
-            Control::Macro { slot, .. } => Some(Target::Macro(slot)),
-        },
+        Source::Param(i) => Some(Target::Param(i)),
         _ => None,
     }
 }
@@ -291,35 +293,24 @@ pub fn panel_fit() -> (f32, Vector) {
 }
 
 /// The patch window. `bg`: the patch's background colour (fills around the panel).
-pub fn view<'a>(patch: &'a Patch, panel: Option<&'a Panel>, bg: Color) -> Element<'a, Pointer> {
+pub fn view<'a>(panel: &'a Panel, bg: Color) -> Element<'a, Pointer> {
     let (s, offset) = panel_fit();
     let ground = container(column![]).width(Fill).height(Fill).style(move |_: &Theme| container::Style {
         background: Some(bg.into()),
         ..Default::default()
     });
 
-    let content: Element<'a, Pointer> = match panel {
-        Some(panel) => {
-            let mut layers = stack![].width(Fill).height(Fill);
-            for (_, r, handle) in &panel.layers {
-                layers = layers.push(
-                    pin(image(handle.clone()).width(r.w * s).height(r.h * s).content_fit(ContentFit::Fill))
-                        .x(offset.x + r.x * s)
-                        .y(offset.y + r.y * s),
-                );
-            }
-            layers = layers.push(PointerArea { scale: s, offset, cursor: panel.cursor() });
-            layers.into()
-        }
-        None => center(
-            text(format!("{} has no ControlPanel. Its macros are under Settings.", patch.name))
-                .size(12.5)
-                .color(theme::c().frame_muted),
-        )
-        .into(),
-    };
+    let mut layers = stack![].width(Fill).height(Fill);
+    for (_, r, handle) in &panel.layers {
+        layers = layers.push(
+            pin(image(handle.clone()).width(r.w * s).height(r.h * s).content_fit(ContentFit::Fill))
+                .x(offset.x + r.x * s)
+                .y(offset.y + r.y * s),
+        );
+    }
+    layers = layers.push(PointerArea { scale: s, offset, cursor: panel.cursor() });
 
-    stack![ground, content, corners()].width(Fill).height(Fill).into()
+    stack![ground, layers, corners()].width(Fill).height(Fill).into()
 }
 
 // ---- rounded window corners ---------------------------------------------------------------------

@@ -3,10 +3,10 @@
 //! window's right side.
 
 use nice_plug_iced::iced::{
-    Background, Border, Center, Element, Fill, Padding, Theme,
+    Border, Center, Element, Fill, Padding, Theme,
     widget::{checkbox, column, row, scrollable, slider, space, text},
 };
-use patch::{Control, Patch, Values};
+use patch::{Patch, Values};
 
 use super::{sheet, theme};
 
@@ -36,8 +36,9 @@ pub fn view<'a>(patch: &'a Patch, values: &'a Values, hot_reload: bool) -> Eleme
             slider(0.0..=1.0, v, move |x| Message::Macro(slot, x))
                 .step(0.001)
                 .on_release(Message::MacroReleased(slot))
-                .style(paper_slider)
+                .style(theme::paper_slider)
                 .into(),
+            None,
         ));
     }
 
@@ -46,12 +47,20 @@ pub fn view<'a>(patch: &'a Patch, values: &'a Values, hot_reload: bool) -> Eleme
         list = list.push(sheet::section_title("Params · saved with the project"));
     }
     for (i, spec) in patch.params.iter().enumerate() {
-        let v = values.params.get(i).copied().unwrap_or(0.0);
-        let widget: Element<'a, Message> = match patch.controls[i] {
-            Control::Free => slider(0.0..=1.0, v, move |x| Message::Param(i, x)).step(0.001).style(paper_slider).into(),
-            Control::Macro { slot, .. } => muted(format!("set by {}", patch.macros[slot].name)),
+        // The slider is the knob's base value; macros add their offsets around it.
+        let v = values.base(i);
+        let widget: Element<'a, Message> = slider(0.0..=1.0, v, move |x| Message::Param(i, x)).step(0.001).style(theme::paper_slider).into();
+        // "tape · Amount": params are block knobs, the name alone is ambiguous.
+        let label = match spec.id.split_once('.') {
+            Some((block, _)) => format!("{block} · {}", spec.name),
+            None => spec.name.clone(),
         };
-        list = list.push(control(&spec.name, spec.display(v), widget));
+        let mods = &patch.modulations[i];
+        let note = (!mods.is_empty()).then(|| {
+            let names: Vec<&str> = mods.iter().map(|m| patch.macros[m.slot].name.as_str()).collect();
+            format!("modulated by {}", names.join(" + "))
+        });
+        list = list.push(control(label, spec.display(v), widget, note));
     }
 
     list = list.push(space::vertical().height(4));
@@ -73,8 +82,8 @@ pub fn view<'a>(patch: &'a Patch, values: &'a Values, hot_reload: bool) -> Eleme
     sheet::frame(column![sheet::header("Controls", &patch.name, Message::Close), sheet::divider(), scrollable(list).height(Fill).direction(theme::thin_scrollbar()).style(theme::paper_scrollbar)])
 }
 
-fn control<'a>(name: &'a str, value: String, widget: Element<'a, Message>) -> Element<'a, Message> {
-    column![
+fn control<'a>(name: impl text::IntoFragment<'a>, value: String, widget: Element<'a, Message>, note: Option<String>) -> Element<'a, Message> {
+    let mut col = column![
         row![
             text(name).size(12.5).font(theme::font::PAPER_SEMIBOLD).color(theme::c().paper_ink),
             space::horizontal(),
@@ -83,32 +92,15 @@ fn control<'a>(name: &'a str, value: String, widget: Element<'a, Message>) -> El
         .align_y(Center),
         widget,
     ]
-    .spacing(4)
-    .into()
+    .spacing(4);
+    if let Some(note) = note {
+        col = col.push(muted(note));
+    }
+    col.into()
 }
 
 fn muted<'a>(s: impl text::IntoFragment<'a>) -> Element<'a, Message> {
     text(s).size(11.5).font(theme::font::PAPER).color(theme::c().paper_muted).into()
-}
-
-fn paper_slider(_: &Theme, status: slider::Status) -> slider::Style {
-    let handle = match status {
-        slider::Status::Hovered | slider::Status::Dragged => theme::c().paper_ink,
-        _ => theme::c().paper_ink_2,
-    };
-    slider::Style {
-        rail: slider::Rail {
-            backgrounds: (Background::Color(theme::c().paper_ink), Background::Color(theme::c().paper_line)),
-            width: 3.0,
-            border: Border { radius: theme::radius(2.0), ..Default::default() },
-        },
-        handle: slider::Handle {
-            shape: slider::HandleShape::Circle { radius: 6.0 },
-            background: Background::Color(theme::c().paper_raised),
-            border_width: 2.0,
-            border_color: handle,
-        },
-    }
 }
 
 fn paper_checkbox(_: &Theme, status: checkbox::Status) -> checkbox::Style {

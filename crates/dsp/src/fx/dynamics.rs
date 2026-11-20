@@ -12,8 +12,8 @@ pub(super) fn build(kind: &BlockKind, a: &Args, meter: &mut usize) -> Box<dyn Fx
         BlockKind::Limiter { ceiling, release, lookahead } => {
             let la = (lookahead.unwrap_or(1.5).clamp(0.0, 20.0) * 0.001 * a.sr).round() as usize;
             Box::new(Limiter {
-                ceiling: a.p(ceiling, -0.3),
-                release: a.p(release, 80.0),
+                ceiling: a.p(ceiling),
+                release: a.p(release),
                 la,
                 lines: [Line::new(la + 1), Line::new(la + 1)],
                 min: MinWindow::new(la + 1),
@@ -25,21 +25,21 @@ pub(super) fn build(kind: &BlockKind, a: &Args, meter: &mut usize) -> Box<dyn Fx
             })
         }
         BlockKind::Gate { threshold, ratio, range, attack, hold, release } => Box::new(Gate {
-            threshold: a.req(threshold),
-            ratio: a.p(ratio, 20.0),
-            range: a.p(range, 60.0),
-            attack: a.p(attack, 1.0),
-            hold: a.p(hold, 20.0),
-            release: a.p(release, 150.0),
+            threshold: a.p(threshold),
+            ratio: a.p(ratio),
+            range: a.p(range),
+            attack: a.p(attack),
+            hold: a.p(hold),
+            release: a.p(release),
             env: 0.0,
             att: 0.0,
             held: 0,
             meter: next_meter(meter),
         }),
         BlockKind::DeEsser { freq, threshold, range } => Box::new(DeEsser {
-            freq: a.p(freq, 6000.0),
-            threshold: a.req(threshold),
-            range: a.p(range, 12.0),
+            freq: a.p(freq),
+            threshold: a.p(threshold),
+            range: a.p(range),
             detector: Biquad::default(),
             shelf: Biquad::default(),
             env: 0.0,

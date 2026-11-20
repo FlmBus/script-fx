@@ -11,3 +11,17 @@ marked `PATCH(scriptfx)`.
   `Renderer::present` and the present interval are measured too.
 - `iced_wgpu::frame_stats::get()` returns them (dev readout `SCRIPTFX_DEV_STATS=1`). The per-patch
   GPU budget of the raster UI plan needs GPU timing; unpatched iced can't provide it.
+
+## 2. Post-process pass (`src/postfx.rs`, `src/lib.rs`)
+
+- `iced_wgpu::postfx::set(Some(RadialBlur { center, rect, amount, keep }))` turns on a zoom blur
+  for the coming frames (logical coordinates); `set(None)` turns it off. The shell uses it for the
+  chain ↔ block page transition (150 ms).
+- While an effect is set, `Renderer::present` draws the frame into an offscreen texture (same
+  size and format as the surface, made on first use, remade on resize) and from there through a
+  fullscreen WGSL pass into the surface: inside `rect`, 24 samples towards `center` (clamped into
+  `rect`, so nothing from outside bleeds in); `keep` areas (UI over the zooming content) and
+  everything outside `rect` pass through.
+- Without an effect, `present` is unchanged (no offscreen pass).
+- Why here: iced can't render a widget subtree to a texture, and the baseview shell doesn't
+  support window screenshots, so a full-frame pass in the renderer is the only place for it.

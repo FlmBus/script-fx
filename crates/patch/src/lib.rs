@@ -4,8 +4,10 @@
 //! `require`s (components, see the `ui-components` crate). Lua only *describes*
 //! the patch, using the API from `prelude.luau` (runtime: [`runtime`]):
 //!
-//! - `Param.new(id, name, {...})`: internal controls (unlimited). Blocks and macros
-//!   reference them as objects; the patch collects every param it reaches.
+//! - Params are the blocks' knobs: every numeric block setting is a param
+//!   `"<block id>.<setting>"` with the unit, range and default its block type declares
+//!   (`prelude.luau`); the patch gives start values (`Blocks.Delay.new("echo", { time = 250 })`)
+//!   and reaches them as `echo.params.time`. There is no `Param.new`.
 //! - `Macro.new(id, name, {...}):drives(param, {...})`: up to [`MACRO_SLOTS`]
 //!   host-automatable controls. Each drives one or more params with its own range
 //!   and curve (Ableton-rack style). A param driven by a macro is "locked" to it;
@@ -53,12 +55,25 @@ pub struct ParamSpec {
     pub min: f32,
     #[serde(default = "one")]
     pub max: f32,
-    /// Default in plain units (defaults to `min`). Ignored when a macro drives the param.
+    /// Default base value in plain units (defaults to `min`); macros add offsets to it.
     pub default: Option<f32>,
     #[serde(default)]
     pub unit: String,
     #[serde(default = "two", deserialize_with = "whole_number")]
     pub decimals: usize,
+    /// How the 0..1 knob travel maps onto min..max.
+    #[serde(default)]
+    pub scale: Scale,
+}
+
+/// Knob travel → value: even steps (`lin`), or even ratios (`log`: frequencies, times; needs
+/// min and max of the same sign, not 0).
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Scale {
+    #[default]
+    Lin,
+    Log,
 }
 
 fn one() -> f32 {
@@ -78,7 +93,7 @@ pub(crate) fn opt_whole_number<'de, D: serde::Deserializer<'de>>(d: D) -> Result
 }
 
 /// Luau has only floating-point numbers: accept `2.0` for integer fields.
-fn whole_number<'de, D: serde::Deserializer<'de>>(d: D) -> Result<usize, D::Error> {
+pub(crate) fn whole_number<'de, D: serde::Deserializer<'de>>(d: D) -> Result<usize, D::Error> {
     let v = f64::deserialize(d)?;
     if v >= 0.0 && v.fract() == 0.0 {
         Ok(v as usize)
@@ -92,10 +107,18 @@ impl ParamSpec {
         self.default.unwrap_or(self.min).clamp(self.min.min(self.max), self.min.max(self.max))
     }
     pub fn normalize(&self, plain: f32) -> f32 {
-        ((plain - self.min) / (self.max - self.min)).clamp(0.0, 1.0)
+        let t = match self.scale {
+            Scale::Lin => (plain - self.min) / (self.max - self.min),
+            Scale::Log => (plain / self.min).ln() / (self.max / self.min).ln(),
+        };
+        if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 }
     }
     pub fn plain(&self, normalized: f32) -> f32 {
-        self.min + normalized.clamp(0.0, 1.0) * (self.max - self.min)
+        let t = normalized.clamp(0.0, 1.0);
+        match self.scale {
+            Scale::Lin => self.min + t * (self.max - self.min),
+            Scale::Log => self.min * (self.max / self.min).powf(t),
+        }
     }
     /// `"6.0 dB"`, `"40%"`, `"4.0:1"`: a space only before units that start with a letter.
     pub fn display_plain(&self, plain: f32) -> String {
@@ -157,9 +180,10 @@ impl Curve {
 #[serde(deny_unknown_fields)]
 pub struct MacroTarget {
     pub param: String,
-    /// Plain value at macro = 0 (defaults to the param's min).
+    /// Offset reference at macro = 0 (defaults to the param's min).
     pub from: Option<f32>,
-    /// Plain value at macro = 1 (defaults to the param's max).
+    /// End of the modulation range at macro = 1 (defaults to the param's max).
+    /// Actual output also depends on the editable base and any other modulations.
     pub to: Option<f32>,
     #[serde(default)]
     pub curve: Curve,
@@ -177,13 +201,80 @@ pub struct MacroSpec {
     pub targets: Vec<MacroTarget>,
 }
 
-/// How a param gets its value.
+/// One modulation slot (Serum's model, `docs/research/chain-editor.md`): a source (a macro, for
+/// now) moving one param. Everything happens in the param's **normalized** space: each slot
+/// adds a delta to the knob's base value, the deltas sum, the sum is clamped to 0..1, and only
+/// then the param's scale (lin/log) turns it into Hz, dB, … So a slot's amount means the same
+/// share of the knob's travel wherever the knob sits, and modulations add up predictably.
+///
+/// `settings` is what applies (amount, polarity, curve, bypass: the meta knob); `patch` what the
+/// patch defines (reset goes back to it). Settings are saved per project.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Control {
-    /// The param keeps its own value.
-    Free,
-    /// Macro slot `slot` drives it: `curve.apply(from, to, macro_value)`.
-    Macro { slot: usize, from: f32, to: f32, curve: Curve },
+pub struct Modulation {
+    pub slot: usize,
+    pub settings: ModSettings,
+    pub patch: ModSettings,
+}
+
+/// A slot's settings.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModSettings {
+    /// −1..+1: the share of the knob's travel at full source (negative = the other way).
+    pub amount: f32,
+    /// Bipolar: the source's centre is 0, its ends ±amount. Unipolar: 0..amount.
+    pub bipolar: bool,
+    /// Tension −1..+1 applied to the source first: 0 = linear, > 0 slow start, < 0 fast start.
+    pub curve: f32,
+    /// Flips the delta (the range runs the other way), keeping the amount.
+    pub invert: bool,
+    /// Muted, settings kept.
+    pub bypass: bool,
+}
+
+impl Default for ModSettings {
+    fn default() -> Self {
+        Self { amount: 0.0, bipolar: false, curve: 0.0, invert: false, bypass: false }
+    }
+}
+
+impl ModSettings {
+    /// The normalized delta at source value `source` (0..1).
+    pub fn delta(self, source: f32) -> f32 {
+        if self.bypass {
+            return 0.0;
+        }
+        let s = tension(source.clamp(0.0, 1.0), self.curve);
+        let p = if self.bipolar { 2.0 * s - 1.0 } else { s };
+        p * self.signed_amount()
+    }
+
+    /// The amount with invert applied: where the range arc points.
+    pub fn signed_amount(self) -> f32 {
+        if self.invert { -self.amount } else { self.amount }
+    }
+
+    /// Packed into one word, for a lock-free hand-over to the audio thread: amount (f32 bits),
+    /// curve (i16 fixed point), flags.
+    pub fn pack(self) -> u64 {
+        let curve = (self.curve.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16 as u16 as u64;
+        (self.amount.to_bits() as u64) << 32 | curve << 16 | (self.invert as u64) << 2 | (self.bypass as u64) << 1 | self.bipolar as u64
+    }
+
+    pub fn unpack(w: u64) -> Self {
+        Self {
+            amount: f32::from_bits((w >> 32) as u32),
+            curve: ((w >> 16) as u16 as i16) as f32 / i16::MAX as f32,
+            invert: w & 4 != 0,
+            bypass: w & 2 != 0,
+            bipolar: w & 1 != 0,
+        }
+    }
+}
+
+/// The tension curve: `x^(2^(3c))` (c = 0 linear; ±1 ≈ x⁸ / x^⅛).
+pub fn tension(x: f32, c: f32) -> f32 {
+    if c == 0.0 { x } else { x.powf((3.0 * c).exp2()) }
 }
 
 /// A value the UI can read: what a component's `bind` / `source` string resolves to.
@@ -273,6 +364,8 @@ pub struct Values {
     pub macros: [f32; MACRO_SLOTS],
     /// Normalized param values (index = param index), see [`Patch::compute_params`].
     pub params: Vec<f32>,
+    /// Normalized base values (the knob's own value, before macro offsets).
+    pub bases: Vec<f32>,
     pub meter_in: f32,
     pub meter_out: f32,
     /// Block meters, index = [`Patch::meters`].
@@ -290,6 +383,11 @@ impl Values {
             Source::Block(i) => self.blocks.get(*i).copied().unwrap_or(0.0),
         }
     }
+
+    /// The knob's own (normalized) value, before macro modulation.
+    pub fn base(&self, index: usize) -> f32 {
+        self.bases.get(index).copied().unwrap_or_else(|| self.params.get(index).copied().unwrap_or(0.0))
+    }
 }
 
 pub struct Patch {
@@ -298,8 +396,8 @@ pub struct Patch {
     pub dir: PathBuf,
     pub params: Vec<ParamSpec>,
     pub macros: Vec<MacroSpec>,
-    /// One entry per param.
-    pub controls: Vec<Control>,
+    /// One entry per param: the macros that modulate it (any number, offsets sum).
+    pub modulations: Vec<Vec<Modulation>>,
     pub chain: Vec<BlockSpec>,
     /// Ids of metered chain blocks (compressors/rider/transient), in DSP meter-slot order.
     pub meters: Vec<String>,
@@ -317,7 +415,7 @@ impl Patch {
             dir: PathBuf::new(),
             params: Vec::new(),
             macros: Vec::new(),
-            controls: Vec::new(),
+            modulations: Vec::new(),
             chain: Vec::new(),
             meters: Vec::new(),
             theme: Theme::default(),
@@ -348,10 +446,10 @@ impl Patch {
                 return Err(invalid(format!("{key} '{rel}': must be {}", exts.join(" or "))));
             }
         }
-        let controls = resolve_controls(&params, &macros)?;
+        let modulations = resolve_modulations(&params, &macros)?;
         let chain: Vec<BlockSpec> = opt_from_lua(lua, root.get("chain")?)?;
         let meters = chain::validate(&chain, &params)?;
-        Ok(Patch { name, author, dir, params, macros, controls, chain, meters, theme, has_panel })
+        Ok(Patch { name, author, dir, params, macros, modulations, chain, meters, theme, has_panel })
     }
 
     pub fn macro_index(&self, id: &str) -> Option<usize> {
@@ -374,12 +472,22 @@ impl Patch {
         })
     }
 
-    /// Plain value of every param, given macro values and the free params' own values.
+    /// Does any macro modulate this param?
+    pub fn is_modulated(&self, index: usize) -> bool {
+        self.modulations.get(index).is_some_and(|m| !m.is_empty())
+    }
+
+    /// Plain value of a param: the knob's base value plus every macro's offset (VCA style).
     pub fn param_plain(&self, index: usize, macros: &[f32; MACRO_SLOTS], free: &[f32]) -> f32 {
-        match self.controls[index] {
-            Control::Free => free.get(index).copied().unwrap_or_else(|| self.params[index].default_plain()),
-            Control::Macro { slot, from, to, curve } => curve.apply(from, to, macros[slot]),
+        let spec = &self.params[index];
+        let own = free.get(index).copied().unwrap_or_else(|| spec.default_plain());
+        let mods = self.modulations.get(index).map(Vec::as_slice).unwrap_or_default();
+        if mods.is_empty() {
+            // Unmodulated: the knob's own value, exactly (no normalize/plain round-trip drift).
+            return own;
         }
+        let delta: f32 = mods.iter().map(|m| m.settings.delta(macros[m.slot])).sum();
+        spec.plain((spec.normalize(own) + delta).clamp(0.0, 1.0))
     }
 
     /// Fills `out` with normalized values of all params.
@@ -390,17 +498,10 @@ impl Patch {
         );
     }
 
-    /// Normalized default of a macro slot (see [`MacroSpec::default`]).
+    /// Normalized default of a macro slot (see [`MacroSpec::default`]). The prelude derives it
+    /// from the first target's start value when the patch doesn't set one.
     pub fn macro_default(&self, slot: usize) -> f32 {
-        let Some(m) = self.macros.get(slot) else { return 0.0 };
-        if let Some(d) = m.default {
-            return d.clamp(0.0, 1.0);
-        }
-        let Some(i) = m.targets.first().and_then(|t| self.param_index(&t.param)) else { return 0.0 };
-        match self.controls[i] {
-            Control::Macro { from, to, curve, .. } => curve.invert(from, to, self.params[i].default_plain()),
-            Control::Free => 0.0,
-        }
+        self.macros.get(slot).and_then(|m| m.default).unwrap_or(0.0).clamp(0.0, 1.0)
     }
 
     /// Default values of all params (plain units).
@@ -413,38 +514,59 @@ impl Patch {
         self.macro_text(slot, values.macros[slot])
     }
 
+    /// The param a macro drives and the modulation doing it (with its current settings).
+    fn target_modulation(&self, slot: usize, param: &str) -> Option<(usize, Modulation)> {
+        let i = self.param_index(param)?;
+        let m = *self.modulations.get(i)?.iter().find(|m| m.slot == slot)?;
+        Some((i, m))
+    }
+
+    /// Where param `param`'s `k`-th modulation sits in one flat list of all modulations (the
+    /// audio thread's settings slots).
+    pub fn mod_index(&self, param: usize, k: usize) -> usize {
+        self.modulations[..param].iter().map(Vec::len).sum::<usize>() + k
+    }
+
+    /// The key a modulation's settings are saved under: "param id<macro id".
+    pub fn mod_key(&self, param: usize, k: usize) -> String {
+        format!("{}<{}", self.params[param].id, self.macros[self.modulations[param][k].slot].id)
+    }
+
     /// Text for a macro at normalized value `v` (see [`macro_display`](Self::macro_display)).
+    /// One target: the param's value with this macro at `v` (base + offset). Otherwise percent.
     pub fn macro_text(&self, slot: usize, v: f32) -> String {
-        match self.macros.get(slot).map(|m| m.targets.as_slice()) {
-            Some([t]) => {
-                let i = self.param_index(&t.param).expect("validated");
-                match self.controls[i] {
-                    Control::Macro { from, to, curve, .. } => {
-                        self.params[i].display_plain(curve.apply(from, to, v))
-                    }
-                    Control::Free => unreachable!("targets are macro-controlled"),
-                }
-            }
-            _ => format!("{:.0}%", v * 100.0),
-        }
+        let Some([t]) = self.macros.get(slot).map(|m| m.targets.as_slice()) else {
+            return format!("{:.0}%", v * 100.0);
+        };
+        let Some((i, m)) = self.target_modulation(slot, &t.param) else { return format!("{:.0}%", v * 100.0) };
+        let spec = &self.params[i];
+        let base = spec.normalize(spec.default_plain());
+        spec.display_plain(spec.plain((base + m.settings.delta(v)).clamp(0.0, 1.0)))
     }
 
     /// Typed text → normalized macro value, the inverse of [`macro_text`](Self::macro_text):
     /// in the driven param's unit if the macro drives exactly one, else percent.
     pub fn macro_from_text(&self, slot: usize, text: &str) -> Option<f32> {
-        match self.macros.get(slot)?.targets.as_slice() {
-            [t] => {
-                let i = self.param_index(&t.param)?;
-                match self.controls[i] {
-                    Control::Macro { from, to, curve, .. } => {
-                        let plain = parse_number(text)?.clamp(from.min(to), from.max(to));
-                        Some(curve.invert(from, to, plain).clamp(0.0, 1.0))
-                    }
-                    Control::Free => None,
-                }
+        let [t] = self.macros.get(slot)?.targets.as_slice() else {
+            return Some((parse_number(text)? / 100.0).clamp(0.0, 1.0));
+        };
+        let (i, m) = self.target_modulation(slot, &t.param)?;
+        let spec = &self.params[i];
+        let want = spec.normalize(parse_number(text)?);
+        // Bisection: the curve (and the param's scale) needn't be linear in v.
+        let target = want - spec.normalize(spec.default_plain());
+        let delta = |v: f32| m.settings.delta(v);
+        let rising = delta(1.0) >= delta(0.0);
+        let (mut lo, mut hi) = (0.0f32, 1.0f32);
+        for _ in 0..32 {
+            let mid = (lo + hi) / 2.0;
+            if (delta(mid) < target) == rising {
+                lo = mid;
+            } else {
+                hi = mid;
             }
-            _ => Some((parse_number(text)? / 100.0).clamp(0.0, 1.0)),
         }
+        Some(((lo + hi) / 2.0).clamp(0.0, 1.0))
     }
 }
 
@@ -479,7 +601,7 @@ where
     }
 }
 
-fn resolve_controls(params: &[ParamSpec], macros: &[MacroSpec]) -> Result<Vec<Control>, PatchError> {
+fn resolve_modulations(params: &[ParamSpec], macros: &[MacroSpec]) -> Result<Vec<Vec<Modulation>>, PatchError> {
     if macros.len() > MACRO_SLOTS {
         return Err(invalid(format!("{} macros declared, only {MACRO_SLOTS} slots available", macros.len())));
     }
@@ -494,7 +616,7 @@ fn resolve_controls(params: &[ParamSpec], macros: &[MacroSpec]) -> Result<Vec<Co
     }
 
     let mut macro_ids = std::collections::HashSet::new();
-    let mut controls = vec![Control::Free; params.len()];
+    let mut modulations = vec![Vec::new(); params.len()];
     for (slot, m) in macros.iter().enumerate() {
         if !macro_ids.insert(m.id.as_str()) {
             return Err(invalid(format!("duplicate macro id '{}'", m.id)));
@@ -507,9 +629,6 @@ fn resolve_controls(params: &[ParamSpec], macros: &[MacroSpec]) -> Result<Vec<Co
                 .iter()
                 .position(|p| p.id == t.param)
                 .ok_or_else(|| invalid(format!("macro '{}' targets unknown param '{}'", m.id, t.param)))?;
-            if controls[i] != Control::Free {
-                return Err(invalid(format!("param '{}' is driven by more than one macro", t.param)));
-            }
             let (from, to) = (t.from.unwrap_or(params[i].min), t.to.unwrap_or(params[i].max));
             if t.curve == Curve::Exp && (from == 0.0 || to == 0.0 || from.signum() != to.signum()) {
                 return Err(invalid(format!(
@@ -517,10 +636,15 @@ fn resolve_controls(params: &[ParamSpec], macros: &[MacroSpec]) -> Result<Vec<Co
                     m.id, t.param
                 )));
             }
-            controls[i] = Control::Macro { slot, from, to, curve: t.curve };
+            // `from`..`to` in units → the normalized amount (the prelude made `from` the knob's
+            // base). An exp curve is the same as linear on a log knob, so it needs nothing more.
+            let p = &params[i];
+            let settings = ModSettings { amount: p.normalize(to) - p.normalize(from), ..ModSettings::default() };
+            // Several macros may drive one param: their deltas sum onto the knob's base.
+            modulations[i].push(Modulation { slot, settings, patch: settings });
         }
     }
-    Ok(controls)
+    Ok(modulations)
 }
 
 /// Joins `rel` onto `dir` and rejects anything that escapes the patch folder.
@@ -577,29 +701,30 @@ mod tests {
     }
 
     const BASE: &str = r##"
-        local drive = Param.new("drive", "Drive", { min = 0, max = 24, unit = "dB", decimals = 1, default = 6 })
-        local tone  = Param.new("tone",  "Tone",  { min = 500, max = 20000, unit = "Hz", decimals = 0 })
-        local free  = Param.new("free",  "Free",  { min = 0, max = 10, default = 5 })
-        local xover = Param.new("xover", "Crossover", { min = 100, max = 500, default = 250, unit = "Hz" })
+        local c1 = Blocks.FETCompressor.new("c1", { threshold = -6, ratio = 4 })
+        local d  = Blocks.Drive.new("d", { amount = 6 })
+        local e  = Blocks.PeakEq.new("e", { freq = 100, gain = 5 })
+        local lp = Blocks.LowPass.new("lp", { freq = 4000 })
+        local s  = Blocks.BandSplit.new("s", {
+          crossovers = { 250 },
+          bands = {
+            Chain.new { Blocks.Rider.new("r", { target = -18, range = 6 }) },
+            Chain.new { d },
+          },
+        })
 
         local character = Macro.new("character", "Character", { default = 0.5 })
-          :drives(drive, { from = 0, to = 12 })
-          :drives(tone,  { from = 16000, to = 1000, curve = "exp" })
-        local drv = Macro.new("drv", "Drv"):drives(free, { from = 0, to = 10 })
+          :drives(d.params.amount, { from = 0, to = 12 })
+          :drives(lp.params.freq,  { from = 16000, to = 1000, curve = "exp" })
+        local drv = Macro.new("drv", "Drv"):drives(e.params.gain, { from = 0, to = 10 })
 
         local chain = Chain.new {
-          Blocks.FETCompressor.new("c1", { threshold = drive, ratio = 4 }),
-          Blocks.BandSplit.new("s", {
-            crossovers = { xover },
-            bands = {
-              Chain.new { Blocks.Rider.new("r", { target = -18, range = 6 }) },
-              Chain.new { Blocks.Drive.new("d", { amount = drive }) },
-            },
-          }),
+          c1,
+          s,
           Blocks.Parallel.new("par", { mix = 50, branches = { Chain.new(), Chain.new { Blocks.Transient.new("t", { attack = 3 }) } } }),
         }
-        chain:add(Blocks.PeakEq.new("e", { freq = 100, gain = free }))
-        chain:add(Blocks.LowPass.new("lp", { freq = tone }))
+        chain:add(e)
+        chain:add(lp)
 
         return Patch.new("T", { chain = chain, macros = { character, drv }, theme = { colors = { accent = "#ff0000" } } })
     "##;
@@ -607,29 +732,156 @@ mod tests {
     #[test]
     fn builds_params_macros_and_chain() {
         let p = load(BASE).unwrap();
-        // Params in the order the chain reaches them, then macro-only ones.
-        let ids: Vec<_> = p.params.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, ["drive", "xover", "free", "tone"]);
+        let i = |id: &str| p.param_index(id).unwrap_or_else(|| panic!("no param {id}"));
+        // Every block setting is a param "<block>.<setting>", in chain order.
+        assert_eq!(p.params[0].id, "c1.threshold");
+        assert_eq!(p.params[i("s.crossover_1")].name, "Crossover 1");
+        assert_eq!(p.params[i("lp.freq")].scale, Scale::Log);
+        assert_eq!(p.params.len(), 7 + 1 + 3 + 2 + 2 + 1 + 3 + 2);
         assert_eq!(p.meters, vec!["c1", "r", "t"]);
         assert_eq!(p.resolve_source("meter.r").unwrap(), Source::Block(1));
+        assert_eq!(p.resolve_source("param.d.amount").unwrap(), Source::Param(i("d.amount")));
         assert_eq!(p.chain.len(), 5);
         assert_eq!(p.theme.color("accent"), Some("#ff0000"));
-        assert_eq!(p.controls[2], Control::Macro { slot: 1, from: 0.0, to: 10.0, curve: Curve::Lin });
-        assert_eq!(p.controls[1], Control::Free);
+        let (gain, m) = (&p.params[i("e.gain")], p.modulations[i("e.gain")][0]);
+        assert_eq!((p.modulations[i("e.gain")].len(), m.slot), (1, 1));
+        assert!((m.settings.amount - (gain.normalize(10.0) - gain.normalize(0.0))).abs() < 1e-6);
+        assert!(p.modulations[i("s.crossover_1")].is_empty());
         let mut macros = [0.0; MACRO_SLOTS];
         macros[0] = 0.5;
         let free = p.default_param_values();
-        assert_eq!(p.param_plain(0, &macros, &free), 6.0); // lin 0..12
-        assert!((p.param_plain(3, &macros, &free) - 4000.0).abs() < 1.0); // exp 16k..1k
-        assert_eq!(p.param_plain(2, &macros, &free), 0.0); // driven by macro 1 (= 0)
-        assert_eq!(p.param_plain(1, &macros, &free), 250.0); // free: own default
+        assert_eq!(p.param_plain(i("d.amount"), &macros, &free), 6.0); // lin 0..12
+        assert!((p.param_plain(i("lp.freq"), &macros, &free) - 4000.0).abs() < 1.0); // exp 16k..1k
+        assert_eq!(p.param_plain(i("e.gain"), &macros, &free), 0.0); // driven by macro 1 (= 0)
+        assert_eq!(p.param_plain(i("s.crossover_1"), &macros, &free), 250.0); // free: its start value
+        assert_eq!(p.param_plain(i("d.mix"), &macros, &free), 100.0); // not set: the block's default
         assert_eq!(p.macro_default(0), 0.5); // explicit
-        assert_eq!(p.macro_default(1), 0.5); // derived from param default 5 of 0..10
+        assert_eq!(p.macro_default(1), 0.5); // derived from e.gain's start value 5 of 0..10
 
         let mut v = Values { macros, ..Default::default() };
         p.compute_params(&v.macros.clone(), &free, &mut v.params);
-        assert_eq!(p.params[0].display(v.params[0]), "6.0 dB");
+        assert_eq!(p.params[i("d.amount")].display(v.params[i("d.amount")]), "6.0 dB");
         assert_eq!(p.macro_display(0, &v), "50%");
+    }
+
+    #[test]
+    fn blocks_list_their_own_knobs() {
+        let p = load(BASE).unwrap();
+        let ids = |b: &BlockSpec| b.params.iter().map(|r| p.params[r.0].id.as_str()).collect::<Vec<_>>();
+        assert_eq!(ids(&p.chain[0]), ["c1.threshold", "c1.ratio", "c1.attack", "c1.release", "c1.knee", "c1.makeup", "c1.mix"]);
+        assert_eq!(ids(&p.chain[1]), ["s.crossover_1"]); // the bands' blocks have their own
+        let chain::BlockKind::Drive { amount, .. } = &p.chain[1].kind.sub_chains()[1].0[0].kind else { panic!() };
+        assert_eq!(p.params[amount.0].id, "d.amount"); // settings point at their param
+    }
+
+    #[test]
+    fn range_narrows_a_knob() {
+        let src = |r: &str| format!("local g = Blocks.Gain.new('g', {{ db = -6 }})\n{r}\nreturn Patch.new('T', {{ chain = Chain.new {{ g }} }})");
+        let p = load(&src("g.params.db:range(-24, 6)")).unwrap();
+        assert_eq!((p.params[0].min, p.params[0].max), (-24.0, 6.0));
+        for (r, msg) in [
+            ("g.params.db:range(-24, 48)", "must stay within -120..24 dB"),
+            ("g.params.db:range(0, 6)", "the start value -6 is outside"),
+            ("g.params.db.range(-24, 6)", "with a colon"),
+        ] {
+            let err = load(&src(r)).err().unwrap().to_string();
+            assert!(err.contains(msg) && err.contains("init.luau:2:"), "{r}: {err}");
+        }
+    }
+
+    #[test]
+    fn log_params_move_in_even_ratios() {
+        let p = load(BASE).unwrap();
+        let f = &p.params[p.param_index("lp.freq").unwrap()]; // 20..20000 Hz
+        assert!((f.plain(0.5) - 632.46).abs() < 0.1, "{}", f.plain(0.5));
+        assert!((f.normalize(2000.0) - 2.0 / 3.0).abs() < 1e-4);
+        assert_eq!(f.normalize(f.plain(0.25)), 0.25);
+    }
+
+    #[test]
+    fn several_macros_sum_around_an_editable_base() {
+        let p = load(
+            "local g = Blocks.Gain.new('g', { db = -12 })
+             local a = Macro.new('a', 'A', { default = 0 }):drives(g.params.db, { from = -12, to = 12 })
+             local b = Macro.new('b', 'B', { default = 0 }):drives(g.params.db, { from = -12, to = 12 })
+             return Patch.new('T', { chain = Chain.new { g }, macros = { a, b } })",
+        )
+        .unwrap();
+        let i = p.param_index("g.db").unwrap();
+        // The first macro made the knob's base -12 dB; both macros can drive it.
+        assert_eq!(p.params[i].default_plain(), -12.0);
+        assert_eq!(p.modulations[i].len(), 2);
+        let free = vec![-12.0];
+        let mut macros = [0.0; MACRO_SLOTS];
+        assert_eq!(p.param_plain(i, &macros, &free), -12.0);
+        macros[0] = 1.0;
+        assert!((p.param_plain(i, &macros, &free) - 12.0).abs() < 0.01);
+        macros[1] = 1.0;
+        assert!((p.param_plain(i, &macros, &free) - 24.0).abs() < 0.01, "{}", p.param_plain(i, &macros, &free)); // clamped at the top (Gain is -120..24 dB)
+        // The base stays editable: -6 dB with both macros at 0.
+        let free = vec![-6.0];
+        macros = [0.0; MACRO_SLOTS];
+        assert!((p.param_plain(i, &macros, &free) + 6.0).abs() < 0.01);
+        macros[0] = 0.5;
+        assert!((p.param_plain(i, &macros, &free) - 6.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn slots_add_normalized_deltas() {
+        let p = load(
+            "local g = Blocks.Gain.new('g', { db = 0 })
+             local a = Macro.new('a', 'A', { default = 0 }):drives(g.params.db, { from = 0, to = 12 })
+             return Patch.new('T', { chain = Chain.new { g }, macros = { a } })",
+        )
+        .unwrap();
+        let spec = &p.params[0]; // -120..24 dB, lin
+        let m = p.modulations[0][0];
+        assert!((m.settings.amount - 12.0 / 144.0).abs() < 1e-6);
+        let at = |s: ModSettings, v: f32| spec.plain(spec.normalize(0.0) + s.delta(v));
+        let d = m.settings;
+        assert!((at(d, 1.0) - 12.0).abs() < 0.01);
+        assert!((at(ModSettings { amount: d.amount / 2.0, ..d }, 1.0) - 6.0).abs() < 0.01);
+        assert!((at(ModSettings { amount: -d.amount, ..d }, 1.0) + 12.0).abs() < 0.01);
+        assert_eq!(at(ModSettings { bypass: true, ..d }, 1.0), 0.0);
+        assert!((at(ModSettings { invert: true, ..d }, 1.0) + 12.0).abs() < 0.01);
+        // Bipolar: centre = no change, ends = ±amount.
+        let bi = ModSettings { bipolar: true, ..d };
+        assert!(at(bi, 0.5).abs() < 0.01 && (at(bi, 1.0) - 12.0).abs() < 0.01 && (at(bi, 0.0) + 12.0).abs() < 0.01);
+        // Tension bends the middle, not the ends.
+        assert!(at(ModSettings { curve: 0.5, ..d }, 0.5) < 5.0 && at(ModSettings { curve: -0.5, ..d }, 0.5) > 7.0);
+        assert!((at(ModSettings { curve: 0.7, ..d }, 1.0) - 12.0).abs() < 0.01);
+        for s in [d, bi, ModSettings { amount: -0.3, curve: -0.25, invert: true, bypass: true, bipolar: false }] {
+            let u = ModSettings::unpack(s.pack());
+            assert!(u.amount == s.amount && u.bipolar == s.bipolar && u.invert == s.invert && u.bypass == s.bypass && (u.curve - s.curve).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn exp_curves_are_exact_on_log_knobs() {
+        // A low-pass freq is a log knob: exp from/to = an even share of its travel.
+        let p = load(
+            "local f = Blocks.LowPass.new('f', { freq = 1000 })
+             local m = Macro.new('m', 'M', { default = 0 }):drives(f.params.freq, { from = 200, to = 2000, curve = 'exp' })
+             return Patch.new('T', { chain = Chain.new { f }, macros = { m } })",
+        )
+        .unwrap();
+        let i = p.param_index("f.freq").unwrap();
+        let mut macros = [0.0; MACRO_SLOTS];
+        macros[0] = 0.5;
+        let hz = p.param_plain(i, &macros, &[200.0]);
+        assert!((hz - 632.46).abs() < 0.5, "{hz}"); // √(200·2000)
+    }
+
+    #[test]
+    fn exponential_default_handles_start_outside_endpoint_sign() {
+        for (start, from, to, expected) in [(0, 1, 10, 0.0), (0, -10, -1, 1.0), (5, -10, -1, 1.0), (-5, 1, 10, 0.0)] {
+            let src = format!("local g = Blocks.Gain.new('g', {{ db = {start} }})\n\
+                local m = Macro.new('m', 'M'):drives(g.params.db, {{ from = {from}, to = {to}, curve = 'exp' }})\n\
+                return Patch.new('T', {{ chain = Chain.new {{ g }}, macros = {{ m }} }})");
+            let p = load(&src).unwrap();
+            assert_eq!(p.macro_default(0), expected, "{src}");
+            assert!(p.param_plain(0, &[expected; MACRO_SLOTS], &p.default_param_values()).is_finite());
+        }
     }
 
     #[test]
@@ -638,12 +890,14 @@ mod tests {
             assert_eq!(parse_number(text), want, "{text:?}");
         }
         let p = load(BASE).unwrap();
-        // xover: a free param, 100..500 Hz, clamped into range
-        assert_eq!(p.params[1].parse_plain("300 Hz"), Some(300.0));
-        assert_eq!(p.params[1].parse_plain("9999"), Some(500.0));
+        // the crossover: a free param, 20..20000 Hz, clamped into range
+        let x = &p.params[p.param_index("s.crossover_1").unwrap()];
+        assert_eq!(x.parse_plain("300 Hz"), Some(300.0));
+        assert_eq!(x.parse_plain("99999"), Some(20000.0));
         // drv drives one param (0..10): typed in that param's unit
-        assert_eq!(p.macro_from_text(1, "5"), Some(0.5));
-        assert_eq!(p.macro_from_text(1, "20"), Some(1.0));
+        let v = p.macro_from_text(1, "5").unwrap();
+        assert!((v - 0.5).abs() < 1e-5, "{v}");
+        assert!((p.macro_from_text(1, "20").unwrap() - 1.0).abs() < 1e-5);
         // character drives two: percent, like its display
         assert_eq!(p.macro_from_text(0, "25%"), Some(0.25));
         assert_eq!(p.macro_from_text(0, "abc"), None);
@@ -654,20 +908,19 @@ mod tests {
     fn rejects_mistakes_with_useful_messages() {
         for (from, to, msg) in [
             ("ratio = 4 }", "ratio = 4, treshold = 3 }", "unknown option 'treshold'"),
-            (r#"{ threshold = drive, ratio = 4 }"#, "{ ratio = 4 }", "'threshold' is required"),
-            ("threshold = drive", r#"threshold = "param.drive""#, "must be a number or a Param"),
+            ("threshold = -6", "threshold = 6", "threshold must be -60..0 dB, got 6"),
+            ("threshold = -6", r#"threshold = "param.x""#, "must be a number (the start value"),
             ("Blocks.FETCompressor.new", "Blocks.FetCompressor.new", "'Blocks.FetCompressor' does not exist"),
             (r#"Blocks.LowPass.new("lp""#, r#"Blocks.LowPass.new("c1""#, "duplicate block id 'c1'"),
-            ("crossovers = { xover }", "crossovers = { xover, 800 }", "2 crossover(s) need 3 bands"),
+            ("crossovers = { 250 }", "crossovers = { 250, 800 }", "2 crossover(s) need 3 bands"),
+            ("crossovers = { 250 }", "crossovers = { 5 }", "crossovers must be 20..20000 Hz"),
             ("mix = 50, branches = { Chain.new(),", "mix = 50, branches = { Chain.new(), Chain.new(),", "'mix' needs exactly 2 branches"),
             (r#"{ from = 16000, to = 1000, curve = "exp" }"#, r#"{ from = 0, to = 1000, curve = "exp" }"#, "non-zero from/to"),
             (r#"curve = "exp""#, r#"curve = "log""#, r#"must be "lin" or "exp""#),
-            (r#"unit = "dB", decimals = 1"#, r#"unit = "dB", decimls = 1"#, "unknown option 'decimls'"),
-            (r#"Param.new("free",  "Free",  { min = 0, max = 10, default = 5 })"#, r#"Param.new("free",  "Free",  { min = 0, max = 10, default = 50 })"#, "outside"),
-            (r#"Param.new("free""#, r#"Param.new("drive""#, "two different params use the id 'drive'"),
+            ("d.params.amount, { from", "d.params.amont, { from", "'d.params.amont' does not exist"),
+            ("local drv = Macro", "local x = Param.new('x', 'X', {}) local drv = Macro", "every param belongs to a block"),
             ("macros = { character, drv }", "macros = { character, drv, character }", "listed twice"),
-            (":drives(free, { from = 0, to = 10 })", "", "drives nothing"),
-            ("local drv = Macro.new(\"drv\", \"Drv\"):drives(free", "local drv = Macro.new(\"drv\", \"Drv\"):drives(drive", "more than one macro"),
+            (":drives(e.params.gain, { from = 0, to = 10 })", "", "drives nothing"),
             ("Chain.new { Blocks.Rider", "Chain.new { nil, Blocks.Rider", "holes"),
             (r#"return Patch.new("T","#, r#"return { name = "T" } -- "#, "must end with `return Patch.new(...)`"),
         ] {
@@ -760,12 +1013,12 @@ mod tests {
 
     #[test]
     fn errors_point_at_the_patch_line() {
-        let err = load("local x = 1\nlocal p = Param.new(\"a\", \"A\", { min = 0 })\nreturn Patch.new(\"T\")")
+        let err = load("local x = 1\nlocal g = Blocks.Gain.new('g', { db = 99 })\nreturn Patch.new(\"T\")")
             .err()
             .unwrap()
             .to_string();
         assert!(err.contains("init.luau:2:"), "{err}");
-        assert!(err.contains("'max' is required"), "{err}");
+        assert!(err.contains("db must be -120..24 dB"), "{err}");
     }
 
     #[test]
@@ -786,7 +1039,7 @@ mod tests {
         assert!(err.contains("budget"), "{err}");
         let err = load("string.format = nil return Patch.new('T')").err().unwrap().to_string();
         assert!(err.contains("readonly"), "{err}");
-        let err = load("Param.new = nil return Patch.new('T')").err().unwrap().to_string();
+        let err = load("Macro.new = nil return Patch.new('T')").err().unwrap().to_string();
         assert!(err.contains("readonly"), "{err}");
         for f in ["loadstring", "getfenv", "setfenv", "dofile", "loadfile"] {
             let err = load(&format!("assert({f} == nil, '{f} exists') return Patch.new('T')"));
@@ -798,8 +1051,7 @@ mod tests {
     fn theme_holds_tokens_and_library_overrides() {
         let src = |theme: &str| {
             format!(
-                "local g = Param.new('g', 'G', {{ min = -24, max = 0 }})
-                 return Patch.new('T', {{ chain = Chain.new({{ Blocks.Gain.new('out', {{ db = g }}) }}), theme = {theme} }})"
+                "return Patch.new('T', {{ chain = Chain.new({{ Blocks.Gain.new('out', {{ db = 0 }}) }}), theme = {theme} }})"
             )
         };
         let good = r##"{
@@ -844,9 +1096,9 @@ mod tests {
     fn requires_ui_files_from_the_patch_folder_only() {
         let d = TempDir::with_patch(
             "local ui = require('@self/ui')
-             local g = Param.new('g', 'G', { min = -24, max = 0 })
-             local m = Macro.new('m', 'M'):drives(g)
-             return Patch.new('T', { chain = Chain.new({ Blocks.Gain.new('out', { db = g }) }), macros = { m },
+             local out = Blocks.Gain.new('out', { db = 0 })
+             local m = Macro.new('m', 'M'):drives(out.params.db)
+             return Patch.new('T', { chain = Chain.new({ out }), macros = { m },
                                      panel = ui.Panel.new({ gain = m }) })",
         );
         std::fs::create_dir_all(d.0.join("components")).unwrap();

@@ -1,19 +1,50 @@
 //! The control notch: a tab of frame material hanging from the window's top edge, joined to
-//! it by concave flares. One row of equal-height controls in two groups: reload (+ sync LED) |
-//! snapshot selector, save, load. The sheet openers (controls, chat, settings) live in the
-//! top bar. Stateless: the shell owns everything it shows.
-//! Snapshots don't exist yet: the selector shows "Init", Save and Load are disabled.
+//! it by concave flares. Two rows:
+//! - the view switch, full width: Surface | Chain | Matrix (what the patch window shows);
+//! - reload (+ sync LED) | snapshot selector, save, load.
+//!
+//! The sheet openers (controls, chat, settings) live in the top bar. Stateless: the shell owns
+//! everything it shows. Not built yet, and disabled with a tooltip saying so: the Matrix view,
+//! snapshots (the selector shows "Init", Save and Load are off).
 
-use super::{icons, theme};
+use super::{icons, tabs, theme};
 use nice_plug_iced::iced::{
     Border, Center, Element, Fill, Padding, Point, Rectangle, Renderer, Shadow, Theme, Vector,
     mouse,
-    widget::{button, canvas, container, row, space, stack, text},
+    widget::{button, canvas, column, container, row, space, stack, text, tooltip},
 };
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Reload,
+    View(View),
+}
+
+/// What the patch window shows. Only the panel exists so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    /// The patch's ControlPanel, or without one its macros (`surface`).
+    Surface,
+    /// The audio tree (blocks, containers with slots).
+    Chain,
+    /// Every modulation and macro mapping as a table. Not built yet.
+    Matrix,
+}
+
+impl View {
+    const ALL: [View; 3] = [View::Surface, View::Chain, View::Matrix];
+
+    fn label(self) -> &'static str {
+        match self {
+            View::Surface => "Surface",
+            View::Chain => "Chain",
+            View::Matrix => "Matrix",
+        }
+    }
+
+    fn available(self) -> bool {
+        self != View::Matrix
+    }
 }
 
 /// The patch file's state, shown by the LED on Reload.
@@ -26,6 +57,7 @@ pub enum Sync {
 }
 
 pub struct Props<'a> {
+    pub view: View,
     pub snapshot: &'a str,
     pub sync: Sync,
 }
@@ -61,13 +93,16 @@ pub fn view<'a>(p: Props<'a>) -> Element<'a, Message> {
     let save = square(icons::icon(icons::SAVE, 13.0, 2.0, off), None, false);
     let load = square(icons::icon(icons::FOLDER, 13.0, 2.0, off), None, false);
 
-    let controls = row![
+    let tools = row![
         reload,
         divider(),
         row![selector, save, load].spacing(theme::SPACE_HAIR),
     ]
     .spacing(theme::SPACE_2)
     .align_y(Center);
+
+    // The view switch spans the width of the row below it.
+    let controls = column![view_switch(p.view), tools].spacing(6);
 
     // Three layers, so the notch has no seams at fractional UI scales (separate flare and body
     // widgets each antialiased the shared edge, and the patch showed through as a thin line):
@@ -98,6 +133,51 @@ pub fn view<'a>(p: Props<'a>) -> Element<'a, Message> {
 }
 
 const SELECTOR_WIDTH: f32 = 168.0;
+
+/// The notch's size, flares included (where the shell's blur leaves it sharp).
+pub fn size() -> (f32, f32) {
+    (TOOLS_WIDTH + 2.0 * 8.0 + 2.0 * theme::RADIUS_WINDOW, 4.0 + (24.0 + 4.0) + 6.0 + theme::SIZE_CONTROL + 6.0)
+}
+
+/// The width of the tools row (reload | selector, save, load); the view switch matches it.
+const TOOLS_WIDTH: f32 =
+    theme::SIZE_CONTROL + 2.0 * theme::SPACE_2 + 1.0 + SELECTOR_WIDTH + 2.0 * theme::SPACE_HAIR + 2.0 * theme::SIZE_CONTROL;
+
+/// Surface | Chain | Matrix in a recessed track; the highlight slides between them. Views that
+/// don't exist yet are disabled and say so.
+fn view_switch<'a>(current: View) -> Element<'a, Message> {
+    let segment = |v: View, on: bool| -> Element<'a, Message> {
+        let b = button(container(text(v.label()).size(12).font(if on { theme::font::SANS_SEMIBOLD } else { theme::font::SANS })).center(Fill))
+            .on_press_maybe((v.available() && v != current).then_some(Message::View(v)))
+            .width(Fill)
+            .height(24)
+            .padding(0)
+            .style(tabs::style(on, theme::frame_switch(on)));
+        if v.available() {
+            b.into()
+        } else {
+            tooltip(b, container(text("coming next").size(11).color(theme::c().frame_ink_2)).padding(Padding { top: 3.0, bottom: 3.0, left: 7.0, right: 7.0 }).style(|_: &Theme| container::Style {
+                background: Some(theme::c().frame_raised.into()),
+                border: Border { radius: theme::radius(6.0), width: 1.0, color: theme::c().frame_hairline_strong },
+                ..Default::default()
+            }), tooltip::Position::Bottom)
+            .into()
+        }
+    };
+    let off = row(View::ALL.into_iter().map(|v| segment(v, false))).spacing(2);
+    let on = row(View::ALL.into_iter().map(|v| segment(v, true))).spacing(2);
+    let selected = View::ALL.iter().position(|v| *v == current);
+    let pill = tabs::Pill {
+        background: theme::c().frame_invert,
+        radius: theme::RADIUS_BUTTON,
+        shadow: Shadow::default(),
+    };
+    container(tabs::tabs(off, on, selected, pill))
+        .width(TOOLS_WIDTH)
+        .padding(2)
+        .style(theme::frame_track)
+        .into()
+}
 
 /// A square icon button; `None` = disabled. `active`: highlighted (its sheet is open).
 fn square<'a>(content: impl Into<Element<'a, Message>>, msg: Option<Message>, active: bool) -> Element<'a, Message> {

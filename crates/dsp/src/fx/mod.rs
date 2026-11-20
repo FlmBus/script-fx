@@ -4,7 +4,7 @@
 //! Like everything on the audio thread: no allocations in `process` (all
 //! buffers are sized in the constructors), no locks.
 
-mod distortion;
+pub(crate) mod distortion;
 mod dynamics;
 mod filter;
 mod modulation;
@@ -13,7 +13,7 @@ mod rhythm;
 mod space;
 
 use patch::ParamSpec;
-use patch::chain::{BlockKind, Value};
+use patch::chain::{BlockKind, ParamRef};
 
 use crate::{Ctx, Frame, P};
 
@@ -35,13 +35,9 @@ pub(crate) struct Args<'a> {
 }
 
 impl Args<'_> {
-    /// An optional setting with a default.
-    pub fn p(&self, v: &Option<Value>, default: f32) -> P {
-        P::new(v.as_ref(), default, self.params)
-    }
-    /// A required setting.
-    pub fn req(&self, v: &Value) -> P {
-        P::new(Some(v), 0.0, self.params)
+    /// A setting: follows its param (every setting has one, defaults come from the prelude).
+    pub fn p(&self, r: &ParamRef) -> P {
+        P::param(*r)
     }
     pub fn samples(&self, ms: f32) -> usize {
         (ms * 0.001 * self.sr).ceil() as usize

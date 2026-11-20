@@ -3,28 +3,21 @@
 
 local ui = require("@self/ui")
 
-local tape      = Param.new("tape",      "Tape",      { min = 0, max = 18, unit = "dB", decimals = 1, default = 9 })
-local tape_tone = Param.new("tape_tone", "Tape tone", { min = 3000, max = 18000, unit = "Hz", decimals = 0, default = 12000 })
-local tube      = Param.new("tube",      "Tube",      { min = 0, max = 24, unit = "dB", decimals = 1, default = 6 })
-local diode     = Param.new("diode",     "Diode",     { min = 0, max = 30, unit = "dB", decimals = 1, default = 4 })
-local soft_clip = Param.new("soft_clip", "Soft clip", { min = 0, max = 20, unit = "dB", decimals = 1, default = 4 })
+local tape      = Blocks.Drive.new("tape", { amount = 9, mix = 100 })
+local tape_tone = Blocks.LowPass.new("tape_tone", { freq = 12000, q = 0.6 })
+local tube      = Blocks.Drive.new("tube", { amount = 6, mix = 60 })
+local diode     = Blocks.Drive.new("diode", { amount = 4, mix = 40 })
+local soft_clip = Blocks.Drive.new("soft_clip", { amount = 4, mix = 100 })
 
-local chain = Chain.new {
-  Blocks.Drive.new("tape",      { amount = tape, mix = 100 }),
-  Blocks.LowPass.new("tape_tone", { freq = tape_tone, q = 0.6 }),
-  Blocks.Drive.new("tube",      { amount = tube, mix = 60 }),
-  Blocks.Drive.new("diode",     { amount = diode, mix = 40 }),
-  Blocks.Drive.new("soft_clip", { amount = soft_clip, mix = 100 }),
-  Blocks.Gain.new("trim",       { db = -3 }),
-}
+local chain = Chain.new { tape, tape_tone, tube, diode, soft_clip, Blocks.Gain.new("trim", { db = -3 }) }
 
 local macros = {
   tape = Macro.new("tape", "Tape")
-    :drives(tape)
-    :drives(tape_tone, { from = 16000, to = 6000, curve = "exp" }),   -- more tape = darker
-  tube = Macro.new("tube", "Tube"):drives(tube),
-  diode = Macro.new("diode", "Diode"):drives(diode),
-  soft_clip = Macro.new("soft_clip", "Soft clip"):drives(soft_clip),
+    :drives(tape.params.amount, { from = 0, to = 18 })
+    :drives(tape_tone.params.freq, { from = 16000, to = 6000, curve = "exp" }),   -- more tape = darker
+  tube = Macro.new("tube", "Tube"):drives(tube.params.amount, { from = 0, to = 24 }),
+  diode = Macro.new("diode", "Diode"):drives(diode.params.amount, { from = 0, to = 30 }),
+  soft_clip = Macro.new("soft_clip", "Soft clip"):drives(soft_clip.params.amount, { from = 0, to = 20 }),
 }
 
 return Patch.new("Neon Saturator", {

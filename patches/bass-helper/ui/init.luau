@@ -19,7 +19,7 @@ export type PanelProps = {
   transients: Macro, stabilize: Macro, drive: Macro,
   boom: Macro, boxy: Macro, click: Macro, output: Macro,
   xover: Param, grit_mix: Param,
-  punch: MeteredBlock, fet: MeteredBlock, opto: MeteredBlock, rider: MeteredBlock,
+  punch: TransientBlock, fet: FETCompressorBlock, opto: OptoCompressorBlock, rider: RiderBlock,
 }
 
 local Panel = Component.define {

@@ -1,0 +1,66 @@
+name: macOS diagnostics build
+
+# A test build for the Apple Silicon Mac in the studio: optimized, with debug symbols and the
+# `diagnostics` feature (log file, heartbeat, panics with backtraces), plus the standalone app,
+# helper scripts and test patches. Packed as a .tar.gz inside the artifact, because artifacts
+# lose file permissions (the scripts and the binary must stay executable).
+
+on:
+  push:
+    branches: [notch-drawer, 'diag/**']
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: macOS arm64 diagnostics
+    runs-on: macos-latest
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+      SCRIPTFX_GIT_SHA: ${{ github.sha }}
+      CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+      CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO: packed
+      CARGO_PROFILE_RELEASE_STRIP: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mac-diagnostics
+
+      - name: Tests (patch, dsp)
+        run: cargo test --release -p patch -p dsp
+
+      - name: Bundle VST3 + CLAP
+        run: cargo xtask bundle scriptfx --release --features diagnostics
+
+      - name: Standalone
+        run: cargo build --release -p scriptfx --bin scriptfx --features diagnostics
+
+      - name: Package
+        run: |
+          out="ScriptFX-mac-diagnostics-${GITHUB_SHA::7}"
+          mkdir -p "$out/dSYMs"
+          cp -R target/bundled/ScriptFX.vst3 target/bundled/ScriptFX.clap "$out/"
+          cp target/release/scriptfx "$out/scriptfx"
+          cp -R test-patches "$out/test-patches"
+          cp .github/diagnostics/*.command .github/diagnostics/README.txt "$out/"
+          chmod +x "$out"/*.command "$out/scriptfx"
+          find target/release -maxdepth 2 -name '*.dSYM' -exec cp -R {} "$out/dSYMs/" \;
+          for b in "$out/ScriptFX.vst3" "$out/ScriptFX.clap" "$out/scriptfx"; do
+            codesign --force --deep --sign - "$b"
+          done
+          ls -la "$out" "$out/dSYMs"
+          tar czf "$out.tar.gz" "$out"
+          echo "OUT=$out" >> "$GITHUB_ENV"
+
+      - name: Smoke test (standalone starts and logs)
+        continue-on-error: true
+        run: |
+          (./"$OUT"/scriptfx -b dummy > smoke.txt 2>&1 &) ; sleep 20; pkill scriptfx || true
+          tail -20 smoke.txt || true
+          f=$(ls -t ~/Library/Logs/ScriptFX/*.log 2>/dev/null | head -1); echo "== $f"; head -60 "$f" || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.OUT }}
+          path: ${{ env.OUT }}.tar.gz

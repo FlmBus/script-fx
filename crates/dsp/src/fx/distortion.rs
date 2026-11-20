@@ -2,7 +2,7 @@
 //! modulator, tape. All except the bitcrusher are flagged nonlinear in the patch
 //! model, so they're oversampled automatically (see `lib.rs`).
 
-use patch::chain::{BlockKind, RectifyMode};
+use patch::chain::{BlockKind, ParamRef, RectifyMode};
 
 use super::{Args, DcBlocker, Fx, Line, Lfo, Smooth, mix, pct};
 use crate::{Biquad, Ctx, EqShape, Frame, P, db_to_gain};
@@ -11,30 +11,30 @@ pub(super) fn build(kind: &BlockKind, a: &Args) -> Box<dyn Fx> {
     match kind {
         BlockKind::Waveshaper { curve, drive, output, mix } => Box::new(Waveshaper {
             lut: curve.clone(),
-            drive: a.p(drive, 0.0),
-            output: a.p(output, 0.0),
-            mix: a.p(mix, 100.0),
+            drive: a.p(drive),
+            output: a.p(output),
+            mix: a.p(mix),
         }),
         BlockKind::Wavefolder { amount, bias, mix } => Box::new(Wavefolder {
-            amount: a.req(amount),
-            bias: a.p(bias, 0.0),
-            mix: a.p(mix, 100.0),
+            amount: a.p(amount),
+            bias: a.p(bias),
+            mix: a.p(mix),
             dc: [DcBlocker::default(); 2],
         }),
         BlockKind::Clipper { ceiling, softness, drive } => {
-            Box::new(Clipper { ceiling: a.p(ceiling, 0.0), softness: a.p(softness, 0.0), drive: a.p(drive, 0.0) })
+            Box::new(Clipper { ceiling: a.p(ceiling), softness: a.p(softness), drive: a.p(drive) })
         }
         BlockKind::Rectifier { mode, mix } => {
-            Box::new(Rectifier { mode: *mode, mix: a.p(mix, 100.0), dc: [DcBlocker::default(); 2] })
+            Box::new(Rectifier { mode: *mode, mix: a.p(mix), dc: [DcBlocker::default(); 2] })
         }
         BlockKind::Bitcrusher { bits, rate, mix } => Box::new(Bitcrusher {
-            bits: a.p(bits, 8.0),
-            rate: rate.as_ref().map(|r| a.req(r)),
-            mix: a.p(mix, 100.0),
+            bits: a.p(bits),
+            rate: rate.as_ref().map(|r| a.p(r)),
+            mix: a.p(mix),
             phase: 1.0,
             held: [0.0; 2],
         }),
-        BlockKind::RingMod { freq, mix } => Box::new(RingMod { freq: a.req(freq), mix: a.p(mix, 100.0), lfo: Lfo::default() }),
+        BlockKind::RingMod { freq, mix } => Box::new(RingMod { freq: a.p(freq), mix: a.p(mix), lfo: Lfo::default() }),
         BlockKind::Tape { drive, wow, flutter, mix } => Box::new(Tape::new(a, drive, wow, flutter, mix)),
         _ => unreachable!(),
     }
@@ -52,17 +52,36 @@ impl Fx for Waveshaper {
         let g = db_to_gain(self.drive.update(ctx));
         let out = db_to_gain(self.output.update(ctx));
         let wet = pct(self.mix.update(ctx));
-        let last = (self.lut.len() - 1) as f32;
         for f in frames {
             for x in f.iter_mut() {
-                let pos = ((*x * g).clamp(-1.0, 1.0) + 1.0) * 0.5 * last;
-                let i = (pos as usize).min(self.lut.len() - 2);
-                let frac = pos - i as f32;
-                let y = self.lut[i] + frac * (self.lut[i + 1] - self.lut[i]);
-                *x = mix(*x, y * out, wet);
+                *x = mix(*x, lut_at(&self.lut, *x * g) * out, wet);
             }
         }
     }
+}
+
+/// The waveshaper's curve at `v` (clamped to ±1), linearly interpolated.
+#[inline]
+pub(crate) fn lut_at(lut: &[f32], v: f32) -> f32 {
+    let pos = (v.clamp(-1.0, 1.0) + 1.0) * 0.5 * (lut.len() - 1) as f32;
+    let i = (pos as usize).min(lut.len() - 2);
+    lut[i] + (pos - i as f32) * (lut[i + 1] - lut[i])
+}
+
+/// The wavefolder's curve (before its DC blocker): sin() folds the signal back each time it
+/// passes ±1; `bias` -1..1.
+#[inline]
+pub(crate) fn fold(x: f32, g: f32, bias: f32) -> f32 {
+    let half_pi = std::f32::consts::FRAC_PI_2;
+    (half_pi * (x * g + bias)).sin() - (half_pi * bias).sin()
+}
+
+/// The clipper's curve: `c` ceiling (gain), `g` drive (gain), `soft` 0..1.
+#[inline]
+pub(crate) fn clip(x: f32, g: f32, c: f32, soft: f32) -> f32 {
+    let v = x * g / c;
+    let hard = v.clamp(-1.0, 1.0);
+    c * (hard + soft * (v.tanh() - hard))
 }
 
 struct Wavefolder {
@@ -78,13 +97,9 @@ impl Fx for Wavefolder {
         let bias = (self.bias.update(ctx) / 100.0).clamp(-1.0, 1.0);
         let wet = pct(self.mix.update(ctx));
         let r = DcBlocker::coef(ctx.sr);
-        let half_pi = std::f32::consts::FRAC_PI_2;
-        let offset = (half_pi * bias).sin();
         for f in frames {
             for (ch, x) in f.iter_mut().enumerate() {
-                // sin() folds the signal back each time it passes ±1.
-                let y = (half_pi * (*x * g + bias)).sin() - offset;
-                let y = self.dc[ch].tick(y, r);
+                let y = self.dc[ch].tick(fold(*x, g, bias), r);
                 *x = mix(*x, y, wet);
             }
         }
@@ -101,12 +116,10 @@ impl Fx for Clipper {
     fn process(&mut self, frames: &mut [Frame], ctx: &Ctx) {
         let c = db_to_gain(self.ceiling.update(ctx)).max(1e-6);
         let soft = pct(self.softness.update(ctx));
-        let g = db_to_gain(self.drive.update(ctx)) / c;
+        let g = db_to_gain(self.drive.update(ctx));
         for f in frames {
             for x in f.iter_mut() {
-                let v = *x * g;
-                let hard = v.clamp(-1.0, 1.0);
-                *x = c * (hard + soft * (v.tanh() - hard));
+                *x = clip(*x, g, c, soft);
             }
         }
     }
@@ -206,15 +219,15 @@ struct Tape {
 }
 
 impl Tape {
-    fn new(a: &Args, drive: &Option<patch::chain::Value>, wow: &Option<patch::chain::Value>, flutter: &Option<patch::chain::Value>, mix: &Option<patch::chain::Value>) -> Self {
+    fn new(a: &Args, drive: &ParamRef, wow: &ParamRef, flutter: &ParamRef, mix: &ParamRef) -> Self {
         let base = a.samples(TAPE_BASE_MS);
         let mut bump = Biquad::default();
         bump.set(EqShape::Peak, 90.0, 1.0, 2.0, a.sr);
         Tape {
-            drive: a.p(drive, 6.0),
-            wow: a.p(wow, 0.0),
-            flutter: a.p(flutter, 0.0),
-            mix: a.p(mix, 100.0),
+            drive: a.p(drive),
+            wow: a.p(wow),
+            flutter: a.p(flutter),
+            mix: a.p(mix),
             lines: [Line::new(2 * base + 2), Line::new(2 * base + 2)],
             base,
             wow_lfo: Lfo::default(),

@@ -2,7 +2,7 @@
 -- re-render any of its ancestors.
 local params = {}
 for _, k in { "low1", "low2", "low3", "low4", "high1", "high2", "high3", "high4" } do
-  params[k] = Param.new(k, k, { min = 0, max = 1 })
+  params[k] = Blocks.Gain.new(k).params.db
 end
 local Knob = Component.define {
   name = "Knob", kind = "knob", size = { 60, 60 },

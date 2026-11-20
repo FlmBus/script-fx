@@ -318,13 +318,13 @@ fn reverb_decays_in_about_its_rt60() {
 #[test]
 fn frozen_reverb_sustains() {
     let p = load(
-        "Blocks.Reverb.new('r', { decay = 0.5, mix = 100, freeze = fr })",
-        "local fr = Param.new('fr', 'Freeze', { min = 0, max = 1, default = 0 })",
+        "Blocks.Reverb.new('r', { decay = 0.5, mix = 100, freeze = 0 })",
+        "",
     );
     let mut g = Graph::build(&p, SR, &p.default_param_values());
     let mut x = sine(300.0, -12.0, 0.3);
     g.process_all(&[0.0; MACRO_SLOTS], &mut x);
-    g.free_values()[0].store(1.0, Ordering::Relaxed);
+    g.free_values()[p.param_index("r.freeze").unwrap()].store(1.0, Ordering::Relaxed);
     let mut tail = vec![[0.0; 2]; (2.0 * SR) as usize];
     g.process_all(&[0.0; MACRO_SLOTS], &mut tail);
     let a = rms_db(&tail[(0.2 * SR) as usize..(0.4 * SR) as usize], 0);
@@ -369,14 +369,14 @@ fn granular_makes_a_cloud() {
 #[test]
 fn stutter_repeats_the_last_slice() {
     let p = load(
-        "Blocks.Stutter.new('s', { active = on, length = 50 })",
-        "local on = Param.new('on', 'On', { min = 0, max = 1, default = 0 })",
+        "Blocks.Stutter.new('s', { active = 0, length = 50 })",
+        "",
     );
     let mut g = Graph::build(&p, SR, &p.default_param_values());
     // A rising ramp, so every sample is different.
     let mut x: Vec<Frame> = (0..24_000).map(|i| [i as f32 / 24_000.0; 2]).collect();
     g.process_all(&[0.0; MACRO_SLOTS], &mut x[..12_000]);
-    g.free_values()[0].store(1.0, Ordering::Relaxed);
+    g.free_values()[p.param_index("s.active").unwrap()].store(1.0, Ordering::Relaxed);
     g.process_all(&[0.0; MACRO_SLOTS], &mut x[12_000..]);
     // After the switch (smoothed, one sub-block + fade), output repeats every 2400 samples.
     let slice = 2400;

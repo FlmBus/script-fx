@@ -164,15 +164,15 @@ fn main() {
     let mut ui = Ui::load(&root.join("fixtures/grid")).unwrap();
     let mut w = World::default();
     for i in 0..120 {
-        w.binds.insert(format!("param.p{i}"), (i as f32 * 0.137).fract());
+        w.binds.insert(format!("param.g{i}.db"), (i as f32 * 0.137).fract());
     }
     let (st, ms) = timed(|| frame(&mut ui, &w, 1.0));
     println!("  first frame {ms:.1} ms ({} nodes)", st.nodes);
     print("idle", &run(&mut ui, &mut w, 60, 1.0, |_, _| {}));
-    print("drag one knob", &run(&mut ui, &mut w, 60, 1.0, |w, i| { w.binds.insert("param.p5".into(), (i as f32 / 60.0).fract()); }));
+    print("drag one knob", &run(&mut ui, &mut w, 60, 1.0, |w, i| { w.binds.insert("param.g5.db".into(), (i as f32 / 60.0).fract()); }));
     print("all 120 automated every frame", &run(&mut ui, &mut w, 60, 1.0, |w, i| {
         for k in 0..120 {
-            w.binds.insert(format!("param.p{k}"), ((k + i) as f32 * 0.013).fract());
+            w.binds.insert(format!("param.g{k}.db"), ((k + i) as f32 * 0.013).fract());
         }
     }));
     composite(&ui, 1.0).save_png(out_dir.join("grid.png")).unwrap();
@@ -182,10 +182,10 @@ fn main() {
     let mut ui = Ui::load(&root.join("fixtures/nested")).unwrap();
     let mut w = World::default();
     for k in ["low1", "low2", "low3", "low4", "high1", "high2", "high3", "high4"] {
-        w.binds.insert(format!("param.{k}"), 0.4);
+        w.binds.insert(format!("param.{k}.db"), 0.4);
     }
     frame(&mut ui, &w, 1.0);
-    w.binds.insert("param.low3".into(), 0.9);
+    w.binds.insert("param.low3.db".into(), 0.9);
     let st = frame(&mut ui, &w, 1.0);
     println!("  drag low3: {} renders (expect 1: only that knob), {} rasters", st.renders, st.rasters);
     composite(&ui, 1.0).save_png(out_dir.join("nested.png")).unwrap();

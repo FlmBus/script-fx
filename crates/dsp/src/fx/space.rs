@@ -16,10 +16,10 @@ pub(super) fn build(kind: &BlockKind, a: &Args, meter: &mut usize) -> Box<dyn Fx
             let chain = crate::build_nodes(&feedback_chain.0, a.params, a.sr, a.max_frames, meter);
             let max = a.samples(DELAY_MAX_MS) + a.max_frames;
             Box::new(Delay {
-                time: a.p(time, 375.0),
+                time: a.p(time),
                 sync: *sync,
-                feedback: a.p(feedback, 35.0),
-                mix: a.p(mix, 30.0),
+                feedback: a.p(feedback),
+                mix: a.p(mix),
                 pingpong: *pingpong,
                 chain_latency: chain_latency(&chain),
                 chain,
@@ -129,16 +129,17 @@ struct Reverb {
 impl Reverb {
     fn new(a: &Args, r: &ReverbSpec, shimmer: bool) -> Self {
         Reverb {
-            size: a.p(&r.size, 50.0),
-            decay: a.p(&r.decay, 2.0),
-            damping: a.p(&r.damping, 50.0),
-            predelay: a.p(&r.predelay, 0.0),
-            width: a.p(&r.width, 100.0),
-            mix: a.p(&r.mix, 30.0),
-            freeze: a.p(&r.freeze, 0.0),
+            size: a.p(&r.size),
+            decay: a.p(&r.decay),
+            damping: a.p(&r.damping),
+            predelay: a.p(&r.predelay),
+            width: a.p(&r.width),
+            mix: a.p(&r.mix),
+            // Reverb only (Shimmer has none: never frozen).
+            freeze: r.freeze.as_ref().map_or(P::constant(0.0), |x| a.p(x)),
             shimmer: shimmer.then(|| Shimmer {
-                pitch: a.p(&r.pitch, 12.0),
-                amount: a.p(&r.amount, 50.0),
+                pitch: r.pitch.as_ref().map_or(P::constant(12.0), |x| a.p(x)),
+                amount: r.amount.as_ref().map_or(P::constant(50.0), |x| a.p(x)),
                 core: PitchCore::new(a.samples(100.0)),
             }),
             pre: Line::new(a.samples(PREDELAY_MAX_MS)),

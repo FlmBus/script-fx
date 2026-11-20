@@ -1,13 +1,14 @@
 -- ScriptFX patch API (loaded into the sandbox before init.luau).
 --
 --   local ui = require("./ui")
---   local drive = Param.new("drive", "Drive", { min = 0, max = 24, unit = "dB" })
---   local amount = Macro.new("amount", "Amount"):drives(drive)
---   local chain = Chain.new({ Blocks.Drive.new("sat", { amount = drive }) })
+--   local sat = Blocks.Drive.new("sat", { amount = 6 })            -- its knobs: sat.params.amount, sat.params.mix
+--   local amount = Macro.new("amount", "Amount"):drives(sat.params.amount, { from = 0, to = 24 })
+--   local chain = Chain.new({ sat })
 --   return Patch.new("My Patch", { chain = chain, macros = { amount }, panel = ui.Panel.new({ amount = amount }) })
 --
 -- Constructors take the identity positionally (id, display name) and every
--- setting by name in an options table. Everything is checked here, with the
+-- setting by name in an options table. A block's numeric settings are its knobs (Params,
+-- `block.params.<name>`); the options give their start values. Everything is checked here, with the
 -- error pointing at the offending line. Types for the editor: patches/.types/scriptfx.d.luau.
 -- The chunk returns the function that turns a Patch into plain data for the Rust side.
 --
@@ -59,7 +60,6 @@ local function list_of(check)
   end
 end
 
-local function is_setting(v) return type(v) == "number" or is(v, Param) end
 
 local NOTE = { c = 0, d = 2, e = 4, f = 5, g = 7, a = 9, b = 11 }
 
@@ -118,8 +118,9 @@ local KINDS = {
             'a non-empty list of Hz values or note names like "C2", "F#3"' },
   -- A note length synced to the host tempo: "1/4", "1/8." (dotted), "1/16t" (triplet), "2/1" (two bars).
   sync = { function(v) return type(v) == "string" and sync_beats(v) ~= nil end, 'a note length like "1/8", "1/8." or "1/16t"' },
-  setting  = { is_setting, "a number or a Param" },
-  settings = { list_of(is_setting), "a non-empty list of numbers/Params" },
+  -- A knob's start value (the block makes it a Param, see Blocks below).
+  setting  = { function(v) return type(v) == "number" end, "a number (the start value; to control it, use block.params.<name>)" },
+  settings = { list_of(function(v) return type(v) == "number" end), "a non-empty list of numbers" },
   chain    = { function(v) return is(v, Chain) end, "a Chain" },
   chains   = { list_of(function(v) return is(v, Chain) end), "a non-empty list of Chains" },
   macros   = { list_of(function(v) return is(v, Macro) end), "a non-empty list of Macros" },
@@ -127,10 +128,15 @@ local KINDS = {
   theme    = { function(v) return type(v) == "table" and getmetatable(v) == nil end, "a table (colors, fonts, images, library)" },
 }
 
--- `fields` is an ordered list of "name:kind" or "name:kind!" (required).
+-- `fields` is an ordered list of "name:kind" or "name:kind!" (required), or knob settings
+-- (tables from the knob constructors in Blocks, already parsed).
 local function parse_fields(fields)
   local out = {}
   for i, f in ipairs(fields) do
+    if type(f) == "table" then
+      out[i] = f
+      continue
+    end
     local name, kind, req = f:match("^([%w_]+):([%w_|]+)(!?)$")
     assert(name, "bad field spec " .. f)
     if kind:find("|", 1, true) and not KINDS[kind] then
@@ -195,24 +201,27 @@ local function strict(name, t)
 end
 
 ---------------------------------------------------------------- Param
+-- A knob of a block ("<block id>.<setting>"). Blocks create them (see Blocks); patches reach
+-- them as `block.params.<name>`. There is no Param.new: every param belongs to a block.
 Param.__index = Param
 Param.__name = "Param"
 
-local PARAM_FIELDS = parse_fields { "min:number!", "max:number!", "default:number", "unit:string", "decimals:integer" }
-
-function Param.new(id, name, o)
-  check_id("Param.new", id, 2)
-  local what = fmt("Param '%s'", id)
-  check_name(what, name, 2)
-  o = options(what, o, PARAM_FIELDS, 2)
-  if o.min == o.max then fail(what .. ": min and max must differ", 2) end
-  local lo, hi = math.min(o.min, o.max), math.max(o.min, o.max)
-  if o.default and (o.default < lo or o.default > hi) then
-    fail(fmt("%s: default %s is outside %s..%s", what, o.default, o.min, o.max), 2)
+-- Narrows the knob to lo..hi within the block type's range (the knob, the panel and typed values
+-- stay in there; a macro's from/to default to it). The start value must be inside.
+function Param:range(lo, hi)
+  if not is(self, Param) then fail("use param:range(lo, hi) with a colon", 2) end
+  local what = fmt("'%s':range(%s, %s)", self.id, tostring(lo), tostring(hi))
+  if type(lo) ~= "number" or type(hi) ~= "number" or lo == hi then fail(what .. ": needs two different numbers", 2) end
+  local min, max = math.min(self.min, self.max), math.max(self.min, self.max)
+  if math.min(lo, hi) < min or math.max(lo, hi) > max then
+    fail(fmt("%s: must stay within %g..%g %s", what, self.min, self.max, self.unit or ""), 2)
   end
-  if o.decimals and (o.decimals < 0 or o.decimals > 6) then fail(what .. ": decimals must be 0..6", 2) end
-  return setmetatable({ id = id, name = name, min = o.min, max = o.max, default = o.default,
-                        unit = o.unit, decimals = o.decimals, __ref = "param." .. id }, Param)
+  if self.scale == "log" and (lo <= 0 or hi <= 0) then fail(what .. ": a log knob needs a range above 0", 2) end
+  if self.default < math.min(lo, hi) or self.default > math.max(lo, hi) then
+    fail(fmt("%s: the start value %g is outside", what, self.default), 2)
+  end
+  self.min, self.max = lo, hi
+  return self
 end
 
 ---------------------------------------------------------------- Macro
@@ -244,6 +253,24 @@ function Macro:drives(param, o)
   local from, to = o.from or param.min, o.to or param.max
   if o.curve == "exp" and (from == 0 or to == 0 or (from < 0) ~= (to < 0)) then
     fail(what .. ': curve "exp" needs non-zero from/to with the same sign', 2)
+  end
+  -- Macros modulate around the knob's base value (Serum style: normalized deltas), so the first
+  -- macro on a param makes the macro's `from` that base. Later macros only add deltas. Without an explicit
+  -- default, the macro starts where the knob's original start value sat in the range.
+  if not param.driven then
+    if self.default == nil and #self.targets == 0 then
+      -- Where the start sits between from and to, measured on the knob's own travel (lin or
+      -- log): the same normalized space the modulation runs in.
+      local function travel(x)
+        if param.scale == "log" then return math.log(x / param.min) / math.log(param.max / param.min) end
+        return (x - param.min) / (param.max - param.min)
+      end
+      local span = travel(to) - travel(from)
+      local v = span ~= 0 and (travel(param.default) - travel(from)) / span or 0
+      if v == v then self.default = math.min(math.max(v, 0), 1) end
+    end
+    param.default = math.min(math.max(from, math.min(param.min, param.max)), math.max(param.min, param.max))
+    param.driven = true
   end
   self.targets[#self.targets + 1] = { param = param, from = o.from, to = o.to, curve = o.curve }
   return self
@@ -291,6 +318,43 @@ end
 
 ---------------------------------------------------------------- Blocks
 
+-- Every numeric block setting is a knob: the block type declares it once here (unit, range,
+-- default), and each block creates one Param per setting, "<block id>.<setting>", starting at
+-- the value the patch gives (or the default). The patch reaches them as `block.params.<name>`
+-- (e.g. `macro:drives(echo.params.feedback)`); the shell shows them as the block's knobs.
+--
+-- Knob kinds: dB, pct (%), hz, ms, sec (s), num (any unit). Hz/ms/s knobs move in even ratios
+-- (log scale) when their range starts above 0. `optional`: only created when the patch sets it
+-- (its absence means something: no sample-and-hold, no crossfade).
+local function knob(unit, log)
+  return function(name, min, max, default, o)
+    o = o or {}
+    local span = math.max(math.abs(min), math.abs(max))
+    local decimals = o.decimals
+    if decimals == nil then
+      if unit == "%" or unit == "Hz" and span > 50 then decimals = 0
+      elseif span <= 20 then decimals = 2
+      elseif span <= 1000 then decimals = 1
+      else decimals = 0 end
+    end
+    return { name = name, kind = o.list and "settings" or "setting", required = o.required, optional = o.optional,
+             meta = { unit = o.unit or unit, min = min, max = max, default = default, decimals = decimals,
+                      scale = (log and min > 0) and "log" or nil } }
+  end
+end
+local dB, pct, hz, ms, sec = knob("dB"), knob("%"), knob("Hz", true), knob("ms", true), knob("s", true)
+local function num(unit, log) return knob(unit, log) end
+local ratio = num(":1")
+
+local function title(name) return (name:gsub("_", " "):gsub("^%l", string.upper)) end
+
+-- The Param of one setting (ids may contain the block's dot; Param.new doesn't exist any more).
+local function block_param(block_id, name, display, meta, value)
+  return setmetatable({ id = block_id .. "." .. name, name = display, min = meta.min, max = meta.max,
+                        default = value or meta.default, unit = meta.unit, decimals = meta.decimals,
+                        scale = meta.scale, __ref = "param." .. block_id .. "." .. name }, Param)
+end
+
 -- `check(o)` returns an error message for constraints between options.
 -- Metered blocks can be a UI component's `source` (their __ref is "meter.<id>").
 -- Every block also takes `oversampling` (1, 2, 4, 8): it and everything inside
@@ -306,17 +370,40 @@ local function define(name, kind, fields, check, metered)
     o = options(what, o, fields, 2)
     local msg = check and check(o)
     if msg then fail(what .. ": " .. msg, 2) end
-    -- Plain data for the DSP side (curves sampled, notes in Hz, sync in beats).
+    -- Plain data for the DSP side (curves sampled, notes in Hz, sync in beats, settings as Params).
     o = table.clone(o)
+    local params = {}
     for _, f in ipairs(fields) do
       local v = o[f.name]
-      if v ~= nil then
+      if f.kind == "setting" then
+        if v ~= nil or not f.optional then
+          local m = f.meta
+          if v ~= nil and (v < math.min(m.min, m.max) or v > math.max(m.min, m.max)) then
+            fail(fmt("%s: %s must be %g..%g %s, got %g", what, f.name, m.min, m.max, m.unit, v), 2)
+          end
+          local p = block_param(id, f.name, title(f.name), m, v)
+          params[f.name] = p
+          o[f.name] = p
+        end
+      elseif f.kind == "settings" then
+        -- A list (crossovers): "<id>.crossover_1", ... as `params.crossovers[i]`.
+        local list, single = {}, f.name:gsub("s$", "")
+        for i, x in ipairs(v) do
+          local m = f.meta
+          if x < m.min or x > m.max then
+            fail(fmt("%s: %s must be %g..%g %s, got %g", what, f.name, m.min, m.max, m.unit, x), 2)
+          end
+          list[i] = block_param(id, fmt("%s_%d", single, i), fmt("%s %d", title(single), i), m, x)
+        end
+        params[f.name] = list
+        o[f.name] = list
+      elseif v ~= nil then
         if f.kind == "transfer" then
           o[f.name] = sample_curve(v, what, 2)
         elseif f.kind == "notes" then
-          local hz = {}
-          for i, n in ipairs(v) do hz[i] = type(n) == "number" and n or note_hz(n) end
-          o[f.name] = hz
+          local hzs = {}
+          for i, n in ipairs(v) do hzs[i] = type(n) == "number" and n or note_hz(n) end
+          o[f.name] = hzs
         elseif f.kind == "sync" then
           o[f.name] = sync_beats(v)
         end
@@ -330,111 +417,109 @@ local function define(name, kind, fields, check, metered)
       end
     end
     return setmetatable({ kind = kind, type = name, id = id, o = o, fields = fields,
+                          params = strict(id .. ".params", params),
                           __ref = metered and ("meter." .. id) or nil }, Block)
   end
   Blocks[name] = strict("Blocks." .. name, B)
 end
 
-local EQ = { "freq:setting!", "gain:setting!", "q:setting" }
-local FILTER = { "freq:setting!", "q:setting" }
-local COMP = { "threshold:setting!", "ratio:setting", "attack:setting", "release:setting", "knee:setting",
-               "makeup:setting", "auto_makeup:boolean", "mix:setting" }
+local function eq(freq) return { hz("freq", 20, 20000, freq), dB("gain", -24, 24, 0), num("")("q", 0.1, 10, 0.707) } end
+local function filter(freq) return { hz("freq", 20, 20000, freq), num("")("q", 0.1, 10, 0.707) } end
+local function comp(r, a, rel, k)
+  return { dB("threshold", -60, 0, -18), ratio("ratio", 1, 20, r), ms("attack", 0.1, 200, a), ms("release", 5, 2000, rel),
+           dB("knee", 0, 24, k), dB("makeup", 0, 24, 0), "auto_makeup:boolean", pct("mix", 0, 100, 100) }
+end
+local function reverb(extra)
+  local f = { pct("size", 0, 100, 50), sec("decay", 0.1, 30, 2), pct("damping", 0, 100, 50), ms("predelay", 0, 500, 0),
+              pct("width", 0, 200, 100), pct("mix", 0, 100, 30) }
+  for _, x in ipairs(extra) do f[#f + 1] = x end
+  return f
+end
 
-define("Gain", "gain", { "db:setting!" })
-define("PeakEq", "peak_eq", EQ)
-define("LowShelf", "low_shelf", EQ)
-define("HighShelf", "high_shelf", EQ)
-define("LowPass", "low_pass", FILTER)
-define("HighPass", "high_pass", FILTER)
-define("Drive", "drive", { "amount:setting!", "mix:setting" })
-define("Compressor", "compressor", COMP, nil, true)
-define("FETCompressor", "fet_compressor", COMP, nil, true)
-define("OptoCompressor", "opto_compressor", COMP, nil, true)
-define("Rider", "rider", { "target:setting!", "range:setting!", "speed:setting" }, nil, true)
-define("Transient", "transient", { "attack:setting!", "sustain:setting" }, nil, true)
 -- Utility
-define("Pan", "pan", { "pan:setting!" })
-define("Width", "width", { "width:setting!" })
-define("MonoBass", "mono_bass", { "freq:setting!" })
-define("Haas", "haas", { "delay:setting!", "channel:side" }, function(o)
-  if type(o.delay) == "number" and (o.delay < 0 or o.delay > 40) then return "delay must be 0..40 ms" end
-end)
+define("Gain", "gain", { dB("db", -120, 24, 0) })  -- down to -120: mute
+define("PeakEq", "peak_eq", eq(1000))
+define("LowShelf", "low_shelf", eq(150))
+define("HighShelf", "high_shelf", eq(6000))
+define("LowPass", "low_pass", filter(20000))
+define("HighPass", "high_pass", filter(20))
+define("Drive", "drive", { dB("amount", 0, 36, 0), pct("mix", 0, 100, 100) })
+define("Compressor", "compressor", comp(2, 5, 100, 4), nil, true)
+define("FETCompressor", "fet_compressor", comp(4, 0.3, 80, 2), nil, true)
+define("OptoCompressor", "opto_compressor", comp(3, 10, 250, 8), nil, true)
+define("Rider", "rider", { dB("target", -48, 0, -18), dB("range", 0, 24, 6), ms("speed", 10, 5000, 300) }, nil, true)
+define("Transient", "transient", { dB("attack", -24, 24, 0), dB("sustain", -24, 24, 0) }, nil, true)
+define("Pan", "pan", { num("")("pan", -100, 100, 0, { decimals = 0 }) })
+define("Width", "width", { pct("width", 0, 200, 100) })
+define("MonoBass", "mono_bass", { hz("freq", 20, 500, 120) })
+define("Haas", "haas", { ms("delay", 0, 40, 10), "channel:side" })
 define("Invert", "invert", { "channels:channels" })
 define("DCBlock", "dc_block", {})
 define("Meter", "meter", {}, nil, true)
 
 -- Distortion
-local function pct_range(lo, hi, ...)
-  local names = { ... }
-  return function(o)
-    for _, n in ipairs(names) do
-      local v = o[n]
-      if type(v) == "number" and (v < lo or v > hi) then return fmt("%s must be %g..%g", n, lo, hi) end
-    end
-  end
-end
-define("Waveshaper", "waveshaper", { "curve:transfer!", "drive:setting", "output:setting", "mix:setting" })
-define("Wavefolder", "wavefolder", { "amount:setting!", "bias:setting", "mix:setting" })
-define("Clipper", "clipper", { "ceiling:setting", "softness:setting", "drive:setting" })
-define("Rectifier", "rectifier", { "mode:half|full", "mix:setting" })
-define("Bitcrusher", "bitcrusher", { "bits:setting", "rate:setting", "mix:setting" }, pct_range(1, 24, "bits"))
-define("RingMod", "ring_mod", { "freq:setting!", "mix:setting" })
-define("Tape", "tape", { "drive:setting", "wow:setting", "flutter:setting", "mix:setting" })
+define("Waveshaper", "waveshaper", { "curve:transfer!", dB("drive", 0, 36, 0), dB("output", -36, 12, 0), pct("mix", 0, 100, 100) })
+define("Wavefolder", "wavefolder", { dB("amount", 0, 36, 0), pct("bias", -100, 100, 0), pct("mix", 0, 100, 100) })
+define("Clipper", "clipper", { dB("ceiling", -24, 0, 0), pct("softness", 0, 100, 0), dB("drive", 0, 36, 0) })
+define("Rectifier", "rectifier", { "mode:half|full", pct("mix", 0, 100, 100) })
+define("Bitcrusher", "bitcrusher", { num("bits")("bits", 1, 24, 8, { decimals = 0 }),
+                                     hz("rate", 100, 48000, 8000, { optional = true }), pct("mix", 0, 100, 100) })
+define("RingMod", "ring_mod", { hz("freq", 1, 5000, 200), pct("mix", 0, 100, 100) })
+define("Tape", "tape", { dB("drive", 0, 24, 6), pct("wow", 0, 100, 0), pct("flutter", 0, 100, 0), pct("mix", 0, 100, 100) })
 
 -- Filter
-define("MorphFilter", "morph_filter", { "freq:setting!", "morph:setting", "resonance:setting" })
-define("LadderFilter", "ladder_filter", { "freq:setting!", "resonance:setting", "drive:setting" })
-define("CombFilter", "comb_filter", { "freq:setting!", "feedback:setting", "mix:setting" }, pct_range(-99, 99, "feedback"))
-define("Formant", "formant", { "vowel:setting!", "shift:setting", "resonance:setting", "mix:setting" }, pct_range(0, 4, "vowel"))
-define("Resonator", "resonator", { "notes:notes!", "decay:setting", "mix:setting" }, function(o)
+define("MorphFilter", "morph_filter", { hz("freq", 20, 20000, 1000), pct("morph", 0, 100, 0), pct("resonance", 0, 100, 0) })
+define("LadderFilter", "ladder_filter", { hz("freq", 20, 20000, 1000), pct("resonance", 0, 100, 0), dB("drive", 0, 24, 0) })
+define("CombFilter", "comb_filter", { hz("freq", 20, 5000, 200), pct("feedback", -99, 99, 70), pct("mix", 0, 100, 50) })
+define("Formant", "formant", { num("")("vowel", 0, 4, 0), num("st")("shift", -12, 12, 0, { decimals = 1 }),
+                               pct("resonance", 0, 100, 50), pct("mix", 0, 100, 100) })
+define("Resonator", "resonator", { "notes:notes!", ms("decay", 10, 5000, 500), pct("mix", 0, 100, 50) }, function(o)
   if #o.notes > 16 then return "at most 16 notes" end
 end)
-define("DynamicEq", "dynamic_eq", { "freq:setting!", "q:setting", "threshold:setting!", "ratio:setting", "range:setting",
-                                    "attack:setting", "release:setting", "mode:cut|boost" }, nil, true)
+define("DynamicEq", "dynamic_eq", { hz("freq", 20, 20000, 1000), num("")("q", 0.1, 10, 1), dB("threshold", -60, 0, -24),
+                                    ratio("ratio", 1, 20, 3), dB("range", 0, 24, 12), ms("attack", 0.1, 200, 5),
+                                    ms("release", 5, 2000, 100), "mode:cut|boost" }, nil, true)
 
 -- Modulation (sync overrides rate: the LFO cycle is that note length at the host tempo)
-define("Chorus", "chorus", { "rate:setting", "sync:sync", "depth:setting", "mix:setting" })
-define("Flanger", "flanger", { "rate:setting", "sync:sync", "depth:setting", "feedback:setting", "mix:setting" },
-       pct_range(-99, 99, "feedback"))
-define("Phaser", "phaser", { "rate:setting", "sync:sync", "depth:setting", "feedback:setting", "freq:setting",
-                             "stages:integer", "mix:setting" }, function(o)
+define("Chorus", "chorus", { hz("rate", 0.01, 20, 0.8), "sync:sync", pct("depth", 0, 100, 50), pct("mix", 0, 100, 50) })
+define("Flanger", "flanger", { hz("rate", 0.01, 20, 0.3), "sync:sync", pct("depth", 0, 100, 70), pct("feedback", -99, 99, 50),
+                               pct("mix", 0, 100, 50) })
+define("Phaser", "phaser", { hz("rate", 0.01, 20, 0.5), "sync:sync", pct("depth", 0, 100, 70), pct("feedback", -99, 99, 30),
+                             hz("freq", 50, 10000, 800), "stages:integer", pct("mix", 0, 100, 50) }, function(o)
   if o.stages and (o.stages < 2 or o.stages > 12 or o.stages % 2 ~= 0) then return "stages must be 2, 4, ..., 12" end
-  return pct_range(-99, 99, "feedback")(o)
 end)
 -- phase_offset: LFO phase shift in degrees (synced + host playing: relative to the host's beat grid)
-define("Tremolo", "tremolo", { "rate:setting", "sync:sync", "phase_offset:setting", "depth:setting", "shape:sine|triangle|square" })
-define("AutoPan", "auto_pan", { "rate:setting", "sync:sync", "phase_offset:setting", "depth:setting", "shape:sine|triangle|square" })
+define("Tremolo", "tremolo", { hz("rate", 0.01, 20, 5), "sync:sync", num("°")("phase_offset", 0, 360, 0, { decimals = 0 }),
+                               pct("depth", 0, 100, 50), "shape:sine|triangle|square" })
+define("AutoPan", "auto_pan", { hz("rate", 0.01, 20, 1), "sync:sync", num("°")("phase_offset", 0, 360, 0, { decimals = 0 }),
+                                pct("depth", 0, 100, 100), "shape:sine|triangle|square" })
 
 -- Space
-define("Delay", "delay", { "time:setting", "sync:sync", "feedback:setting", "mix:setting", "pingpong:boolean",
-                           "feedback_chain:chain" }, function(o)
-  if type(o.time) == "number" and (o.time < 1 or o.time > 4000) then return "time must be 1..4000 ms" end
-  return pct_range(0, 100, "feedback")(o)
-end)
-local REVERB = { "size:setting", "decay:setting", "damping:setting", "predelay:setting", "width:setting", "mix:setting" }
-local reverb_fields = table.clone(REVERB)
-reverb_fields[#reverb_fields + 1] = "freeze:setting"
-define("Reverb", "reverb", reverb_fields, pct_range(0, 500, "predelay"))
-local shimmer_fields = table.clone(REVERB)
-shimmer_fields[#shimmer_fields + 1] = "pitch:setting"
-shimmer_fields[#shimmer_fields + 1] = "amount:setting"
-define("Shimmer", "shimmer", shimmer_fields, pct_range(0, 500, "predelay"))
+define("Delay", "delay", { ms("time", 1, 4000, 375), "sync:sync", pct("feedback", 0, 100, 35), pct("mix", 0, 100, 30),
+                           "pingpong:boolean", "feedback_chain:chain" })
+-- freeze: > 0.5 = infinite sustain (a switch; drive it with a macro)
+define("Reverb", "reverb", reverb({ num("")("freeze", 0, 1, 0, { decimals = 0 }) }))
+define("Shimmer", "shimmer", reverb({ num("st")("pitch", -24, 24, 12, { decimals = 0 }), pct("amount", 0, 100, 50) }))
 
 -- Pitch
-define("PitchShift", "pitch_shift", { "semitones:setting!", "window:setting", "mix:setting" }, pct_range(-24, 24, "semitones"))
-define("Granular", "granular", { "grain:setting", "density:setting", "spread:setting", "pitch:setting", "jitter:setting",
-                                 "reverse:setting", "width:setting", "mix:setting" }, pct_range(-24, 24, "pitch"))
+define("PitchShift", "pitch_shift", { num("st")("semitones", -24, 24, 0, { decimals = 1 }), ms("window", 10, 200, 60),
+                                      pct("mix", 0, 100, 100) })
+define("Granular", "granular", { ms("grain", 5, 500, 80), num("/s", true)("density", 1, 100, 20, { decimals = 0 }),
+                                 ms("spread", 0, 2000, 300), num("st")("pitch", -24, 24, 0, { decimals = 1 }),
+                                 num("ct")("jitter", 0, 100, 0, { decimals = 0 }), pct("reverse", 0, 100, 0),
+                                 pct("width", 0, 200, 100), pct("mix", 0, 100, 50) })
 
--- Rhythm
-define("Stutter", "stutter", { "active:setting!", "length:setting", "sync:sync", "mix:setting" })
+-- Rhythm (active: > 0.5 = repeating; drive it with a macro)
+define("Stutter", "stutter", { num("")("active", 0, 1, 0, { decimals = 0 }), ms("length", 10, 2000, 125), "sync:sync",
+                               pct("mix", 0, 100, 100) })
 
 -- Dynamics
-define("Limiter", "limiter", { "ceiling:setting", "release:setting", "lookahead:number" }, function(o)
+define("Limiter", "limiter", { dB("ceiling", -24, 0, -0.3), ms("release", 1, 1000, 80), "lookahead:number" }, function(o)
   if o.lookahead and (o.lookahead < 0 or o.lookahead > 20) then return "lookahead must be 0..20 ms" end
 end, true)
-define("Gate", "gate", { "threshold:setting!", "ratio:setting", "range:setting", "attack:setting", "hold:setting",
-                         "release:setting" }, nil, true)
-define("DeEsser", "de_esser", { "freq:setting", "threshold:setting!", "range:setting" }, nil, true)
+define("Gate", "gate", { dB("threshold", -80, 0, -40), ratio("ratio", 1, 100, 20), dB("range", 0, 90, 60),
+                         ms("attack", 0.1, 100, 1), ms("hold", 0, 500, 20), ms("release", 5, 2000, 150) }, nil, true)
+define("DeEsser", "de_esser", { hz("freq", 2000, 16000, 6000), dB("threshold", -60, 0, -20), dB("range", 0, 24, 12) }, nil, true)
 
 -- Routing
 define("MidSide", "mid_side", { "mid:chain", "side:chain" }, function(o)
@@ -443,18 +528,16 @@ end)
 define("LeftRight", "left_right", { "left:chain", "right:chain" }, function(o)
   if not o.left and not o.right then return "needs a 'left' and/or a 'right' chain" end
 end)
-define("BandSplit", "band_split", { "crossovers:settings!", "bands:chains!" }, function(o)
+define("BandSplit", "band_split", { hz("crossovers", 20, 20000, 1000, { list = true, required = true }), "bands:chains!" }, function(o)
   if #o.bands ~= #o.crossovers + 1 then
     return fmt("%d crossover(s) need %d bands, got %d", #o.crossovers, #o.crossovers + 1, #o.bands)
   end
   for i = 2, #o.crossovers do
-    local a, b = o.crossovers[i - 1], o.crossovers[i]
-    if type(a) == "number" and type(b) == "number" and b <= a then
-      return "crossovers must be in ascending order"
-    end
+    if o.crossovers[i] <= o.crossovers[i - 1] then return "crossovers must be in ascending order" end
   end
 end)
-define("Parallel", "parallel", { "branches:chains!", "mix:setting" }, function(o)
+-- mix (exactly 2 branches): a crossfade, 0 % = first, 100 % = second; without it, the branches are summed
+define("Parallel", "parallel", { "branches:chains!", pct("mix", 0, 100, 50, { optional = true }) }, function(o)
   if #o.branches < 2 then return "needs at least 2 branches" end
   if o.mix ~= nil and #o.branches ~= 2 then
     return fmt("'mix' needs exactly 2 branches (got %d); put a Blocks.Gain at the end of each branch instead", #o.branches)
@@ -581,46 +664,47 @@ end
 -- The plugin's own input/output level, usable as a component `source`.
 local Meters = { IN = { __ref = "meter.in" }, OUT = { __ref = "meter.out" } }
 
-_G.Param, _G.Macro, _G.Chain, _G.Blocks, _G.Patch, _G.Meters = Param, Macro, Chain, Blocks, Patch, Meters
+_G.Macro, _G.Chain, _G.Blocks, _G.Patch, _G.Meters = Macro, Chain, Blocks, Patch, Meters
+-- The old API, with directions (patches from before block params).
+_G.Param = setmetatable({}, { __index = function()
+  error("Param.new is gone: every param belongs to a block. Set the start value on the block "
+     .. "(Blocks.Drive.new(\"sat\", { amount = 6 })) and use sat.params.amount, e.g. macro:drives(sat.params.amount)", 2)
+end })
 _G.Font, _G.Image = Font, Image
 
 ---------------------------------------------------------------- export (called by the loader)
--- Params are collected from what the chain and the macros reference (chain
--- order first), so a patch never lists them separately.
+-- Params are collected from the blocks (chain order) and the macros' targets; blocks refer to
+-- theirs by index (0-based, the Rust side's `ParamRef`), so a patch never lists them.
 return function(p)
   if not is(p, Patch) then
     error("init.luau must end with `return Patch.new(...)`, got " .. describe(p), 0)
   end
-  local params, by_id = {}, {}
+  local params, index = {}, {}
+  -- The param's index in `params` (0-based), adding it on first use.
   local function use(prm)
-    local seen = by_id[prm.id]
-    if seen == nil then
-      by_id[prm.id] = prm
+    if index[prm] == nil then
+      index[prm] = #params
       params[#params + 1] = { id = prm.id, name = prm.name, min = prm.min, max = prm.max,
-                              default = prm.default, unit = prm.unit, decimals = prm.decimals }
-    elseif seen ~= prm then
-      error(fmt("two different params use the id '%s'", prm.id), 0)
+                              default = prm.default, unit = prm.unit, decimals = prm.decimals, scale = prm.scale }
     end
-  end
-  local function setting(v)
-    if is(v, Param) then
-      use(v)
-      return "param." .. v.id
-    end
-    return v
+    return index[prm]
   end
   local export_chain
   local function export_block(b)
-    local t = { type = b.kind }
+    local t, own = { type = b.kind }, {}
     for _, f in ipairs(b.fields) do
       local v = b.o[f.name]
       if v == nil or f.name == "oversampling" then
         -- omitted
       elseif f.kind == "setting" then
-        t[f.name] = setting(v)
+        t[f.name] = use(v)
+        own[#own + 1] = t[f.name]
       elseif f.kind == "settings" then
         local l = {}
-        for i, x in ipairs(v) do l[i] = setting(x) end
+        for i, x in ipairs(v) do
+          l[i] = use(x)
+          own[#own + 1] = l[i]
+        end
         t[f.name] = l
       elseif f.kind == "chain" then
         t[f.name] = export_chain(v)
@@ -632,7 +716,7 @@ return function(p)
         t[f.name] = v
       end
     end
-    return { id = b.id, oversampling = b.o.oversampling, kind = t }
+    return { id = b.id, oversampling = b.o.oversampling, params = own, kind = t }
   end
   export_chain = function(c)
     local out = {}

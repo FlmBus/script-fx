@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use nice_plug_iced::iced::{
     Background, Border, Color, Shadow, Theme, Vector, border, color,
-    widget::{button, container, scrollable, text_editor, text_input},
+    widget::{button, container, scrollable, slider, text_editor, text_input},
 };
 
 // ---- colour -------------------------------------------------------------------------------------
@@ -224,15 +224,24 @@ pub const SIZE_TOP_BAR: f32 = 34.0;
 pub const SIZE_LIBRARY: f32 = 248.0;
 pub const SIZE_SHEET: f32 = 340.0;
 pub const SIZE_CONTROL: f32 = 30.0;
-pub const SIZE_NODE: f32 = 22.0;
-pub const SIZE_SIGNAL_LINE: f32 = 52.0;
+/// The collapsed drawer (handle + tabs): hangs into the ControlPanel from the window's bottom
+/// edge, like the notch from the top. Panels keep that strip free of controls.
+pub const SIZE_DRAWER_BAR: f32 = 42.0;
+/// The drawer when it's open (it rises over the panel).
+pub const SIZE_DRAWER_OPEN: f32 = 294.0;
 
-/// The patch window's size: the editor minus top bar, gutters and signal line (fixed window).
-/// The sizes are chosen so this is exactly the ControlPanel's 3:2 (816×544): no letterbox
-/// bars around the panel (`stage_fits_the_panel` checks it).
+/// The patch window = the ControlPanel's area: the editor minus top bar and gutters (fixed
+/// window). The sizes are chosen so this is exactly the ControlPanel's 3:2 (816×544): no
+/// letterbox bars around the panel (`stage_fits_the_panel` checks it). Notch and drawer hang
+/// into it; neither takes a strip of its own.
 pub fn stage_size() -> (f32, f32) {
     let (w, h) = crate::WINDOW_SIZE;
-    (w - 2.0 * SPACE_GUTTER, h - SIZE_TOP_BAR - SPACE_GUTTER - SIZE_SIGNAL_LINE)
+    (w - 2.0 * SPACE_GUTTER, h - SIZE_TOP_BAR - 2.0 * SPACE_GUTTER)
+}
+
+/// The drawer's width: the patch window minus three window radii on each side.
+pub fn drawer_width() -> f32 {
+    stage_size().0 - 6.0 * RADIUS_WINDOW
 }
 
 // ---- type ---------------------------------------------------------------------------------------
@@ -362,6 +371,82 @@ pub fn frame_primary(_: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// A recessed track on the frame that holds segments (the notch's view switch, the drawer's tabs).
+pub fn frame_track(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(c().frame_field.into()),
+        border: Border { radius: radius(RADIUS_SECTION), ..Default::default() },
+        ..Default::default()
+    }
+}
+
+/// A segment of the notch's view switch: inverted when `on` (the strong state on the frame),
+/// a light wash on hover, dimmed when disabled.
+pub fn frame_switch(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let c = c();
+        // `on` first: the current view has no action, so iced reports it as disabled.
+        let (bg, ink) = match status {
+            _ if on => (Some(c.frame_invert), c.on_frame_invert),
+            button::Status::Disabled => (None, alpha(c.frame_ink_2, 0.35)),
+            button::Status::Hovered | button::Status::Pressed => (Some(c.frame_hover), c.frame_ink),
+            _ => (None, c.frame_ink_2),
+        };
+        button::Style {
+            background: bg.map(Into::into),
+            text_color: ink,
+            border: Border { radius: radius(RADIUS_BUTTON), ..Default::default() },
+            ..Default::default()
+        }
+    }
+}
+
+/// A tab in the drawer's track: raised when `on` (a lighter face and a small shadow, not
+/// inverted: the tabs are many and equal), a light wash on hover.
+pub fn frame_tab(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let c = c();
+        let hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: if on {
+                Some(alpha(c.frame_ink, 0.12).into())
+            } else if hover {
+                Some(c.frame_hover.into())
+            } else {
+                None
+            },
+            text_color: if on { c.frame_ink } else { c.frame_ink_2 },
+            border: Border { radius: radius(RADIUS_BUTTON), ..Default::default() },
+            shadow: if on {
+                Shadow { color: shadow(0.4), offset: Vector::new(0.0, 1.0), blur_radius: 3.0 }
+            } else {
+                Shadow::default()
+            },
+            ..Default::default()
+        }
+    }
+}
+
+pub fn paper_slider(_: &Theme, status: slider::Status) -> slider::Style {
+    let handle = match status {
+        slider::Status::Hovered | slider::Status::Dragged => c().paper_ink,
+        _ => c().paper_ink_2,
+    };
+    slider::Style {
+        rail: slider::Rail {
+            backgrounds: (Background::Color(c().paper_ink), Background::Color(c().paper_line)),
+            width: 3.0,
+            border: Border { radius: radius(2.0), ..Default::default() },
+        },
+        handle: slider::Handle {
+            shape: slider::HandleShape::Circle { radius: 6.0 },
+            background: Background::Color(c().paper_raised),
+            border_width: 2.0,
+            border_color: handle,
+        },
+    }
+}
+
 /// Paper small: History, Undo, Save as snapshot, Listen.
 pub fn paper_small(_: &Theme, status: button::Status) -> button::Style {
     let bg = match status {
@@ -475,6 +560,21 @@ fn scrollbar(ink: Color, idle: f32, hover: f32) -> impl Fn(&Theme, scrollable::S
             },
         }
     }
+}
+
+/// A horizontal scrollbar on the frame (the chain view): faint, a bit stronger on hover.
+pub fn frame_hscrollbar(t: &Theme, s: scrollable::Status) -> scrollable::Style {
+    let (disabled, hovered) = match s {
+        scrollable::Status::Active { is_horizontal_scrollbar_disabled, .. } => (is_horizontal_scrollbar_disabled, false),
+        scrollable::Status::Hovered { is_horizontal_scrollbar_disabled, is_horizontal_scrollbar_hovered, .. } => {
+            (is_horizontal_scrollbar_disabled, is_horizontal_scrollbar_hovered)
+        }
+        scrollable::Status::Dragged { is_horizontal_scrollbar_disabled, .. } => (is_horizontal_scrollbar_disabled, true),
+    };
+    let a = if disabled { 0.0 } else if hovered { 0.3 } else { 0.1 };
+    let mut style = scrollbar(c().frame_ink, 0.0, 0.0)(t, s);
+    style.horizontal_rail.scroller.background = alpha(c().frame_ink, a).into();
+    style
 }
 
 /// On paper (the sheets).

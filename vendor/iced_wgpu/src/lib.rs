@@ -28,6 +28,8 @@ pub mod settings;
 pub mod window;
 // PATCH(scriptfx): frame timing.
 pub mod frame_stats;
+// PATCH(scriptfx): post-process pass (radial blur of the shell's zoom transition).
+pub mod postfx;
 
 #[cfg(feature = "geometry")]
 pub mod geometry;
@@ -98,6 +100,8 @@ pub struct Renderer {
 
     // PATCH(scriptfx): frame timing.
     gpu_timer: Option<frame_stats::GpuTimer>,
+    // PATCH(scriptfx): post-process pass, made on first use.
+    postfx: Option<postfx::PostFx>,
 }
 
 impl Renderer {
@@ -133,6 +137,7 @@ impl Renderer {
             ),
 
             gpu_timer: frame_stats::GpuTimer::new(&engine.device, &engine.queue),
+            postfx: None,
 
             engine,
         }
@@ -183,7 +188,24 @@ impl Renderer {
             t.begin(&self.engine.device, &mut pre);
         }
 
-        let encoder = self.draw(clear_color, frame, viewport);
+        // PATCH(scriptfx): with a post-process effect set, draw into an offscreen texture and
+        // from there through the effect into the frame.
+        let effect = postfx::current();
+        let encoder = match effect {
+            Some(effect) => {
+                if self.postfx.as_ref().is_none_or(|p| p.format() != _format) {
+                    self.postfx = Some(postfx::PostFx::new(&self.engine.device, _format));
+                }
+                let size = viewport.physical_size();
+                let mut fx = self.postfx.take().expect("just made");
+                let target = fx.target(&self.engine.device, size.width, size.height).clone();
+                let mut encoder = self.draw(clear_color, &target, viewport);
+                fx.apply(&mut encoder, &self.engine.queue, frame, effect, viewport.scale_factor());
+                self.postfx = Some(fx);
+                encoder
+            }
+            None => self.draw(clear_color, frame, viewport),
+        };
 
         let mut post = self.engine.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame end") });
         if let Some(t) = &mut self.gpu_timer {
