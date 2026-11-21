@@ -1,5 +1,5 @@
-ScriptFX — diagnostics build for Apple Silicon (macOS 11+)
-==========================================================
+ScriptFX (macOS universal: Apple Silicon + Intel, 11+), diagnostics build
+===================================================================
 
 An optimized build with debug symbols that writes a detailed log
 (~/Library/Logs/ScriptFX/): system info, GPU, audio setup, patch loads and
@@ -26,5 +26,5 @@ errors, panics with backtraces, and every 10 s the audio callback timing
 Notes in your own words help a lot: what you clicked, what happened, when
 (the log has timestamps in UTC).
 
-dSYMs/ holds the debug symbols to turn crash-report addresses into source lines;
+symbols/ holds the debug symbols (dSYMs) to turn crash-report addresses into source lines;
 it stays here (not needed on the Mac).

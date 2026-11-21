@@ -1,15 +1,35 @@
-name: Build plugin
+name: Build & release
+
+# CI + CD for every platform we support. Every build is a *diagnostics* build for now (VST3 +
+# CLAP + standalone, log file + heartbeat, debug symbols, helper scripts; see
+# crates/plugin/src/diag.rs and .github/package/<platform>/).
+#
+# - any branch push / PR: tests, then the three packages as workflow artifacts (login needed);
+# - push to main: also the rolling pre-release "nightly" (replaced on every push);
+# - tag v*: also a release with that name.
+# Release downloads need no login: https://github.com/FlmBus/script-fx/releases
 
 on:
   push:
-    branches: [main]
-    tags: ['*']
+    branches: ['**']
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 defaults:
   run:
     shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  SCRIPTFX_GIT_SHA: ${{ github.sha }}
+  # Optimized, with line tables for backtraces and crash reports.
+  CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+  CARGO_PROFILE_RELEASE_STRIP: 'false'
 
 jobs:
   test:
@@ -24,24 +44,27 @@ jobs:
             libxcb-dri2-0-dev libxcb-icccm4-dev libxcursor-dev libxkbcommon-dev libxcb-shape0-dev libxcb-xfixes0-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p patch -p dsp -p ui-components -p analysis
+        with:
+          key: test
+      - run: cargo test --workspace
 
   package:
+    needs: test
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: linux-x86_64,    os: ubuntu-22.04 }
-          - { name: windows-x86_64,  os: windows-latest }
-          # Apple Silicon runner builds both arm64 and x86_64 and merges them (lipo).
-          - { name: macos-universal, os: macos-latest, targets: 'aarch64-apple-darwin,x86_64-apple-darwin' }
-    name: Package ${{ matrix.name }}
+          - { platform: linux-x86_64,    os: ubuntu-22.04 }
+          - { platform: windows-x86_64,  os: windows-latest }
+          # The Apple Silicon runner builds arm64 + x86_64 and merges them (lipo).
+          - { platform: macos-universal, os: macos-latest, targets: 'aarch64-apple-darwin,x86_64-apple-darwin' }
+    name: Package ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Linux dependencies
-        if: startsWith(matrix.os, 'ubuntu')
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libgl-dev libjack-dev libx11-xcb-dev libxcb1-dev \
@@ -52,32 +75,105 @@ jobs:
           targets: ${{ matrix.targets }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.name }}
+          key: ${{ matrix.platform }}
 
-      - name: Bundle VST3 + CLAP
-        run: |
-          if [[ "${{ matrix.name }}" == macos-universal ]]; then
-            export MACOSX_DEPLOYMENT_TARGET=11.0
-            cargo xtask bundle-universal scriptfx --release
-          else
-            cargo xtask bundle scriptfx --release
-          fi
+      - name: Name
+        run: echo "OUT=ScriptFX-${{ matrix.platform }}-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
 
-      - name: Ad-hoc sign (macOS)
-        if: startsWith(matrix.os, 'macos')
+      - name: Build (macOS universal)
+        if: runner.os == 'macOS'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+          CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO: packed
         run: |
-          for b in target/bundled/*.vst3 target/bundled/*.clap; do
-            codesign --force --deep --sign - "$b"
+          cargo xtask bundle-universal scriptfx --release --features diagnostics
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --target $t -p scriptfx --bin scriptfx --features diagnostics
+          done
+          mkdir -p "$OUT/symbols"
+          lipo -create -output "$OUT/scriptfx" target/aarch64-apple-darwin/release/scriptfx target/x86_64-apple-darwin/release/scriptfx
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            mkdir -p "$OUT/symbols/$t"
+            find target/$t/release -maxdepth 2 -name '*.dSYM' -exec cp -R {} "$OUT/symbols/$t/" \;
           done
 
-      - name: Collect artifact
+      - name: Build (Linux, Windows)
+        if: runner.os != 'macOS'
         run: |
-          out="ScriptFX-${{ matrix.name }}"
-          mkdir -p "$out"
-          cp -R target/bundled/ScriptFX.vst3 target/bundled/ScriptFX.clap "$out/"
-          cp ".github/install/README-${{ runner.os }}.txt" "$out/README.txt"
-          echo "ARTIFACT=$out" >> "$GITHUB_ENV"
+          cargo xtask bundle scriptfx --release --features diagnostics
+          mkdir -p "$OUT/symbols"
+          # The plug-in and the standalone share the crate name, so their .pdb files would
+          # overwrite each other: keep each right after its build.
+          if [[ "$RUNNER_OS" == Windows ]]; then cp target/release/scriptfx.pdb "$OUT/symbols/plugin.pdb" || echo "no plugin .pdb"; fi
+          cargo build --release -p scriptfx --bin scriptfx --features diagnostics
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            cp target/release/scriptfx.pdb "$OUT/symbols/standalone.pdb" || echo "no standalone .pdb"
+            cp target/release/scriptfx.exe "$OUT/"
+          else
+            cp target/release/scriptfx "$OUT/"
+          fi
+
+      - name: Package
+        run: |
+          case "$RUNNER_OS" in macOS) dir=macos ;; Windows) dir=windows ;; *) dir=linux ;; esac
+          cp -R target/bundled/ScriptFX.vst3 target/bundled/ScriptFX.clap "$OUT/"
+          cp -R test-patches "$OUT/test-patches"
+          cp -R .github/package/$dir/. "$OUT/"
+          chmod +x "$OUT"/*.command "$OUT"/*.sh "$OUT/scriptfx" 2>/dev/null || true
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            for b in "$OUT/ScriptFX.vst3" "$OUT/ScriptFX.clap" "$OUT/scriptfx"; do codesign --force --deep --sign - "$b"; done
+            # ditto keeps permissions and signatures; Archive Utility unpacks it as is.
+            ditto -c -k --keepParent "$OUT" "$OUT.zip"; echo "ASSET=$OUT.zip" >> "$GITHUB_ENV"
+          elif [[ "$RUNNER_OS" == Windows ]]; then
+            7z a -tzip "$OUT.zip" "$OUT" > /dev/null; echo "ASSET=$OUT.zip" >> "$GITHUB_ENV"
+          else
+            tar czf "$OUT.tar.gz" "$OUT"; echo "ASSET=$OUT.tar.gz" >> "$GITHUB_ENV"
+          fi
+          ls -la "$OUT"
+
+      - name: Smoke test (the standalone starts and logs)
+        continue-on-error: true
+        run: |
+          case "$RUNNER_OS" in
+            macOS) logs=~/Library/Logs/ScriptFX; bin="$OUT/scriptfx" ;;
+            Windows) logs="$LOCALAPPDATA/ScriptFX/logs"; bin="$OUT/scriptfx.exe" ;;
+            *) logs=~/.local/share/ScriptFX/logs; bin="$OUT/scriptfx"; export DISPLAY=:99; (Xvfb :99 &) ;;
+          esac
+          ("$bin" -b dummy > smoke.txt 2>&1 &); sleep 20
+          pkill scriptfx 2>/dev/null || taskkill //F //IM scriptfx.exe 2>/dev/null || true
+          tail -20 smoke.txt || true
+          f=$(ls -t "$logs"/*.log 2>/dev/null | head -1); echo "== $f"; head -60 "$f" || true
+
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ARTIFACT }}
-          path: ${{ env.ARTIFACT }}
+          name: ${{ env.OUT }}
+          path: ${{ env.ASSET }}
+          compression-level: 0
+
+  release:
+    name: Release
+    needs: package
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Publish
+        run: |
+          ls -la assets
+          notes="Diagnostics builds (log file in ~/Library/Logs/ScriptFX, %LOCALAPPDATA%\\ScriptFX\\logs or ~/.local/share/ScriptFX/logs). Unpack, read README.txt, run the install script. macOS: ad-hoc signed (the install script removes the quarantine); Windows: not code-signed (SmartScreen warns once). Commit ${GITHUB_SHA::7}."
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            gh release create "$GITHUB_REF_NAME" assets/* --title "ScriptFX $GITHUB_REF_NAME" --notes "$notes"
+          else
+            # Rolling pre-release: replace it (and its tag) with this commit's builds.
+            gh release delete nightly --yes --cleanup-tag || true
+            gh release create nightly assets/* --prerelease --target "$GITHUB_SHA" \
+              --title "Nightly (${GITHUB_SHA::7})" --notes "Latest build of main. $notes"
+          fi
