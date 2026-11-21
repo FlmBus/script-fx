@@ -5,20 +5,26 @@ _2026-11-19. Worked out with Flemming in a long mockup session; the mockup is th
 Related: [`../STATUS.md`](../STATUS.md) ("Open directions", decision "Patch kinds"),
 [`patch-code-and-sharing.md`](patch-code-and-sharing.md)._
 
-> **Status (2026-11-20).** Built on branch `notch-drawer` (see [`../STATUS.md`](../STATUS.md)):
+> **Status (2026-11-21).** Built on `main` (see [`../STATUS.md`](../STATUS.md)):
 > the chain view (it now also snakes through rows), block pages with the zoom, the drawer's tab row,
 > the knob cell, macro modulation. **Changed since this concept:**
 > - The first view is **Surface** (was "Panel"): the ControlPanel, or the patch's macros as knobs.
 > - **Macros moved out of the drawer** into the macro rail (left card from the top bar); the drawer
->   holds only the modulators. Open again (STATUS next steps): knobs and macros must be visible
->   together for drag & drop, maybe macros go back into the drawer.
+>   holds only the modulators. Both stay open while the page is used; drag a macro by the grip on
+>   its "M3" tag, a modulator by the grip on its tab. Droppable knobs get an outline in the
+>   source's colour (not a greyed tab as in B); a chip with the source follows the pointer.
+> - **Drawer**: 180 px open (not ~300), so block pages keep their knobs above it. Panels: Follow =
+>   scope + attack/release; LFO = shape pills (sine/tri/square) + scope + rate/phase; Step = bars
+>   you draw on + rate. No amount on the modulator (amount is per route, as in Serum).
 > - **Modulation follows Serum exactly** ([`serum-modulation.md`](serum-modulation.md)): any number
->   of slots per knob (not one source), amount −1…+1, uni/bi, curve, invert, bypass.
+>   of slots per knob (not one source), amount −1…+1 (sign = direction, no invert), uni/bi (same range size), curve, bypass.
 > - **Knob cell:** the range arc and the live dot sit on one ring outside the ticks; one **meta
->   knob per slot** in the top line (not a single one at the top-left); the cursor hides and the
->   pointer stays locked while dragging.
-> - Build order (§10): steps 3–4 done for macros; steps 1–2 (modulators + their engine), 5 (Matrix)
->   and 6 are open.
+>   knob per route** in its source's colour in the top line (not a single one at the top-left; up
+>   to five, then "+N"); the cursor hides and the pointer stays locked while dragging.
+> - **Matrix:** one row per route (macro slots and assignments), remove per row, an add row
+>   (source → destination pick lists). No filtering yet.
+> - Build order (§10): steps 1–5 done; glow/dots on targets and blocks, Matrix filtering and
+>   step 6 remain open.
 
 ## 0. Screenshots of the mockup
 

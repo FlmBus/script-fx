@@ -2,7 +2,8 @@
 
 Throwaway. The v7 shell in the "ScriptFX Shell" design system (skin Matte + Paper chat), built
 with iced on nice-plug, to decide the shell toolkit. Mock data only; the audio path is a
-passthrough with a peak meter. Results: [`docs/research/shell-ui-toolkit.md`](../../docs/research/shell-ui-toolkit.md).
+passthrough with a peak meter. The iced shell was built into the plugin; see
+[`docs/HISTORY.md`](../../docs/HISTORY.md) for the decision and results.
 
 Not part of the main workspace (own `[workspace]`), so it doesn't slow down the main build.
 

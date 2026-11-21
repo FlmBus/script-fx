@@ -19,7 +19,7 @@ pub struct RadialBlur {
     /// How far each pixel smears towards the centre, as a fraction of its distance (0 = none).
     pub amount: f32,
     /// x, y, width, height each.
-    pub keep: [[f32; 4]; 2],
+    pub keep: [[f32; 4]; 3],
 }
 
 static EFFECT: Mutex<Option<RadialBlur>> = Mutex::new(None);
@@ -42,13 +42,14 @@ struct Uniforms {
     size: [f32; 2],
     keep0: [f32; 4],
     keep1: [f32; 4],
+    keep2: [f32; 4],
     amount: f32,
     _pad: [f32; 3],
 }
 
 const SHADER: &str = r#"
 // keep: min.xy, max.xy of an area that stays sharp
-struct U { center: vec2f, rect_min: vec2f, rect_max: vec2f, size: vec2f, keep0: vec4f, keep1: vec4f, amount: f32 };
+struct U { center: vec2f, rect_min: vec2f, rect_max: vec2f, size: vec2f, keep0: vec4f, keep1: vec4f, keep2: vec4f, amount: f32 };
 @group(0) @binding(0) var frame: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var<uniform> u: U;
@@ -66,7 +67,8 @@ const N: i32 = 24;
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let px = pos.xy;
     let inside = all(px >= u.rect_min) && all(px <= u.rect_max);
-    let kept = (all(px >= u.keep0.xy) && all(px < u.keep0.zw)) || (all(px >= u.keep1.xy) && all(px < u.keep1.zw));
+    let kept = (all(px >= u.keep0.xy) && all(px < u.keep0.zw)) || (all(px >= u.keep1.xy) && all(px < u.keep1.zw))
+        || (all(px >= u.keep2.xy) && all(px < u.keep2.zw));
     if (!inside || kept) {
         return textureSampleLevel(frame, samp, px / u.size, 0.0);
     }
@@ -218,6 +220,7 @@ impl PostFx {
             size: [size.width as f32, size.height as f32],
             keep0: keep(effect.keep[0]),
             keep1: keep(effect.keep[1]),
+            keep2: keep(effect.keep[2]),
             amount: effect.amount,
             _pad: [0.0; 3],
         };

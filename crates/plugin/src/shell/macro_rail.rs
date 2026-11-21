@@ -20,6 +20,9 @@ use nice_plug_iced::iced::{
 pub const WIDTH: f32 = 2.0 * knob::MACRO_SIZE.width + GRID_GAP_X + 2.0 * PAD;
 
 const PAD: f32 = 12.0;
+/// The card's height with macros: title (22) + gap (10) + grid + gap (8) + pager (16), padded.
+/// For keeping it sharp under the zoom blur.
+pub const HEIGHT: f32 = 2.0 * PAD + 22.0 + 10.0 + 3.0 * knob::MACRO_SIZE.height + 2.0 * GRID_GAP_Y + 8.0 + 16.0;
 /// Macros per page: 2 columns × 3 rows.
 const PAGE: usize = 6;
 const GRID_GAP_X: f32 = 6.0;
@@ -154,6 +157,7 @@ impl Rail {
                     value_text: m.value_text.clone(),
                     value: m.value,
                     default: m.default,
+                    drop: m.drop,
                 })
             })
             .collect();

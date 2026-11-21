@@ -4,14 +4,14 @@
 //! - reload (+ sync LED) | snapshot selector, save, load.
 //!
 //! The sheet openers (controls, chat, settings) live in the top bar. Stateless: the shell owns
-//! everything it shows. Not built yet, and disabled with a tooltip saying so: the Matrix view,
-//! snapshots (the selector shows "Init", Save and Load are off).
+//! everything it shows. Snapshots are not built yet (the selector shows "Init", Save and Load
+//! are off).
 
 use super::{icons, tabs, theme};
 use nice_plug_iced::iced::{
     Border, Center, Element, Fill, Padding, Point, Rectangle, Renderer, Shadow, Theme, Vector,
     mouse,
-    widget::{button, canvas, column, container, row, space, stack, text, tooltip},
+    widget::{button, canvas, column, container, row, space, stack, text},
 };
 
 #[derive(Debug, Clone)]
@@ -20,14 +20,14 @@ pub enum Message {
     View(View),
 }
 
-/// What the patch window shows. Only the panel exists so far.
+/// What the patch window shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     /// The patch's ControlPanel, or without one its macros (`surface`).
     Surface,
     /// The audio tree (blocks, containers with slots).
     Chain,
-    /// Every modulation and macro mapping as a table. Not built yet.
+    /// The patch's existing macro-to-parameter modulation slots.
     Matrix,
 }
 
@@ -40,10 +40,6 @@ impl View {
             View::Chain => "Chain",
             View::Matrix => "Matrix",
         }
-    }
-
-    fn available(self) -> bool {
-        self != View::Matrix
     }
 }
 
@@ -143,26 +139,16 @@ pub fn size() -> (f32, f32) {
 const TOOLS_WIDTH: f32 =
     theme::SIZE_CONTROL + 2.0 * theme::SPACE_2 + 1.0 + SELECTOR_WIDTH + 2.0 * theme::SPACE_HAIR + 2.0 * theme::SIZE_CONTROL;
 
-/// Surface | Chain | Matrix in a recessed track; the highlight slides between them. Views that
-/// don't exist yet are disabled and say so.
+/// Surface | Chain | Matrix in a recessed track; the highlight slides between them.
 fn view_switch<'a>(current: View) -> Element<'a, Message> {
     let segment = |v: View, on: bool| -> Element<'a, Message> {
-        let b = button(container(text(v.label()).size(12).font(if on { theme::font::SANS_SEMIBOLD } else { theme::font::SANS })).center(Fill))
-            .on_press_maybe((v.available() && v != current).then_some(Message::View(v)))
+        button(container(text(v.label()).size(12).font(if on { theme::font::SANS_SEMIBOLD } else { theme::font::SANS })).center(Fill))
+            .on_press_maybe((v != current).then_some(Message::View(v)))
             .width(Fill)
             .height(24)
             .padding(0)
-            .style(tabs::style(on, theme::frame_switch(on)));
-        if v.available() {
-            b.into()
-        } else {
-            tooltip(b, container(text("coming next").size(11).color(theme::c().frame_ink_2)).padding(Padding { top: 3.0, bottom: 3.0, left: 7.0, right: 7.0 }).style(|_: &Theme| container::Style {
-                background: Some(theme::c().frame_raised.into()),
-                border: Border { radius: theme::radius(6.0), width: 1.0, color: theme::c().frame_hairline_strong },
-                ..Default::default()
-            }), tooltip::Position::Bottom)
+            .style(tabs::style(on, theme::frame_switch(on)))
             .into()
-        }
     };
     let off = row(View::ALL.into_iter().map(|v| segment(v, false))).spacing(2);
     let on = row(View::ALL.into_iter().map(|v| segment(v, true))).spacing(2);

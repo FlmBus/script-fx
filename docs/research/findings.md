@@ -71,7 +71,7 @@ What it took / what's missing:
 
 ## Plugin framework + shell integration
 
-- Shell: iced on nice-plug (see docs/research/shell-ui-toolkit.md). Component layers → one iced
+- Shell: iced on nice-plug. Component layers → one iced
   image each, positioned in the stage; a small pointer widget turns input into param changes.
 - Macro sliders are auto-generated with patch units (the controls sheet).
 - **Host params are fixed**: 16 slots; patches map their macros onto them in order. DAWs

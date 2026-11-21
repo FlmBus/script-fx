@@ -30,9 +30,21 @@ later"); these left the top bar. The notch is now reload | snapshots only. Icons
   pointer logic tested on Neon (`stage::tests`). Not checked by hand: real wheel/Shift/right-
   click in a host (hosts may eat Escape or keystrokes). `SCRIPTFX_DEV_SHEET=entry`.
 
-## 2026-11-19/20 · Chain editor (branch `notch-drawer`)
+## 2026-11-21 · Modulators, routes, drag & drop, Matrix
 
-In [`STATUS.md`](STATUS.md) "Where we left off" until it's merged; moves here then.
+Follow, LFO 1–3 and Step as allocation-free DSP (`dsp/src/modulators.rs`), parsed from Luau
+(`modulators`, `assignments` in `Patch.new`). One route model for macro slots and assignments
+(`patch/src/routes.rs`), drag & drop from the macro rail and the drawer tabs onto block page knobs
+(and modulators onto macros), drawer panels per modulator, colour-coded meta knobs, Matrix with
+add/remove. Route changes rebuild the graph and `Graph::adopt` hands over the running state.
+Found on the way: an unoptimized debug standalone ran Tape Glow at < 1 fps (resvg/tiny-skia in
+debug) and looked frozen; the dev profile now optimizes dependencies.
+
+## 2026-11-19/20 · Chain editor
+
+Built the Surface and Chain views, block pages with DSP-based previews and a zoom transition,
+Serum-style modulation slots and knob cells, and the macro rail. The Matrix and modulators remain
+planned; see [`STATUS.md`](STATUS.md) for the current state and open work.
 
 ## 2026-11-19 · Patch isolation, theme restructure, shell UI reboot decision
 
@@ -57,12 +69,12 @@ In [`STATUS.md`](STATUS.md) "Where we left off" until it's merged; moves here th
   Helper (SVG wordmark logo); licences next to the fonts.
 - **Shell UI reboot: decided 2026-11-18, iced** (`nice-plug-iced`, wgpu), one module per shell
   section (Elm architecture: state, messages, update, view) so the UI code stays clean while we
-  tinker. [`research/shell-ui-toolkit.md`](research/shell-ui-toolkit.md). Not GPUI (no embedding
+  tinker. Not GPUI (no embedding
   into host windows, owns the event loop, no hook for our GPU passes). Fallback: Slint. Migrate
   nih-plug → **nice-plug** first. Earlier shortlist was Slint + vizia; on
   recheck the Slint bridge is WIP/OpenGL-only and vizia's bridge is now third party (nightly).
   Independent of the patch UI plan (the shell only hosts the compositor's render hook).
-  Spike (`spikes/shell-iced`) → **built into the plugin** (see "Where we left off").
+  Spike (`spikes/shell-iced`) → **built into the plugin** (see "New shell built" below).
 
 ## 2026-11-19 · Polish pass on the shell
 
@@ -113,7 +125,7 @@ In [`STATUS.md`](STATUS.md) "Where we left off" until it's merged; moves here th
 ## 2026-11-18 · New shell built (iced on nice-plug)
 
 **New shell built** (iced on nice-plug, design system "ScriptFX Shell", skin Matte + Paper
-chat; research + spike: [`research/shell-ui-toolkit.md`](research/shell-ui-toolkit.md)).
+chat; prototype in `spikes/shell-iced`).
 - Framework moved **nih-plug → nice-plug 0.4.2** (vendored; our runtime-parameter-name patch
   ported, `vendor/nice-plug/PATCHES.md`). `initialize()` is `activate()` now.
 - `crates/plugin/src/shell/`: `library` (cards in the patch's colours), `notch` (snapshot

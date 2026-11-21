@@ -72,6 +72,8 @@ pub fn view<'a>(patch: &'a Patch, brand: Option<&'a Brand>, values: &'a Values) 
                         effective: v,
                         default: patch.macro_default(slot),
                         mods: Vec::new(),
+                        drop: None,
+                        modes: None,
                         colours: Some(colours),
                     },
                     scale,

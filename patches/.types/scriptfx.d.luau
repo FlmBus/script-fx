@@ -79,10 +79,10 @@ declare extern type HighShelfBlock extends Block with
   params: { freq: Param, gain: Param, q: Param }
 end
 declare extern type LowPassBlock extends Block with
-  params: { freq: Param, q: Param }
+  params: { freq: Param, q: Param, slope: Param }
 end
 declare extern type HighPassBlock extends Block with
-  params: { freq: Param, q: Param }
+  params: { freq: Param, q: Param, slope: Param }
 end
 declare extern type DriveBlock extends Block with
   params: { amount: Param, mix: Param }
@@ -216,7 +216,7 @@ export type Sync = string                                                       
 export type LfoShape = "sine" | "triangle" | "square"
 
 export type EqOptions = { freq: Setting?, gain: Setting?, q: Setting?, oversampling: number? }          -- Hz, dB; q default 0.707
-export type FilterOptions = { freq: Setting?, q: Setting?, oversampling: number? }                      -- 12 dB/oct
+export type FilterOptions = { freq: Setting?, q: Setting?, slope: Setting?, oversampling: number? }      -- Hz, resonance, dB/oct (12, 24, 36, 48)
 export type CompOptions = {
   threshold: Setting?,                                                           -- dB
   ratio: Setting?, attack: Setting?, release: Setting?,                         -- :1, ms, ms
@@ -272,9 +272,9 @@ declare Blocks: {
   --- EQ · high shelf
   HighShelf: { new: (id: string, o: EqOptions) -> HighShelfBlock },
 
-  --- Filter · low-pass, 12 dB/oct
+  --- Filter · low-pass; slope 12/24/36/48 dB/oct (default 12), q = resonance (0.707 = none)
   LowPass: { new: (id: string, o: FilterOptions) -> LowPassBlock },
-  --- Filter · high-pass, 12 dB/oct
+  --- Filter · high-pass; slope 12/24/36/48 dB/oct (default 12), q = resonance (0.707 = none)
   HighPass: { new: (id: string, o: FilterOptions) -> HighPassBlock },
 
   --- Distortion · tanh saturator; amount = pre-gain dB (0..36), mix % (default 100)
@@ -415,10 +415,28 @@ export type Theme = {
   library: { accent: string?, bg: string?, ink: string?, font: Font?, logo: Image? }?,
 }
 
+export type ModulatorId = "follow" | "lfo1" | "lfo2" | "lfo3" | "step"
+export type ModulatorLfoShape = "sine" | "triangle" | "square"
+
+export type ModulatorConfig =
+  | { id: "follow", attack_ms: number?, release_ms: number? }
+  | { id: "lfo1" | "lfo2" | "lfo3", rate_hz: number?, sync: string?, phase: number?, shape: ModulatorLfoShape? }  -- sync: "1/8" overrides rate_hz
+  | { id: "step", rate_hz: number?, sync: string?, values: { number }? }  -- sync: one step's length
+
+export type ModAssignment = {
+  source: ModulatorId,
+  destination: Param | Macro,
+  amount: number?,      -- −1..1: the size of the range it moves the knob in; negative = the other way
+  bipolar: boolean?,    -- swing ±amount/2 around the knob instead of 0..amount
+  curve: number?,
+  bypass: boolean?,
+}
+
 declare Patch: {
   -- macros: order = host automation slots 1..16; panel: the ControlPanel's root instance
-  new: (name: string, o: { author: string?, chain: Chain?, macros: { Macro }?, theme: Theme?,
-                           panel: ComponentInstance? }?) -> Patch,
+  new: (name: string, o: { author: string?, chain: Chain?, macros: { Macro }?,
+                           modulators: { ModulatorConfig }?, assignments: { ModAssignment }?,
+                           theme: Theme?, panel: ComponentInstance? }?) -> Patch,
 }
 
 ---------------------------------------------------------------- UI

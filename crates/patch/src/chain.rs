@@ -44,7 +44,10 @@ pub struct EqSpec {
 #[serde(deny_unknown_fields)]
 pub struct FilterSpec {
     pub freq: ParamRef,
+    /// Resonance (0.707 = none).
     pub q: ParamRef,
+    /// 12, 24, 36 or 48 dB/oct.
+    pub slope: ParamRef,
 }
 
 /// Shared by all compressor types (defaults differ per type, see `dsp`).

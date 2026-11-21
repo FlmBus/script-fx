@@ -1,7 +1,8 @@
 > _Imported 2026-11-20 from Flemming's notes: **the source of truth for ScriptFX's modulation**
 > (STATUS "Decisions"). Built from it so far: slots for macros (amount, polarity, curve as tension,
-> plus invert and bypass), additive normalized deltas, the knob's range arc + live dot. Not built:
-> aux source, output gain, remap tables, meta-modulation, typed amounts in units, the Matrix._
+> plus bypass; our deviation: no invert, the amount's sign is the direction, and bipolar swings ±amount/2 so both polarities cover the same range), additive normalized deltas, the knob's range arc + live dot. Not built:
+> aux source, output gain, remap tables, meta-modulation, typed amounts in units. The Matrix can
+> inspect and edit existing macro slots; other sources and route editing remain open._
 
 # Technical Whitepaper: Normalized Modulation Architecture & UX Patterns in Xfer Records Serum & Serum 2
 

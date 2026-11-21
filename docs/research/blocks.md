@@ -1,0 +1,133 @@
+# Blocks: what they are for, what we have, what's missing
+
+_2026-11-21. Started from Flemming's questions: do our compressors have lookahead, do we have
+linear- and minimum-phase filters, a reverb and a delay, could a vari-mu compressor be built?
+Answers below, from the code at that date. Related: [`../STATUS.md`](../STATUS.md) (glossary,
+decisions), the block reference with every option in `patches/.types/scriptfx.d.luau`._
+
+## 1. What a block is
+
+A **block** is a *building block*: the unit patches build professional effect chains from. The
+name is deliberate (Flemming, 2026-11-21). A patch is not a choice between fixed effects but a
+combination of blocks, so blocks are designed like modules in a modular system, not like finished
+plugins:
+
+- **Expose every parameter we can.** If a real device or a mixing engineer would want to set it
+  (detector type, knee, stereo link, sidechain filter, oversampling, topology), it is a knob or an
+  option on the block. A versatile block beats three fixed variants. Hidden constants are a
+  smell: they limit what a patch (or the LLM) can build.
+- **Parameters are Params.** Anything continuous is a `Param`: it gets a knob on the block page,
+  can be driven by macros and modulators, and is saved with the project. Structural choices
+  (mode strings, sub-chains, lists) are options fixed at load.
+- **Styles are presets, not separate DSP**, where possible. `FETCompressor` and
+  `OptoCompressor` today are separate block types with different detectors; the goal is one
+  `Compressor` whose detector, topology and release behaviour are parameters, with the styles as
+  defaults (§4).
+- **Good defaults.** A block with no options sounds right (musical, not neutral-but-useless).
+- **Composable.** Blocks take sub-chains where processing belongs inside them (`Delay`'s
+  `feedback_chain` runs on every repeat; `BandSplit`, `MidSide`, `Parallel` route chains). The
+  same idea gives compressors a sidechain chain (§4).
+- **Honest latency.** Blocks that look ahead or oversample report it; the host compensates.
+
+## 2. The questions
+
+| Question | Today | Notes |
+|---|---|---|
+| Compressor lookahead? | **No.** Only `Limiter` has lookahead (0–20 ms, fixed option) | Needed for clean peak control and for transient-friendly gain riding. Add to every compressor (§4) |
+| Linear- and minimum-phase filters? | **Minimum-phase only.** All EQs and filters are IIR biquads (RBJ); `BandSplit` uses Linkwitz-Riley crossovers (phase-aligned between bands, but not linear-phase). `LowPass`/`HighPass` now have a slope (12–48 dB/oct) | Linear phase needs FIR or FFT convolution and costs latency (~ tens of ms at low frequencies). Worth it for mastering EQ and multiband splits: a `phase: "minimum" \| "linear"` option on EQ blocks and `BandSplit` |
+| Reverb? Delay? | **Yes.** `Reverb` (8-line FDN: size, decay, damping, predelay, width, freeze), `Shimmer`, `Delay` (time or sync, feedback, ping-pong, `feedback_chain`) | Missing: convolution (impulse responses), algorithm variants (plate, room, hall, spring), reverb modulation and early-reflection control, delay ducking, multi-tap, reverse |
+| Could users model a vari-mu? | **Only roughly.** `Compressor` with a wide knee (24 dB) gives a ratio that rises with level, `OptoCompressor` has program-dependent release, `Drive` before/after adds tube-ish saturation | A vari-mu's character: ratio that keeps rising with gain reduction (no fixed ratio), feedback topology, slow program-dependent attack *and* release, tube saturation and its asymmetry. Needs the compressor parameters in §4; then a vari-mu is a preset |
+
+## 3. The catalogue (2026-11-21, 50 blocks)
+
+| Category | Blocks |
+|---|---|
+| Utility | Gain, Pan, Width, MonoBass, Haas, Invert (polarity), DCBlock, Meter |
+| EQ | PeakEq, LowShelf, HighShelf |
+| Filter | LowPass, HighPass (slope 12–48), MorphFilter (SVF LP/BP/HP), LadderFilter, CombFilter, Formant, Resonator, DynamicEq |
+| Distortion | Drive, Waveshaper (custom curve), Wavefolder, Clipper, Rectifier, Bitcrusher, RingMod, Tape |
+| Dynamics | Compressor, FETCompressor, OptoCompressor, Rider, Transient, Limiter, Gate, DeEsser |
+| Modulation | Chorus, Flanger, Phaser, Tremolo, AutoPan |
+| Space | Delay, Reverb, Shimmer |
+| Pitch | PitchShift, Granular |
+| Rhythm | Stutter |
+| Routing | MidSide, LeftRight, BandSplit, Parallel |
+
+Every block also takes `oversampling` (1, 2, 4, 8). Plus, outside the chain: macros and the
+modulators (Follow, LFO 1–3, Step).
+
+## 4. What's missing for professional chains
+
+Ordered by how much it opens up. P1 = needed for "professional mixing/mastering chains" to be
+true; P2 = expected by producers; P3 = nice to have.
+
+### Dynamics
+
+- **P1 · Sidechain.** Two parts: an *internal* sidechain chain on every dynamics block
+  (`detector_chain = Chain.new { HighPass(...) }`, like `Delay`'s `feedback_chain`: the key
+  signal is processed before detection; covers SC high-pass, de-essing by band, tilt) and an
+  *external* key input (a second stereo input bus in VST3/CLAP, `AUDIO_IO_LAYOUTS` aux input;
+  `key = "external"`), for ducking and pumping.
+- **P1 · One versatile compressor.** Parameters instead of three types: `detector`
+  (peak / RMS + window), `topology` (feed-forward / feedback), `knee` up to ~30 dB, `ratio`
+  including ∞ and a **ratio curve** (fixed vs. rising with gain reduction: vari-mu), `attack` /
+  `release` plus **program-dependent** amount (opto/vari-mu behaviour), `lookahead`, `link`
+  (stereo link %, plus M/S mode), `saturation` (the gain stage's colour), `mix`, `makeup` /
+  auto. `FETCompressor`, `OptoCompressor` and a vari-mu become presets of it (keep the old names
+  as aliases).
+- **P1 · Lookahead** on compressors, gate, de-esser, transient (latency reported).
+- **P2 · True-peak limiting** (inter-sample peaks, oversampled detection) on `Limiter`; loudness
+  metering (LUFS short-term/integrated, correlation) as meter blocks for the analysis and the UI.
+- **P2 · Upward compression / expansion** (bring quiet parts up): a mode or a negative-ratio
+  range on the compressor.
+- **P3 · Envelope-follower block output** (a block's detector as a modulation source); partly
+  covered by the Follow modulator.
+
+### EQ and filters
+
+- **P1 · Linear-phase option** on EQ blocks and `BandSplit` (FFT/FIR, latency reported).
+- **P2 · More shapes:** band-pass, notch, all-pass (phase rotation; exists internally as a biquad
+  shape), tilt EQ, Baxandall shelves; shelf slope; proportional-Q / analog-style bells; passive
+  (Pultec-style) boost/cut interaction.
+- **P2 · A multi-band parametric EQ block** (n bands in one block, each with type, freq, gain,
+  Q, slope): one block page instead of a chain of five, and the display a patch UI expects.
+- **P3 · Dynamic EQ with several bands** and a sidechain; match EQ (needs analysis data).
+
+### Saturation and colour
+
+- **P2 · Tube, transformer, console** models with their own harmonic signatures (even/odd balance,
+  frequency-dependent saturation, bias); an **exciter** (harmonics of the highs only). Today
+  `Drive`, `Waveshaper` (any curve), `Wavefolder` bias and `Tape` get some of the way.
+
+### Space and time
+
+- **P2 · Convolution** (impulse responses from the patch folder: rooms, cabinets, hardware);
+  needs partitioned FFT convolution.
+- **P2 · Reverb algorithms** (plate, room, hall, spring) and controls (early reflections, diffusion,
+  modulation, low/high decay multipliers, ducking).
+- **P2 · Delay:** ducking (by its own input), multi-tap, reverse, tape/analog character (partly
+  via `feedback_chain` with `Tape`/filters already), diffusion.
+- **P3 · Frequency shifter, vibrato, rotary speaker, ensemble.**
+
+### Pitch and restoration
+
+- **P3 · Formant-preserving pitch shift, harmonizer;** pitch detection (for tuning/correction).
+- **P3 · De-noise, de-click, de-hum** (restoration is a different product; only if patches need it).
+
+### Utility and routing
+
+- **P2 · Sample delay** (time alignment), **phase rotation**, auto-gain / gain matching (loudness
+  in = out), per-band solo in `BandSplit` (for building, not for patches).
+- **P3 · Feedback routing** between chains; crossfades with more than two branches.
+
+## 5. Consequences for the engine
+
+- **Latency** already sums over the chain and goes to the host; lookahead and linear phase add to
+  it. A patch's latency should show in the shell (block page and chain view).
+- **Sidechain input** changes the plugin's bus layout (aux input): test in Reaper, Studio One,
+  Fender Studio before relying on it.
+- **FFT** (linear-phase EQ, convolution, LUFS gating) needs an allocation-free FFT on the audio
+  thread (plan sizes at load, `realfft`/`rustfft` with preallocated scratch).
+- **One compressor with many parameters** means more Params per block: the block page needs
+  groups (detector, timing, character, output) and choices (switches, pills), which are on the
+  STATUS list for block pages already.

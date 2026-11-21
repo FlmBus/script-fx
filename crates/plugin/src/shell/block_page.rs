@@ -2,12 +2,14 @@
 //! (‹ Chain, id, type), a display of what the block does, and its knobs.
 //!
 //! The knobs are the block's own params in the order its type declares them. All of them turn
-//! (saved with the project); the ones macros modulate are tagged "M3" and show the modulation arc.
+//! (saved with the project); each route into one is a meta knob on it, in its source's colour.
+//! While a source is dragged, every knob takes it (drop = new route). The page keeps its knobs
+//! above the drawer (`bottom` grows as the drawer opens).
 //! The display: see `block_display`.
 
 use patch::{BlockSpec, Patch, Values};
 
-use super::{block_display, chain_view, icons, knob, theme};
+use super::{block_display, chain_view, icons, knob, routing, theme};
 use nice_plug_iced::iced::{
     Border, Center, Element, Fill, Padding, Theme,
     widget::{Row, button, column, container, row, space, text},
@@ -27,12 +29,11 @@ impl From<(usize, knob::KnobEvent)> for Message {
     }
 }
 
-/// Room above the header for nothing (the notch sits centred; the header is left of it) and
-/// below the knobs for the collapsed drawer.
+/// Room around the page (the notch sits centred; the header is left of it).
 const PAD: f32 = 20.0;
-const DRAWER_CLEARANCE: f32 = theme::SIZE_DRAWER_BAR + 16.0;
 
-pub fn view<'a>(patch: &'a Patch, values: &'a Values, block: &'a BlockSpec) -> Element<'a, Message> {
+pub fn view<'a>(patch: &'a Patch, values: &'a Values, block: &'a BlockSpec, drag: Option<&routing::SourceDrag>, bottom: f32) -> Element<'a, Message> {
+    let drop = drag.and_then(routing::SourceDrag::param_drop);
     let back = button(row![icons::icon_rotated(icons::CHEVRON_RIGHT, 10.0, 2.5, theme::c().frame_ink_2, 180.0), text("Chain").size(12)].spacing(4).align_y(Center))
         .on_press(Message::Back)
         .padding(Padding { top: 5.0, bottom: 5.0, left: 8.0, right: 10.0 })
@@ -51,7 +52,7 @@ pub fn view<'a>(patch: &'a Patch, values: &'a Values, block: &'a BlockSpec) -> E
     let knobs: Element<'a, Message> = if block.params.is_empty() {
         text("This block has no knobs.").size(12).color(theme::c().frame_muted).into()
     } else {
-        let cells = block.params.iter().map(|r| {
+        let cells = block.params.iter().map(move |r| {
             let i = r.0;
             let spec = &patch.params[i];
             // The knob edits its base value; macros modulate around it (the arc shows where to).
@@ -63,7 +64,9 @@ pub fn view<'a>(patch: &'a Patch, values: &'a Values, block: &'a BlockSpec) -> E
                 value: v,
                 effective: values.params.get(i).copied().unwrap_or(v),
                 default: spec.normalize(spec.default_plain()),
-                mods: patch.modulations[i].iter().map(|m| knob::Meta { name: &patch.macros[m.slot].name, settings: m.settings }).collect(),
+                mods: routing::metas(patch, i).1,
+                drop,
+                modes: None,
                 colours: None,
             })
         });
@@ -71,7 +74,7 @@ pub fn view<'a>(patch: &'a Patch, values: &'a Values, block: &'a BlockSpec) -> E
     };
 
     let body = column![header, space::vertical().height(Fill), container(display).center_x(Fill), space::vertical().height(24), container(knobs).center_x(Fill), space::vertical().height(Fill)]
-        .padding(Padding { top: PAD, right: PAD, bottom: DRAWER_CLEARANCE, left: PAD });
+        .padding(Padding { top: PAD, right: PAD, bottom, left: PAD });
 
     container(body)
         .width(Fill)

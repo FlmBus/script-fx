@@ -12,7 +12,7 @@ use include_dir::{Dir, include_dir};
 use nice_plug::prelude::*;
 use nice_plug_iced::IcedEditorState;
 use nice_plug_iced::iced::PollSubNotifier;
-use patch::{MACRO_SLOTS, ModSettings, Patch};
+use patch::{MACRO_SLOTS, ModEdits, ModSettings, Patch};
 
 mod diag;
 mod listen;
@@ -160,6 +160,9 @@ struct Live {
     free: Atomics,
     meters: Atomics,
     mods: ModAtomics,
+    assignments: ModAtomics,
+    mod_out: Atomics,
+    mod_phase: Atomics,
 }
 
 /// State shared between audio thread, editor and `activate()`.
@@ -245,7 +248,27 @@ impl Shared {
     /// `Patch::empty()` = no patch (passthrough).
     pub fn publish(&self, patch: &Patch, free: &[f32]) {
         let graph = Box::new(Graph::build(patch, self.sample_rate.load(Ordering::Relaxed), free));
-        *self.live.lock().unwrap() = Some(Live { free: graph.free_values(), meters: graph.meters(), mods: graph.mod_settings() });
+        let mut live = self.live.lock().unwrap();
+        // The editor reads the new graph's outputs from now on, but it only plays from the next
+        // audio buffer: start them at the current values, so scopes and meters don't dip to 0.
+        if let Some(old) = &*live {
+            for (new, old) in [(graph.modulator_values(), &old.mod_out), (graph.modulator_phases(), &old.mod_phase), (graph.meters(), &old.meters)] {
+                if new.len() == old.len() {
+                    for (n, o) in new.iter().zip(old.iter()) {
+                        n.store(o.load(Ordering::Relaxed), Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+        *live = Some(Live {
+            free: graph.free_values(),
+            meters: graph.meters(),
+            mods: graph.mod_settings(),
+            assignments: graph.assignment_settings(),
+            mod_out: graph.modulator_values(),
+            mod_phase: graph.modulator_phases(),
+        });
+        drop(live);
         while self.garbage_rx.lock().unwrap().pop().is_ok() {}
         if self.graph_tx.lock().unwrap().push(graph).is_err() {
             nice_log!("graph queue full, dropping update");
@@ -269,6 +292,30 @@ impl Shared {
                 m.store(settings.pack(), Ordering::Relaxed);
             }
         }
+    }
+
+    /// A modulator assignment's settings changed: lock-free write into the playing graph.
+    pub fn set_assignment(&self, index: usize, settings: ModSettings) {
+        if let Some(live) = &*self.live.lock().unwrap() {
+            if let Some(a) = live.assignments.get(index) {
+                a.store(settings.pack(), Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Live unipolar `[0, 1]` outputs of Follow, LFO 1–3, Step, and their cycle positions
+    /// (`Graph::modulator_phases`).
+    pub fn modulator_values(&self) -> ([f32; 5], [f32; 5]) {
+        let (mut out, mut phase) = ([0.0; 5], [0.0; 5]);
+        if let Some(live) = &*self.live.lock().unwrap() {
+            for (dst, src) in out.iter_mut().zip(live.mod_out.iter()) {
+                *dst = src.load(Ordering::Relaxed);
+            }
+            for (dst, src) in phase.iter_mut().zip(live.mod_phase.iter()) {
+                *dst = src.load(Ordering::Relaxed);
+            }
+        }
+        (out, phase)
     }
 
     /// Current block meter values (index = `Patch::meters`).
@@ -302,6 +349,11 @@ pub struct FxParams {
     #[persist = "mod-slots"]
     pub mod_settings: RwLock<HashMap<String, ModSettings>>,
 
+    /// Routes the user added or removed and modulator settings they changed, against the patch
+    /// file (`patch::ModEdits`). Empty = the patch as written.
+    #[persist = "mod-edits"]
+    pub mod_edits: RwLock<ModEdits>,
+
     /// Generic host-automatable slots. Hosts don't handle parameter lists that
     /// change at runtime, so patches map their macros onto these. Their names
     /// follow the patch via the patched nih-plug (`with_dynamic_name`).
@@ -319,6 +371,7 @@ impl Default for FxParams {
             patch_name: RwLock::new(String::new()),
             param_values: RwLock::new(HashMap::new()),
             mod_settings: RwLock::new(HashMap::new()),
+            mod_edits: RwLock::new(ModEdits::default()),
             macros: std::array::from_fn(|i| MacroParams {
                 value: FloatParam::new(format!("Macro {}", i + 1), 0.0, FloatRange::Linear {
                     min: 0.0,
@@ -345,8 +398,10 @@ impl FxParams {
             .collect()
     }
 
-    /// Puts the saved meta-knob settings into the patch's modulations (before building its graph).
+    /// Puts the project's modulation into a freshly loaded patch (before building its graph):
+    /// the user's route and modulator edits, then the saved meta-knob settings.
     pub fn apply_mod_settings(&self, patch: &mut Patch) {
+        self.mod_edits.read().unwrap().apply(patch);
         let stored = self.mod_settings.read().unwrap();
         for i in 0..patch.modulations.len() {
             for k in 0..patch.modulations[i].len() {
@@ -490,8 +545,14 @@ impl Plugin for ScriptFx {
                 let graph = Box::new(Graph::build(&p, sr, &self.params.free_values(&p)));
                 // Oversampled blocks delay the signal; the host compensates.
                 context.set_latency_samples(graph.latency() as u32);
-                *self.shared.live.lock().unwrap() =
-                    Some(Live { free: graph.free_values(), meters: graph.meters(), mods: graph.mod_settings() });
+                *self.shared.live.lock().unwrap() = Some(Live {
+                    free: graph.free_values(),
+                    meters: graph.meters(),
+                    mods: graph.mod_settings(),
+                    assignments: graph.assignment_settings(),
+                    mod_out: graph.modulator_values(),
+                    mod_phase: graph.modulator_phases(),
+                });
                 self.graph = Some(graph);
                 self.params.set_macro_names(&p);
                 context.rescan_param_info();
@@ -513,6 +574,11 @@ impl Plugin for ScriptFx {
         while let Ok(next) = self.graph_rx.pop() {
             // Lock-free; nih-plug only tells the host if the latency changed.
             context.set_latency_samples(next.latency() as u32);
+            let mut next = next;
+            if let Some(old) = &mut self.graph {
+                // Same chain (a routing or modulator change): keep tails and LFO phases.
+                next.adopt(old);
+            }
             if let Some(old) = self.graph.replace(next) {
                 if let Err(rtrb::PushError::Full(old)) = self.garbage_tx.push(old) {
                     std::mem::forget(old); // never free on the audio thread

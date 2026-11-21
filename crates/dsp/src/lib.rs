@@ -13,6 +13,7 @@
 //! reports the total ([`Graph::latency`]) for the host's delay compensation.
 
 mod fx;
+pub mod modulators;
 mod oversample;
 pub mod preview;
 
@@ -23,7 +24,7 @@ use atomic_float::AtomicF32;
 use patch::chain::{BlockKind, BlockSpec, Chain, Channels, CompSpec, EqSpec, FilterSpec, ParamRef, Side};
 
 use oversample::{Delay, Oversampler};
-use patch::{MACRO_SLOTS, Modulation, ParamSpec, Patch};
+use patch::{MACRO_SLOTS, ModDestination, Modulation, ModulatorId, ModulatorLfoShape, ModulatorSettings, ParamSpec, Patch};
 
 /// Maximum frames per [`Graph::process`] call.
 pub const SUB_BLOCK: usize = 32;
@@ -192,6 +193,12 @@ impl Biquad {
         self.a2 = a2 / a0;
     }
 
+    /// Forgets the signal (a stage that was off and comes back on).
+    pub(crate) fn clear(&mut self) {
+        self.z1 = [0.0; 2];
+        self.z2 = [0.0; 2];
+    }
+
     #[inline]
     pub(crate) fn tick(&mut self, x: f32, ch: usize) -> f32 {
         let y = self.b0 * x + self.z1[ch];
@@ -199,6 +206,25 @@ impl Biquad {
         self.z2[ch] = self.b2 * x - self.a2 * y;
         y
     }
+}
+
+/// Most biquad stages of a low/high-pass: 48 dB/oct.
+pub(crate) const FILTER_STAGES: usize = 4;
+
+/// A low/high-pass of `slope` dB/oct (12, 24, 36 or 48) as cascaded biquads: how many stages,
+/// and each stage's Q. The stages get Butterworth Q's (flat passband); `q` is the resonance,
+/// applied to the steepest stage (0.707 = Butterworth, more = a peak at the cutoff).
+pub(crate) fn filter_stages(slope: f32, q: f32) -> (usize, [f32; FILTER_STAGES]) {
+    let n = ((slope / 12.0).round() as usize).clamp(1, FILTER_STAGES);
+    let order = 2 * n;
+    let mut qs = [0.0; FILTER_STAGES];
+    for (k, s) in qs.iter_mut().take(n).enumerate() {
+        let theta = (2 * k + 1) as f32 * std::f32::consts::PI / (2 * order) as f32;
+        *s = 1.0 / (2.0 * theta.cos());
+    }
+    // The last stage has the highest Q: it carries the resonance.
+    qs[n - 1] *= q.max(0.05) / std::f32::consts::FRAC_1_SQRT_2;
+    (n, qs)
 }
 
 struct Comp {
@@ -348,6 +374,8 @@ pub(crate) enum Node {
     /// Blocks from `fx` (distortion, filters, modulation, space, pitch, rhythm, dynamics).
     Fx(Box<dyn fx::Fx>),
     Eq { shape: EqShape, freq: P, q: P, gain: P, last: [f32; 3], bq: Biquad },
+    /// Low/high-pass with a slope: `stages` of `bqs` run ([`filter_stages`]).
+    Filter { shape: EqShape, freq: P, q: P, slope: P, last: [f32; 3], bqs: [Biquad; FILTER_STAGES], stages: usize },
     Drive { amount: P, mix: P },
     Comp(Box<Comp>),
     Rider(Box<Rider>),
@@ -424,13 +452,14 @@ fn build_kind(kind: &BlockKind, params: &[ParamSpec], sr: f32, max_frames: usize
         last: [f32::NAN; 3],
         bq: Biquad::default(),
     };
-    let filter = |shape: EqShape, f: &FilterSpec| Node::Eq {
+    let filter = |shape: EqShape, f: &FilterSpec| Node::Filter {
         shape,
         freq: p(&f.freq),
         q: p(&f.q),
-        gain: P::constant(0.0),
+        slope: p(&f.slope),
         last: [f32::NAN; 3],
-        bq: Biquad::default(),
+        bqs: [Biquad::default(); FILTER_STAGES],
+        stages: 0,
     };
     // Sub-chains in the same depth-first order as `patch::chain::walk`.
     let chains = |cs: &[&Chain], meter: &mut usize| -> Vec<Vec<Node>> {
@@ -665,6 +694,27 @@ impl Node {
                 for f in frames {
                     f[0] = bq.tick(f[0], 0);
                     f[1] = bq.tick(f[1], 1);
+                }
+            }
+            Node::Filter { shape, freq, q, slope, last, bqs, stages } => {
+                let cur = [freq.update(ctx), q.update(ctx), slope.update(ctx)];
+                if cur != *last {
+                    let (n, qs) = filter_stages(cur[2], cur[1]);
+                    for (bq, &sq) in bqs.iter_mut().zip(&qs).take(n) {
+                        bq.set(*shape, cur[0], sq, 0.0, sr);
+                    }
+                    // Stages coming back on start from silence.
+                    for bq in bqs.iter_mut().take(n).skip(*stages) {
+                        bq.clear();
+                    }
+                    *stages = n;
+                    *last = cur;
+                }
+                for f in frames {
+                    for bq in bqs.iter_mut().take(*stages) {
+                        f[0] = bq.tick(f[0], 0);
+                        f[1] = bq.tick(f[1], 1);
+                    }
                 }
             }
             Node::Drive { amount, mix } => {
@@ -935,12 +985,34 @@ impl Transient {
 /// A compiled chain. Build off the audio thread, then move it to the audio thread.
 pub struct Graph {
     nodes: Vec<Node>,
+    /// The DSP structure (chain, params, sample rate): graphs with the same key can hand their
+    /// running state over ([`Graph::adopt`]).
+    chain_key: u64,
     tempo: f32,
     beat: Option<f64>,
     modulations: Vec<Vec<Modulation>>,
     /// Each modulation's settings (packed [`patch::ModSettings`]), in [`Patch::mod_index`]
     /// order; the editor changes them live.
     mod_settings: ModAtomics,
+    /// Fixed modulation sources (Follow, LFO 1–3, Step).
+    follow: modulators::Follow,
+    lfos: [modulators::Lfo; 3],
+    step: modulators::Step,
+    /// Pre-resolved modulator assignments targeting each macro slot: `(source, assignment_index)`.
+    macro_mods: [Vec<(ModulatorId, usize)>; MACRO_SLOTS],
+    /// Pre-resolved modulator assignments targeting each param: `(source, assignment_index)`.
+    param_mods: Vec<Vec<(ModulatorId, usize)>>,
+    /// Packed [`patch::ModSettings`] for `patch.assignments` in assignment order.
+    assignment_settings: ModAtomics,
+    /// Live unipolar `[0, 1]` outputs of Follow, LFO 1–3, Step (in [`ModulatorId::ALL`] order).
+    mod_out: Atomics,
+    /// Where each modulator is in its cycle, for display: LFOs their phase (0–1), Step the index
+    /// of the step playing, Follow 0.
+    mod_phase: Atomics,
+    /// Live effective macro values `[0, 1]` (host base + modulator deltas, clamped).
+    macro_eff: Atomics,
+    /// Live effective normalized param values `[0, 1]` (base + all modulation deltas, clamped).
+    param_norm: Atomics,
     /// Every param's range/scale, to map base + macro offsets to plain values.
     specs: Vec<ParamSpec>,
     free: Atomics,
@@ -948,6 +1020,72 @@ pub struct Graph {
     values: Vec<f32>,
     sr: f32,
     k: f32,
+}
+
+/// A patch's LFO shape as the LFO's morph position ([`modulators::morph`]).
+pub fn lfo_shape(shape: ModulatorLfoShape) -> f32 {
+    match shape {
+        ModulatorLfoShape::Sine => 0.0,
+        ModulatorLfoShape::Triangle => 1.0 / 3.0,
+        ModulatorLfoShape::Square => 1.0,
+    }
+}
+
+/// A modulator's rate: synced to the host (beats) when `sync` is set, else free in Hz.
+fn rate(hz: f32, sync: Option<f32>) -> modulators::Rate {
+    sync.map_or(modulators::Rate::Hz(hz), modulators::Rate::Beats)
+}
+
+fn build_modulators(patch: &Patch, sr: f32) -> (modulators::Follow, [modulators::Lfo; 3], modulators::Step) {
+    let mut follow_cfg = modulators::FollowSettings::default();
+    let mut lfo_cfgs = [modulators::LfoSettings::default(); 3];
+    let mut step_cfg = modulators::StepSettings::default();
+    for spec in &patch.modulators {
+        match (spec.id, &spec.settings) {
+            (ModulatorId::Follow, ModulatorSettings::Follow { attack_ms, release_ms }) => {
+                follow_cfg.attack_ms = *attack_ms;
+                follow_cfg.release_ms = *release_ms;
+            }
+            (ModulatorId::Lfo1 | ModulatorId::Lfo2 | ModulatorId::Lfo3, ModulatorSettings::Lfo { rate_hz, sync, phase, shape }) => {
+                let idx = match spec.id {
+                    ModulatorId::Lfo1 => 0,
+                    ModulatorId::Lfo2 => 1,
+                    _ => 2,
+                };
+                lfo_cfgs[idx].rate = rate(*rate_hz, *sync);
+                lfo_cfgs[idx].phase = *phase * 360.0;
+                lfo_cfgs[idx].shape = lfo_shape(*shape);
+            }
+            (ModulatorId::Step, ModulatorSettings::Step { rate_hz, sync, values }) => {
+                step_cfg.rate = rate(*rate_hz, *sync);
+                step_cfg.length = values.len().clamp(1, modulators::STEPS);
+                let mut arr = [0.5; modulators::STEPS];
+                for (dst, src) in arr.iter_mut().zip(values.iter()) {
+                    *dst = *src;
+                }
+                step_cfg.values = arr;
+            }
+            _ => {}
+        }
+    }
+    (
+        modulators::Follow::new(sr, follow_cfg),
+        [
+            modulators::Lfo::new(sr, lfo_cfgs[0]),
+            modulators::Lfo::new(sr, lfo_cfgs[1]),
+            modulators::Lfo::new(sr, lfo_cfgs[2]),
+        ],
+        modulators::Step::new(sr, step_cfg),
+    )
+}
+
+/// Fingerprint of what `build_nodes` builds from: the chain, the params, the sample rate.
+fn chain_key(patch: &Patch, sample_rate: f32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    format!("{:?}|{:?}", patch.chain, patch.params).hash(&mut h);
+    sample_rate.to_bits().hash(&mut h);
+    h.finish()
 }
 
 impl Graph {
@@ -961,18 +1099,83 @@ impl Graph {
         debug_assert_eq!(meter, patch.meters.len(), "meter order must match patch::chain::walk");
         debug_assert_eq!(meter, idle.len());
         let sub_rate = sample_rate / SUB_BLOCK as f32;
+        let (follow, lfos, step) = build_modulators(patch, sample_rate);
+        let mut macro_mods: [Vec<(ModulatorId, usize)>; MACRO_SLOTS] = std::array::from_fn(|_| Vec::new());
+        let mut param_mods: Vec<Vec<(ModulatorId, usize)>> = vec![Vec::new(); patch.params.len()];
+        for (idx, a) in patch.assignments.iter().enumerate() {
+            match &a.destination {
+                ModDestination::Param(id) => {
+                    if let Some(p) = patch.param_index(id) {
+                        param_mods[p].push((a.source, idx));
+                    }
+                }
+                ModDestination::Macro(id) => {
+                    if let Some(m) = patch.macro_index(id) {
+                        macro_mods[m].push((a.source, idx));
+                    }
+                }
+            }
+        }
+        let initial_free: Vec<f32> = patch
+            .params
+            .iter()
+            .enumerate()
+            .map(|(i, spec)| free.get(i).copied().unwrap_or_else(|| spec.default_plain()))
+            .collect();
+        let initial_norm: Vec<f32> = patch
+            .params
+            .iter()
+            .zip(&initial_free)
+            .map(|(spec, &v)| spec.normalize(v))
+            .collect();
         Graph {
             nodes,
+            chain_key: chain_key(patch, sample_rate),
             tempo: 120.0,
             beat: None,
             modulations: patch.modulations.clone(),
             mod_settings: patch.modulations.iter().flatten().map(|m| AtomicU64::new(m.settings.pack())).collect::<Vec<_>>().into(),
+            follow,
+            lfos,
+            step,
+            macro_mods,
+            param_mods,
+            assignment_settings: patch.assignments.iter().map(|a| AtomicU64::new(a.settings.pack())).collect::<Vec<_>>().into(),
+            mod_out: atomics([0.0; 5]),
+            mod_phase: atomics([0.0; 5]),
+            macro_eff: atomics([0.0; MACRO_SLOTS]),
+            param_norm: atomics(initial_norm),
             specs: patch.params.clone(),
-            free: atomics(patch.params.iter().enumerate().map(|(i, spec)| free.get(i).copied().unwrap_or_else(|| spec.default_plain()))),
+            free: atomics(initial_free),
             meters: atomics(idle),
             values: vec![0.0; patch.params.len()],
             sr: sample_rate,
             k: 1.0 - coef(SETTING_SMOOTHING_MS, sub_rate),
+        }
+    }
+
+    /// Takes over the running state of `old`, the graph this one replaces, when both have the
+    /// same DSP structure: block state (filter memories, delay lines, reverb tails) and the
+    /// modulators' phases and envelopes, with this graph's modulator settings applied on top.
+    /// So changing routes or modulator settings (which rebuilds the graph) doesn't click or
+    /// restart an LFO. A different chain starts fresh. Real-time safe: swaps, no allocation;
+    /// `old` gets the fresh state, to be dropped off the audio thread.
+    pub fn adopt(&mut self, old: &mut Graph) {
+        self.tempo = old.tempo;
+        self.beat = old.beat;
+        if self.chain_key != old.chain_key {
+            return;
+        }
+        std::mem::swap(&mut self.nodes, &mut old.nodes);
+        let (follow, step) = (self.follow.settings(), self.step.settings());
+        let lfos = [self.lfos[0].settings(), self.lfos[1].settings(), self.lfos[2].settings()];
+        std::mem::swap(&mut self.follow, &mut old.follow);
+        std::mem::swap(&mut self.lfos, &mut old.lfos);
+        std::mem::swap(&mut self.step, &mut old.step);
+        self.follow.set_settings(follow);
+        self.step.set_settings(step);
+        for (lfo, s) in self.lfos.iter_mut().zip(lfos) {
+            lfo.set_settings(s);
         }
     }
 
@@ -1002,6 +1205,33 @@ impl Graph {
         self.mod_settings.clone()
     }
 
+    /// Modulator assignment settings (index = `Patch::assignments`), writable from the editor.
+    pub fn assignment_settings(&self) -> ModAtomics {
+        self.assignment_settings.clone()
+    }
+
+    /// Live unipolar `[0, 1]` outputs of Follow, LFO 1–3, Step, readable from the editor.
+    pub fn modulator_values(&self) -> Atomics {
+        self.mod_out.clone()
+    }
+
+    /// Live cycle positions (see `mod_phase`), readable from the editor. The editor draws the
+    /// LFO's wave and Step's bars from the settings and marks these on them: sampling the output
+    /// once per UI frame instead would alias anything faster than a few Hz.
+    pub fn modulator_phases(&self) -> Atomics {
+        self.mod_phase.clone()
+    }
+
+    /// Live effective macro values `[0, 1]`, readable from the editor.
+    pub fn macro_values(&self) -> Atomics {
+        self.macro_eff.clone()
+    }
+
+    /// Live effective normalized param values `[0, 1]`, readable from the editor.
+    pub fn param_values(&self) -> Atomics {
+        self.param_norm.clone()
+    }
+
     /// Block meters (index = `Patch::meters`), readable from the editor.
     pub fn meters(&self) -> Atomics {
         self.meters.clone()
@@ -1010,26 +1240,69 @@ impl Graph {
     /// Processes up to [`SUB_BLOCK`] frames in place. Real-time safe.
     pub fn process(&mut self, macros: &[f32; MACRO_SLOTS], frames: &mut [Frame]) {
         debug_assert!(frames.len() <= SUB_BLOCK);
+        let n = frames.len();
+        if n == 0 {
+            return;
+        }
+
+        // 1. Evaluate the five global modulators at control rate (no allocation).
+        let transport = modulators::Transport { tempo: self.tempo, beat: self.beat };
+        let mut buf = [0.0f32; SUB_BLOCK];
+        let mut src = [0.0f32; 5];
+        self.follow.process(frames, &mut buf[..n]);
+        src[ModulatorId::Follow.index()] = buf[n - 1].clamp(0.0, 1.0);
+        for (k, id) in [ModulatorId::Lfo1, ModulatorId::Lfo2, ModulatorId::Lfo3].into_iter().enumerate() {
+            self.lfos[k].process(&transport, &mut buf[..n]);
+            src[id.index()] = (0.5 * (buf[n - 1] + 1.0)).clamp(0.0, 1.0);
+        }
+        self.step.process(&transport, &mut buf[..n]);
+        src[ModulatorId::Step.index()] = (0.5 * (buf[n - 1] + 1.0)).clamp(0.0, 1.0);
+        for (slot, &val) in self.mod_out.iter().zip(&src) {
+            slot.store(val, Ordering::Relaxed);
+        }
+        for (k, lfo) in self.lfos.iter().enumerate() {
+            self.mod_phase[1 + k].store(lfo.phase(), Ordering::Relaxed);
+        }
+        self.mod_phase[ModulatorId::Step.index()].store(self.step.current_step() as f32, Ordering::Relaxed);
+
+        // 2. Apply modulator assignments targeting host macros (host base stays untouched).
+        let mut eff_macros = *macros;
+        for (slot, mods) in self.macro_mods.iter().enumerate() {
+            let mut v = macros[slot];
+            for &(id, idx) in mods {
+                v += patch::ModSettings::unpack(self.assignment_settings[idx].load(Ordering::Relaxed)).delta(src[id.index()]);
+            }
+            let clamped = v.clamp(0.0, 1.0);
+            eff_macros[slot] = clamped;
+            self.macro_eff[slot].store(clamped, Ordering::Relaxed);
+        }
+
+        // 3. Sum macro + modulator slot deltas onto each param's editable base in normalized space.
         let mut j = 0; // index into mod_settings
         for (i, spec) in self.specs.iter().enumerate() {
-            // The knob's base value plus every slot's delta.
             let base = self.free[i].load(Ordering::Relaxed);
-            if self.modulations[i].is_empty() {
+            if self.modulations[i].is_empty() && self.param_mods[i].is_empty() {
                 self.values[i] = base;
+                self.param_norm[i].store(spec.normalize(base), Ordering::Relaxed);
                 continue;
             }
             let mut v = spec.normalize(base);
             for m in &self.modulations[i] {
-                // Serum style: each slot adds a normalized delta; clamp, then the knob's scale.
-                v += patch::ModSettings::unpack(self.mod_settings[j].load(Ordering::Relaxed)).delta(macros[m.slot]);
+                v += patch::ModSettings::unpack(self.mod_settings[j].load(Ordering::Relaxed)).delta(eff_macros[m.slot]);
                 j += 1;
             }
-            self.values[i] = spec.plain(v.clamp(0.0, 1.0));
+            for &(id, idx) in &self.param_mods[i] {
+                v += patch::ModSettings::unpack(self.assignment_settings[idx].load(Ordering::Relaxed)).delta(src[id.index()]);
+            }
+            let norm = v.clamp(0.0, 1.0);
+            self.param_norm[i].store(norm, Ordering::Relaxed);
+            self.values[i] = spec.plain(norm);
         }
+
         let ctx = Ctx { values: &self.values, sr: self.sr, k: self.k, meters: &self.meters, tempo: self.tempo, beat: self.beat };
         process_nodes(&mut self.nodes, frames, &ctx);
         if let Some(b) = &mut self.beat {
-            *b += frames.len() as f64 * self.tempo as f64 / 60.0 / self.sr as f64;
+            *b += n as f64 * self.tempo as f64 / 60.0 / self.sr as f64;
         }
     }
 
@@ -1128,6 +1401,110 @@ mod tests {
         g.process(&macros, &mut [[1.0, 1.0]]);
         assert!((g.values[0] - p.param_plain(0, &macros, &[-6.0])).abs() < 0.001);
         assert!((g.values[0] - 12.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn graph_evaluates_modulators_to_params_and_macros() {
+        let d = TempDir::new();
+        std::fs::write(d.0.join("init.luau"), "
+            local g1 = Blocks.Gain.new('g1', { db = 0 })
+            local g2 = Blocks.Gain.new('g2', { db = 0 })
+            local m = Macro.new('m', 'M', { default = 0.5 }):drives(g2.params.db, { from = -12, to = 12 })
+            return Patch.new('T', {
+              chain = Chain.new { g1, g2 },
+              macros = { m },
+              modulators = {
+                { id = 'follow', attack_ms = 1, release_ms = 50 },
+                { id = 'lfo1', rate_hz = 2, phase = 0.25, shape = 'square' },
+                { id = 'step', rate_hz = 4, values = { 1, 0 } },
+              },
+              assignments = {
+                { source = 'follow', destination = g1.params.db, amount = 0.5 },
+                { source = 'step', destination = m, amount = 0.5 },
+              },
+            })").unwrap();
+        let p = Patch::load(&d.0).unwrap();
+        let mut g = Graph::build(&p, SR, &p.default_param_values());
+        let mut macros = [0.0; MACRO_SLOTS];
+        macros[0] = 0.25;
+        for _ in 0..8 {
+            let mut loud = [[1.0, 1.0]; SUB_BLOCK];
+            g.process(&macros, &mut loud);
+        }
+        // The editor's cycle positions: the LFO's phase, the index of the step playing.
+        assert_eq!(g.modulator_phases()[ModulatorId::Lfo1.index()].load(Ordering::Relaxed), g.lfos[0].phase());
+        assert_eq!(g.modulator_phases()[ModulatorId::Step.index()].load(Ordering::Relaxed), g.step.current_step() as f32);
+        // Follow saw loud input -> g1.db moved above 0 dB.
+        assert!(g.values[0] > 10.0, "g1.db={}", g.values[0]);
+        assert!(g.modulator_values()[ModulatorId::Follow.index()].load(Ordering::Relaxed) > 0.8);
+        // Step starts at value 1.0 (unipolar 1.0) -> adds +0.5 to macro 0 (0.25 -> 0.75) -> g2.db = +6 dB.
+        assert!((g.macro_values()[0].load(Ordering::Relaxed) - 0.75).abs() < 0.01);
+        assert!((g.values[1] - 6.0).abs() < 0.2, "g2.db={}", g.values[1]);
+        // Live assignment update: bypassing step drops macro 0 back to its host base 0.25 (-6 dB).
+        g.assignment_settings()[1].store(patch::ModSettings { amount: 0.5, bypass: true, ..Default::default() }.pack(), Ordering::Relaxed);
+        g.process(&macros, &mut [[0.0, 0.0]; SUB_BLOCK]);
+        assert!((g.macro_values()[0].load(Ordering::Relaxed) - 0.25).abs() < 0.01);
+        assert!((g.values[1] + 6.0).abs() < 0.2, "g2.db={}", g.values[1]);
+    }
+
+    #[test]
+    fn synced_modulators_follow_the_host_beat() {
+        let d = TempDir::new();
+        std::fs::write(d.0.join("init.luau"), "
+            return Patch.new('T', { chain = Chain.new { Blocks.Gain.new('g', {}) },
+              modulators = { { id = 'lfo2', rate_hz = 7, sync = '1/2' }, { id = 'step', sync = '1/16', values = { 0, 1, 0, 1 } } } })").unwrap();
+        let p = Patch::load(&d.0).unwrap();
+        assert!(matches!(p.modulators[2].settings, ModulatorSettings::Lfo { sync: Some(2.0), .. }));
+        let mut g = Graph::build(&p, SR, &[]);
+        // Playing at beat 0.5: a quarter into the half-note LFO cycle, step 2 of the 1/16 steps.
+        g.set_transport(Some(120.0), Some(0.5));
+        g.process(&[0.0; MACRO_SLOTS], &mut [[0.0; 2]; 1]);
+        assert!((g.lfos[1].phase() - 0.25).abs() < 1e-3, "{}", g.lfos[1].phase());
+        assert_eq!(g.step.current_step(), 2);
+    }
+
+    #[test]
+    fn adopt_keeps_running_state_when_only_routing_changes() {
+        let d = TempDir::new();
+        let src = |extra: &str| format!("
+            local dl = Blocks.Delay.new('d', {{ time = 10, feedback = 0, mix = 100 }})
+            return Patch.new('T', {{ chain = Chain.new {{ dl }}, {extra} }})");
+        std::fs::write(d.0.join("init.luau"), src("modulators = { { id = 'lfo1', rate_hz = 1, phase = 0, shape = 'sine' } }")).unwrap();
+        let p = Patch::load(&d.0).unwrap();
+        let mut old = Graph::build(&p, SR, &p.default_param_values());
+        // An impulse goes into the 10 ms delay and the LFO runs for 3 ms.
+        let mut buf = [[0.0; 2]; SUB_BLOCK];
+        buf[0] = [1.0, 1.0];
+        old.process_all(&[0.0; MACRO_SLOTS], &mut buf);
+        for _ in 0..(144 / SUB_BLOCK) {
+            old.process_all(&[0.0; MACRO_SLOTS], &mut [[0.0; 2]; SUB_BLOCK]);
+        }
+        let lfo_before = old.lfos[0].phase();
+
+        // Same chain, an assignment added and the LFO faster: the echo still arrives, the LFO
+        // continues from where it was.
+        let mut q = Patch::load(&d.0).unwrap();
+        q.add_route(patch::RouteSource::Modulator(ModulatorId::Lfo1), ModDestination::Param("d.mix".into())).unwrap();
+        assert!(q.set_modulator(patch::ModulatorSpec {
+            id: ModulatorId::Lfo1,
+            settings: ModulatorSettings::Lfo { rate_hz: 5.0, sync: None, phase: 0.0, shape: ModulatorLfoShape::Sine },
+        }));
+        let mut new = Graph::build(&q, SR, &q.default_param_values());
+        new.adopt(&mut old);
+        assert_eq!(new.lfos[0].phase(), lfo_before);
+        assert_eq!(new.lfos[0].settings().rate, modulators::Rate::Hz(5.0));
+        let mut tail = vec![[0.0; 2]; 960];
+        new.process_all(&[0.0; MACRO_SLOTS], &mut tail);
+        assert!(tail.iter().any(|f| f[0].abs() > 0.1), "the echo was lost");
+
+        // A different chain starts fresh.
+        std::fs::write(d.0.join("init.luau"), src("").replace("time = 10", "time = 20")).unwrap();
+        let r = Patch::load(&d.0).unwrap();
+        let mut other = Graph::build(&r, SR, &r.default_param_values());
+        other.adopt(&mut new);
+        let mut out = vec![[0.0; 2]; 2000];
+        other.process_all(&[0.0; MACRO_SLOTS], &mut out);
+        assert!(out.iter().all(|f| f[0] == 0.0));
     }
 
     #[test]

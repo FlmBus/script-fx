@@ -12,3 +12,8 @@ nice-plug = { path = "vendor/nice-plug" }
 nice-plug-core = { path = "vendor/nice-plug-core" }
 iced_wgpu = { path = "vendor/iced_wgpu" }
 baseview = { path = "vendor/baseview" }
+
+# Dependencies (iced/wgpu, resvg/tiny-skia, mlua/Luau) are unusably slow unoptimized: a debug
+# standalone rendered Tape Glow at under 1 fps. Optimize them; our own crates stay debuggable.
+[profile.dev.package."*"]
+opt-level = 2

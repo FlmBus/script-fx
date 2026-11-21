@@ -9,10 +9,6 @@ track's audio. VST3 + CLAP + standalone, Linux / Windows / macOS.
 glossary) · [`docs/HISTORY.md`](docs/HISTORY.md) (what each session built) ·
 [`docs/research/`](docs/research/) (concepts, research, [measurements](docs/research/findings.md)).
 
-> The chain editor work (chain view, block pages, Serum-style modulation, the knob cell) lives on
-> branch `notch-drawer` (worktree `.claude/worktrees/notch-drawer`), not merged yet. This README
-> and STATUS describe that branch; on `main`, params are still declared with `Param.new`.
-
 ```
 crates/patch         patch model (params, macros + modulation slots, chain), sandboxed Luau runtime + require, patch & UI API (src/*.luau)
 crates/dsp           native DSP: compiles a patch's chain into a graph (no alloc/locks/Lua on the audio thread); `preview` = curves for the UI
@@ -33,6 +29,7 @@ patches/.types       Luau type definitions (scriptfx.d.luau) → type checking +
 
 ```sh
 export CARGO_TARGET_DIR=/tmp/scriptfx-target     # /home is nearly full: tmpfs build dir
+# debug builds optimize dependencies (Cargo.toml [profile.dev.package."*"]): usable UI speed
 cargo test --workspace
 cargo xtask bundle scriptfx --release            # → $CARGO_TARGET_DIR/bundled/ScriptFX.{vst3,clap}
 
@@ -79,9 +76,15 @@ analyses a WAV from the command line.
 `DISPLAY=:99 WAYLAND_DISPLAY= WGPU_BACKEND=vulkan`); xdotool clicks and drags work there (they don't
 reach XWayland windows on the desktop), screenshots with `import -window root`.
 
-**CI** (`.github/workflows/build.yml`): tests, then VST3 + CLAP bundles for Linux x86_64,
-Windows x86_64 and macOS universal (arm64 + x86_64, ad-hoc signed, not notarized → remove
-quarantine, see the README in the artifact). Written, not run yet (the repo isn't on GitHub).
+**CI/CD** (`.github/workflows/build.yml`, repo `github.com/FlmBus/script-fx`): pushes trigger tests
+and, if they pass, builds for Linux x86_64, Windows x86_64 and macOS universal: VST3 + CLAP +
+standalone, **diagnostics** on (`--features diagnostics`: a log file, see `crates/plugin/src/diag.rs`),
+debug symbols, test patches and per-platform helper scripts (`.github/package/<platform>/`:
+install, run the standalone, collect a report zip). Branch pushes: workflow artifacts. **Push to
+`main`: the rolling pre-release
+[nightly](https://github.com/FlmBus/script-fx/releases/tag/nightly)** (no login needed to
+download). Tags `v*`: a release. macOS builds are ad-hoc signed (not notarized, the install script
+removes the quarantine); Windows builds aren't code-signed.
 
 ## Patch model
 
@@ -141,7 +144,7 @@ return { Panel = Panel }
   the project).
 - **Modulation works like Serum's** ([`docs/research/serum-modulation.md`](docs/research/serum-modulation.md)):
   each macro → param link is a slot with an amount (−100…+100 % of the knob's travel), uni/bi,
-  curve, invert and bypass. The slots' deltas add up on the knob's base in normalized space, are
+  curve and bypass (the amount's sign is the direction; bipolar swings ±amount/2). The slots' deltas add up on the knob's base in normalized space, are
   clamped, and only then go through the knob's lin/log scale. Several macros may drive one knob.
   `drives(param, { from, to })` sets the knob's base to `from` and the amount to the way from
   `from` to `to`; in the shell, each slot gets a meta knob (amount, menu) and the knob shows the

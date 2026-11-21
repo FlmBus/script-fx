@@ -17,12 +17,15 @@
 //! - `Patch.new(name, { chain, macros, theme, author, panel })` is what `init.luau` returns;
 //!   `panel` is the root component instance of the ControlPanel.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub mod chain;
 pub mod locale;
+pub mod routes;
 pub mod runtime;
+
+pub use routes::{ModEdits, Route, RouteSource};
 pub use chain::BlockSpec;
 
 use mlua::{Lua, LuaSerdeExt};
@@ -64,6 +67,10 @@ pub struct ParamSpec {
     /// How the 0..1 knob travel maps onto min..max.
     #[serde(default)]
     pub scale: Scale,
+    /// Only multiples of this from `min` (a filter's slope: 12, 24, 36, 48). The knob still
+    /// turns smoothly; values snap.
+    #[serde(default)]
+    pub step: Option<f32>,
 }
 
 /// Knob travel → value: even steps (`lin`), or even ratios (`log`: frequencies, times; needs
@@ -115,9 +122,18 @@ impl ParamSpec {
     }
     pub fn plain(&self, normalized: f32) -> f32 {
         let t = normalized.clamp(0.0, 1.0);
-        match self.scale {
+        let v = match self.scale {
             Scale::Lin => self.min + t * (self.max - self.min),
             Scale::Log => self.min * (self.max / self.min).powf(t),
+        };
+        self.snap(v)
+    }
+
+    /// `v` on the nearest step (unchanged without `step`), kept in range.
+    pub fn snap(&self, v: f32) -> f32 {
+        match self.step.filter(|s| *s > 0.0) {
+            Some(s) => (self.min + ((v - self.min) / s).round() * s).clamp(self.min.min(self.max), self.min.max(self.max)),
+            None => v,
         }
     }
     /// `"6.0 dB"`, `"40%"`, `"4.0:1"`: a space only before units that start with a letter.
@@ -132,7 +148,7 @@ impl ParamSpec {
     /// is no number.
     pub fn parse_plain(&self, text: &str) -> Option<f32> {
         let v = parse_number(text)?;
-        Some(v.clamp(self.min.min(self.max), self.min.max(self.max)))
+        Some(self.snap(v.clamp(self.min.min(self.max), self.min.max(self.max))))
     }
 }
 
@@ -217,24 +233,51 @@ pub struct Modulation {
 }
 
 /// A slot's settings.
+///
+/// The amount is the size of the range the knob moves in, the same for both polarities: unipolar
+/// moves from the base to base + amount, bipolar swings ±amount/2 around the base. Its sign is
+/// the direction (there is no separate invert: one control for both, decided 2026-11-21).
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, Deserialize)]
-#[serde(default)]
+#[serde(from = "StoredModSettings")]
 pub struct ModSettings {
-    /// −1..+1: the share of the knob's travel at full source (negative = the other way).
+    /// −1..+1: the share of the knob's travel the source covers (negative = the other way).
     pub amount: f32,
-    /// Bipolar: the source's centre is 0, its ends ±amount. Unipolar: 0..amount.
+    /// Bipolar: the source's centre is no change, its ends ±amount/2. Unipolar: 0..amount.
     pub bipolar: bool,
     /// Tension −1..+1 applied to the source first: 0 = linear, > 0 slow start, < 0 fast start.
     pub curve: f32,
-    /// Flips the delta (the range runs the other way), keeping the amount.
-    pub invert: bool,
     /// Muted, settings kept.
     pub bypass: bool,
 }
 
 impl Default for ModSettings {
     fn default() -> Self {
-        Self { amount: 0.0, bipolar: false, curve: 0.0, invert: false, bypass: false }
+        Self { amount: 0.0, bipolar: false, curve: 0.0, bypass: false }
+    }
+}
+
+/// [`ModSettings`] as saved, including older projects' separate `invert` flag (now the amount's
+/// sign).
+#[derive(Deserialize)]
+#[serde(default)]
+struct StoredModSettings {
+    amount: f32,
+    bipolar: bool,
+    curve: f32,
+    bypass: bool,
+    invert: bool,
+}
+
+impl Default for StoredModSettings {
+    fn default() -> Self {
+        let d = ModSettings::default();
+        Self { amount: d.amount, bipolar: d.bipolar, curve: d.curve, bypass: d.bypass, invert: false }
+    }
+}
+
+impl From<StoredModSettings> for ModSettings {
+    fn from(s: StoredModSettings) -> Self {
+        Self { amount: if s.invert { -s.amount } else { s.amount }, bipolar: s.bipolar, curve: s.curve, bypass: s.bypass }
     }
 }
 
@@ -245,27 +288,21 @@ impl ModSettings {
             return 0.0;
         }
         let s = tension(source.clamp(0.0, 1.0), self.curve);
-        let p = if self.bipolar { 2.0 * s - 1.0 } else { s };
-        p * self.signed_amount()
-    }
-
-    /// The amount with invert applied: where the range arc points.
-    pub fn signed_amount(self) -> f32 {
-        if self.invert { -self.amount } else { self.amount }
+        let p = if self.bipolar { s - 0.5 } else { s };
+        p * self.amount
     }
 
     /// Packed into one word, for a lock-free hand-over to the audio thread: amount (f32 bits),
-    /// curve (i16 fixed point), flags.
+    /// curve (i16 fixed point), flags (bit 2 is free: it was invert).
     pub fn pack(self) -> u64 {
         let curve = (self.curve.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16 as u16 as u64;
-        (self.amount.to_bits() as u64) << 32 | curve << 16 | (self.invert as u64) << 2 | (self.bypass as u64) << 1 | self.bipolar as u64
+        (self.amount.to_bits() as u64) << 32 | curve << 16 | (self.bypass as u64) << 1 | self.bipolar as u64
     }
 
     pub fn unpack(w: u64) -> Self {
         Self {
             amount: f32::from_bits((w >> 32) as u32),
             curve: ((w >> 16) as u16 as i16) as f32 / i16::MAX as f32,
-            invert: w & 4 != 0,
             bypass: w & 2 != 0,
             bipolar: w & 1 != 0,
         }
@@ -275,6 +312,103 @@ impl ModSettings {
 /// The tension curve: `x^(2^(3c))` (c = 0 linear; ±1 ≈ x⁸ / x^⅛).
 pub fn tension(x: f32, c: f32) -> f32 {
     if c == 0.0 { x } else { x.powf((3.0 * c).exp2()) }
+}
+
+/// Fixed modulation source identity. Separate from UI [`Source`] and macro slot numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModulatorId {
+    Follow,
+    Lfo1,
+    Lfo2,
+    Lfo3,
+    Step,
+}
+
+impl ModulatorId {
+    pub const ALL: [Self; 5] = [Self::Follow, Self::Lfo1, Self::Lfo2, Self::Lfo3, Self::Step];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Follow => "follow",
+            Self::Lfo1 => "lfo1",
+            Self::Lfo2 => "lfo2",
+            Self::Lfo3 => "lfo3",
+            Self::Step => "step",
+        }
+    }
+
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Follow => 0,
+            Self::Lfo1 => 1,
+            Self::Lfo2 => 2,
+            Self::Lfo3 => 3,
+            Self::Step => 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModulatorLfoShape {
+    Sine,
+    Triangle,
+    Square,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub enum ModulatorSettings {
+    Follow { attack_ms: f32, release_ms: f32 },
+    /// `sync`: the cycle as a note length in beats (quarter notes), overriding `rate_hz`.
+    Lfo {
+        rate_hz: f32,
+        #[serde(default)]
+        sync: Option<f32>,
+        phase: f32,
+        shape: ModulatorLfoShape,
+    },
+    /// `sync`: one step's length in beats, overriding `rate_hz` (steps per second).
+    Step {
+        rate_hz: f32,
+        #[serde(default)]
+        sync: Option<f32>,
+        values: Vec<f32>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModulatorSpec {
+    pub id: ModulatorId,
+    pub settings: ModulatorSettings,
+}
+
+impl ModulatorSpec {
+    pub fn default_for(id: ModulatorId) -> Self {
+        let settings = match id {
+            ModulatorId::Follow => ModulatorSettings::Follow { attack_ms: 10.0, release_ms: 150.0 },
+            ModulatorId::Step => ModulatorSettings::Step { rate_hz: 2.0, sync: None, values: vec![0.5; 8] },
+            _ => ModulatorSettings::Lfo { rate_hz: 1.0, sync: None, phase: 0.0, shape: ModulatorLfoShape::Sine },
+        };
+        Self { id, settings }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "lowercase")]
+pub enum ModDestination {
+    Param(String),
+    Macro(String),
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModAssignment {
+    pub source: ModulatorId,
+    pub destination: ModDestination,
+    pub settings: ModSettings,
 }
 
 /// A value the UI can read: what a component's `bind` / `source` string resolves to.
@@ -370,6 +504,10 @@ pub struct Values {
     pub meter_out: f32,
     /// Block meters, index = [`Patch::meters`].
     pub blocks: Vec<f32>,
+    /// Live unipolar `[0, 1]` outputs of Follow, LFO 1–3, Step (in [`ModulatorId::ALL`] order).
+    pub modulators: [f32; 5],
+    /// Where each modulator is in its cycle: LFOs 0–1, Step the step index, Follow 0.
+    pub modulator_phases: [f32; 5],
     pub time: f32,
 }
 
@@ -398,6 +536,10 @@ pub struct Patch {
     pub macros: Vec<MacroSpec>,
     /// One entry per param: the macros that modulate it (any number, offsets sum).
     pub modulations: Vec<Vec<Modulation>>,
+    /// The five fixed modulation sources, in [`ModulatorId::ALL`] order.
+    pub modulators: Vec<ModulatorSpec>,
+    /// Modulator-to-param and modulator-to-macro assignments.
+    pub assignments: Vec<ModAssignment>,
     pub chain: Vec<BlockSpec>,
     /// Ids of metered chain blocks (compressors/rider/transient), in DSP meter-slot order.
     pub meters: Vec<String>,
@@ -416,6 +558,8 @@ impl Patch {
             params: Vec::new(),
             macros: Vec::new(),
             modulations: Vec::new(),
+            modulators: ModulatorId::ALL.into_iter().map(ModulatorSpec::default_for).collect(),
+            assignments: Vec::new(),
             chain: Vec::new(),
             meters: Vec::new(),
             theme: Theme::default(),
@@ -447,9 +591,13 @@ impl Patch {
             }
         }
         let modulations = resolve_modulations(&params, &macros)?;
+        let raw_modulators: Vec<ModulatorSpec> = opt_from_lua(lua, root.get("modulators")?)?;
+        let modulators = validate_modulators(raw_modulators)?;
+        let assignments: Vec<ModAssignment> = opt_from_lua(lua, root.get("assignments")?)?;
+        validate_assignments(&assignments, &params, &macros)?;
         let chain: Vec<BlockSpec> = opt_from_lua(lua, root.get("chain")?)?;
         let meters = chain::validate(&chain, &params)?;
-        Ok(Patch { name, author, dir, params, macros, modulations, chain, meters, theme, has_panel })
+        Ok(Patch { name, author, dir, params, macros, modulations, modulators, assignments, chain, meters, theme, has_panel })
     }
 
     pub fn macro_index(&self, id: &str) -> Option<usize> {
@@ -490,12 +638,48 @@ impl Patch {
         spec.plain((spec.normalize(own) + delta).clamp(0.0, 1.0))
     }
 
-    /// Fills `out` with normalized values of all params.
+    /// Fills `out` with normalized values of all params (macro modulation only).
     pub fn compute_params(&self, macros: &[f32; MACRO_SLOTS], free: &[f32], out: &mut Vec<f32>) {
+        self.compute_params_with_modulators(macros, &[0.0; 5], free, out);
+    }
+
+    /// Fills `out` with normalized values of all params, including live modulator outputs
+    /// (Follow, LFO 1–3, Step in [`ModulatorId::ALL`] order).
+    pub fn compute_params_with_modulators(
+        &self,
+        macros: &[f32; MACRO_SLOTS],
+        modulators: &[f32; 5],
+        free: &[f32],
+        out: &mut Vec<f32>,
+    ) {
+        let mut eff_macros = *macros;
+        if !self.assignments.is_empty() {
+            for a in &self.assignments {
+                if let ModDestination::Macro(id) = &a.destination {
+                    if let Some(slot) = self.macro_index(id) {
+                        eff_macros[slot] += a.settings.delta(modulators[a.source.index()]);
+                    }
+                }
+            }
+            for v in &mut eff_macros {
+                *v = v.clamp(0.0, 1.0);
+            }
+        }
         out.clear();
-        out.extend(
-            (0..self.params.len()).map(|i| self.params[i].normalize(self.param_plain(i, macros, free))),
-        );
+        out.extend((0..self.params.len()).map(|i| {
+            let spec = &self.params[i];
+            let own = free.get(i).copied().unwrap_or_else(|| spec.default_plain());
+            let base = spec.normalize(own);
+            let mut delta: f32 = self.modulations[i].iter().map(|m| m.settings.delta(eff_macros[m.slot])).sum();
+            for a in &self.assignments {
+                if let ModDestination::Param(id) = &a.destination {
+                    if id == &spec.id {
+                        delta += a.settings.delta(modulators[a.source.index()]);
+                    }
+                }
+            }
+            (base + delta).clamp(0.0, 1.0)
+        }));
     }
 
     /// Normalized default of a macro slot (see [`MacroSpec::default`]). The prelude derives it
@@ -647,6 +831,104 @@ fn resolve_modulations(params: &[ParamSpec], macros: &[MacroSpec]) -> Result<Vec
     Ok(modulations)
 }
 
+/// A synced rate: a note length from 1/64 (1/16 beat) to 16 bars (64 beats).
+fn check_sync(id: ModulatorId, sync: Option<f32>) -> Result<(), PatchError> {
+    match sync {
+        Some(b) if !b.is_finite() || !(1.0 / 16.0..=64.0).contains(&b) => {
+            Err(invalid(format!("modulator '{}': sync must be 1/64 .. 16 bars, got {b} beats", id.as_str())))
+        }
+        _ => Ok(()),
+    }
+}
+
+pub(crate) fn validate_modulators(raw: Vec<ModulatorSpec>) -> Result<Vec<ModulatorSpec>, PatchError> {
+    let mut by_id: [Option<ModulatorSpec>; 5] = std::array::from_fn(|_| None);
+    for spec in raw {
+        let idx = spec.id.index();
+        if by_id[idx].is_some() {
+            return Err(invalid(format!("duplicate modulator '{}'", spec.id.as_str())));
+        }
+        match (&spec.id, &spec.settings) {
+            (ModulatorId::Follow, ModulatorSettings::Follow { attack_ms, release_ms }) => {
+                if !attack_ms.is_finite() || !(0.0..=1000.0).contains(attack_ms) {
+                    return Err(invalid(format!("modulator 'follow': attack_ms must be 0..1000, got {attack_ms}")));
+                }
+                if !release_ms.is_finite() || !(0.0..=5000.0).contains(release_ms) {
+                    return Err(invalid(format!("modulator 'follow': release_ms must be 0..5000, got {release_ms}")));
+                }
+            }
+            (ModulatorId::Lfo1 | ModulatorId::Lfo2 | ModulatorId::Lfo3, ModulatorSettings::Lfo { rate_hz, sync, phase, .. }) => {
+                if !rate_hz.is_finite() || !(0.01..=50.0).contains(rate_hz) {
+                    return Err(invalid(format!("modulator '{}': rate_hz must be 0.01..50, got {rate_hz}", spec.id.as_str())));
+                }
+                check_sync(spec.id, *sync)?;
+                if !phase.is_finite() || !(0.0..=1.0).contains(phase) {
+                    return Err(invalid(format!("modulator '{}': phase must be 0..1, got {phase}", spec.id.as_str())));
+                }
+            }
+            (ModulatorId::Step, ModulatorSettings::Step { rate_hz, sync, values }) => {
+                if !rate_hz.is_finite() || !(0.01..=50.0).contains(rate_hz) {
+                    return Err(invalid(format!("modulator 'step': rate_hz must be 0.01..50, got {rate_hz}")));
+                }
+                check_sync(spec.id, *sync)?;
+                if values.is_empty() || values.len() > 16 {
+                    return Err(invalid(format!("modulator 'step': values must have 1..16 steps, got {}", values.len())));
+                }
+                for (i, v) in values.iter().enumerate() {
+                    if !v.is_finite() || !(0.0..=1.0).contains(v) {
+                        return Err(invalid(format!("modulator 'step': value {} must be 0..1, got {v}", i + 1)));
+                    }
+                }
+            }
+            _ => {
+                return Err(invalid(format!("modulator '{}': settings kind does not match modulator", spec.id.as_str())));
+            }
+        }
+        by_id[idx] = Some(spec);
+    }
+    Ok(ModulatorId::ALL
+        .into_iter()
+        .enumerate()
+        .map(|(i, id)| by_id[i].take().unwrap_or_else(|| ModulatorSpec::default_for(id)))
+        .collect())
+}
+
+fn validate_assignments(
+    assignments: &[ModAssignment],
+    params: &[ParamSpec],
+    macros: &[MacroSpec],
+) -> Result<(), PatchError> {
+    let mut seen = HashSet::new();
+    for a in assignments {
+        if !a.settings.amount.is_finite() || !(-1.0..=1.0).contains(&a.settings.amount) {
+            return Err(invalid(format!("assignment from '{}': amount must be -1..1", a.source.as_str())));
+        }
+        if !a.settings.curve.is_finite() || !(-1.0..=1.0).contains(&a.settings.curve) {
+            return Err(invalid(format!("assignment from '{}': curve must be -1..1", a.source.as_str())));
+        }
+        match &a.destination {
+            ModDestination::Param(id) => {
+                if !params.iter().any(|p| p.id == *id) {
+                    return Err(invalid(format!("assignment from '{}': unknown param '{id}'", a.source.as_str())));
+                }
+            }
+            ModDestination::Macro(id) => {
+                if !macros.iter().any(|m| m.id == *id) {
+                    return Err(invalid(format!("assignment from '{}': unknown macro '{id}'", a.source.as_str())));
+                }
+            }
+        }
+        if !seen.insert((a.source, a.destination.clone())) {
+            return Err(invalid(format!(
+                "duplicate assignment from '{}' to {:?}",
+                a.source.as_str(),
+                a.destination
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Joins `rel` onto `dir` and rejects anything that escapes the patch folder.
 pub fn resolve_inside(dir: &Path, rel: &str) -> Result<PathBuf, PatchError> {
     let base = dir.canonicalize()?;
@@ -737,7 +1019,13 @@ mod tests {
         assert_eq!(p.params[0].id, "c1.threshold");
         assert_eq!(p.params[i("s.crossover_1")].name, "Crossover 1");
         assert_eq!(p.params[i("lp.freq")].scale, Scale::Log);
-        assert_eq!(p.params.len(), 7 + 1 + 3 + 2 + 2 + 1 + 3 + 2);
+        assert_eq!(p.params.len(), 7 + 1 + 3 + 2 + 2 + 1 + 3 + 2 + 1); // + the low-pass's slope
+        // A stepped param snaps: the knob between 24 and 36 dB/oct plays one of them.
+        let slope = &p.params[i("lp.slope")];
+        assert_eq!((slope.default_plain(), slope.step), (12.0, Some(12.0)));
+        assert_eq!(slope.plain(0.4), 24.0);
+        assert_eq!(slope.display(0.6), "36 dB/oct");
+        assert_eq!(slope.parse_plain("40"), Some(36.0));
         assert_eq!(p.meters, vec!["c1", "r", "t"]);
         assert_eq!(p.resolve_source("meter.r").unwrap(), Source::Block(1));
         assert_eq!(p.resolve_source("param.d.amount").unwrap(), Source::Param(i("d.amount")));
@@ -843,17 +1131,19 @@ mod tests {
         assert!((at(ModSettings { amount: d.amount / 2.0, ..d }, 1.0) - 6.0).abs() < 0.01);
         assert!((at(ModSettings { amount: -d.amount, ..d }, 1.0) + 12.0).abs() < 0.01);
         assert_eq!(at(ModSettings { bypass: true, ..d }, 1.0), 0.0);
-        assert!((at(ModSettings { invert: true, ..d }, 1.0) + 12.0).abs() < 0.01);
-        // Bipolar: centre = no change, ends = ±amount.
+        // Bipolar: centre = no change, ends = ±amount/2: the same 12 dB range as unipolar.
         let bi = ModSettings { bipolar: true, ..d };
-        assert!(at(bi, 0.5).abs() < 0.01 && (at(bi, 1.0) - 12.0).abs() < 0.01 && (at(bi, 0.0) + 12.0).abs() < 0.01);
+        assert!(at(bi, 0.5).abs() < 0.01 && (at(bi, 1.0) - 6.0).abs() < 0.01 && (at(bi, 0.0) + 6.0).abs() < 0.01);
         // Tension bends the middle, not the ends.
         assert!(at(ModSettings { curve: 0.5, ..d }, 0.5) < 5.0 && at(ModSettings { curve: -0.5, ..d }, 0.5) > 7.0);
         assert!((at(ModSettings { curve: 0.7, ..d }, 1.0) - 12.0).abs() < 0.01);
-        for s in [d, bi, ModSettings { amount: -0.3, curve: -0.25, invert: true, bypass: true, bipolar: false }] {
+        for s in [d, bi, ModSettings { amount: -0.3, curve: -0.25, bypass: true, bipolar: false }] {
             let u = ModSettings::unpack(s.pack());
-            assert!(u.amount == s.amount && u.bipolar == s.bipolar && u.invert == s.invert && u.bypass == s.bypass && (u.curve - s.curve).abs() < 1e-4);
+            assert!(u.amount == s.amount && u.bipolar == s.bipolar && u.bypass == s.bypass && (u.curve - s.curve).abs() < 1e-4);
         }
+        // An older project's invert flag becomes the amount's sign.
+        let old: ModSettings = serde_json::from_str(r#"{ "amount": 0.4, "invert": true }"#).unwrap();
+        assert_eq!(old, ModSettings { amount: -0.4, ..ModSettings::default() });
     }
 
     #[test]
@@ -901,6 +1191,57 @@ mod tests {
         // character drives two: percent, like its display
         assert_eq!(p.macro_from_text(0, "25%"), Some(0.25));
         assert_eq!(p.macro_from_text(0, "abc"), None);
+    }
+
+    #[test]
+    fn loads_and_validates_modulators_and_assignments() {
+        let p = load(
+            "local g = Blocks.Gain.new('g', { db = 0 })
+             local m = Macro.new('m', 'M', { default = 0.5 }):drives(g.params.db, { from = -12, to = 12 })
+             return Patch.new('T', {
+               chain = Chain.new { g },
+               macros = { m },
+               modulators = {
+                 { id = 'follow', attack_ms = 5, release_ms = 80 },
+                 { id = 'lfo1', rate_hz = 2, phase = 0.25, shape = 'triangle' },
+                 { id = 'step', rate_hz = 4, values = { 0, 0.5, 1 } },
+               },
+               assignments = {
+                 { source = 'follow', destination = g.params.db, amount = 0.25, bipolar = true },
+                 { source = 'lfo1', destination = m, amount = -0.5, curve = 0.2 },
+               },
+             })",
+        )
+        .unwrap();
+        assert_eq!(p.modulators.len(), 5);
+        assert_eq!(p.modulators[0].id, ModulatorId::Follow);
+        assert_eq!(p.modulators[1].id, ModulatorId::Lfo1);
+        assert_eq!(p.modulators[4].id, ModulatorId::Step);
+        assert_eq!(p.assignments.len(), 2);
+        assert_eq!(p.assignments[0].destination, ModDestination::Param("g.db".into()));
+        assert_eq!(p.assignments[1].destination, ModDestination::Macro("m".into()));
+
+        // Reject duplicate assignment and out-of-range settings.
+        let dup = load(
+            "local g = Blocks.Gain.new('g', { db = 0 })
+             return Patch.new('T', {
+               chain = Chain.new { g },
+               assignments = {
+                 { source = 'lfo1', destination = g.params.db, amount = 0.5 },
+                 { source = 'lfo1', destination = g.params.db, amount = -0.5 },
+               },
+             })",
+        );
+        assert!(dup.is_err());
+
+        let bad_rate = load(
+            "local g = Blocks.Gain.new('g', { db = 0 })
+             return Patch.new('T', {
+               chain = Chain.new { g },
+               modulators = { { id = 'lfo1', rate_hz = 100 } },
+             })",
+        );
+        assert!(bad_rate.is_err());
     }
 
     /// Each case: (replace this, with that, expected error substring).

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use nice_plug_iced::iced::{
     Background, Border, Color, Shadow, Theme, Vector, border, color,
-    widget::{button, container, scrollable, slider, text_editor, text_input},
+    widget::{button, container, overlay, pick_list, scrollable, slider, text_editor, text_input},
 };
 
 // ---- colour -------------------------------------------------------------------------------------
@@ -227,8 +227,9 @@ pub const SIZE_CONTROL: f32 = 30.0;
 /// The collapsed drawer (handle + tabs): hangs into the ControlPanel from the window's bottom
 /// edge, like the notch from the top. Panels keep that strip free of controls.
 pub const SIZE_DRAWER_BAR: f32 = 42.0;
-/// The drawer when it's open (it rises over the panel).
-pub const SIZE_DRAWER_OPEN: f32 = 294.0;
+/// The drawer when it's open (it rises over the panel): handle, tabs and the modulator's
+/// controls, kept low so block pages keep their knobs above it (drag & drop).
+pub const SIZE_DRAWER_OPEN: f32 = 180.0;
 
 /// The patch window = the ControlPanel's area: the editor minus top bar and gutters (fixed
 /// window). The sizes are chosen so this is exactly the ControlPanel's 3:2 (816×544): no
@@ -505,6 +506,35 @@ pub fn frame_input(_: &Theme, status: text_input::Status) -> text_input::Style {
         placeholder: c().frame_subtle,
         value: c().frame_ink,
         selection: c().frame_selection,
+    }
+}
+
+/// A pick list on the frame (the Matrix's add row): a field like `frame_input`.
+pub fn frame_pick_list(_: &Theme, status: pick_list::Status) -> pick_list::Style {
+    let open = matches!(status, pick_list::Status::Opened { .. });
+    let hover = matches!(status, pick_list::Status::Hovered);
+    pick_list::Style {
+        text_color: c().frame_ink,
+        placeholder_color: c().frame_subtle,
+        handle_color: c().frame_muted,
+        background: Background::Color(c().frame_field),
+        border: Border {
+            radius: radius(RADIUS_CONTROL),
+            width: 1.0,
+            color: if open { c().frame_focus } else if hover { c().frame_ink_3 } else { c().frame_hairline_strong },
+        },
+    }
+}
+
+/// The open pick list's menu.
+pub fn frame_menu(_: &Theme) -> overlay::menu::Style {
+    overlay::menu::Style {
+        background: Background::Color(c().frame_raised),
+        border: Border { radius: radius(RADIUS_CONTROL), width: 1.0, color: c().frame_hairline_strong },
+        text_color: c().frame_ink_2,
+        selected_text_color: c().frame_ink,
+        selected_background: Background::Color(alpha(c().frame_ink, 0.1)),
+        shadow: Shadow { color: shadow(0.4), offset: Vector::new(0.0, 6.0), blur_radius: 18.0 },
     }
 }
 

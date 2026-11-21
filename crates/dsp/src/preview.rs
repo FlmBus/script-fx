@@ -22,8 +22,16 @@ pub fn response_db(kind: &BlockKind, v: &dyn Fn(&ParamRef) -> f32, freqs: &[f32]
         BlockKind::PeakEq(e) => (EqShape::Peak, v(&e.freq), v(&e.q), v(&e.gain)),
         BlockKind::LowShelf(e) => (EqShape::LowShelf, v(&e.freq), v(&e.q), v(&e.gain)),
         BlockKind::HighShelf(e) => (EqShape::HighShelf, v(&e.freq), v(&e.q), v(&e.gain)),
-        BlockKind::LowPass(f) => (EqShape::LowPass, v(&f.freq), v(&f.q), 0.0),
-        BlockKind::HighPass(f) => (EqShape::HighPass, v(&f.freq), v(&f.q), 0.0),
+        BlockKind::LowPass(f) | BlockKind::HighPass(f) => {
+            let shape = if matches!(kind, BlockKind::LowPass(_)) { EqShape::LowPass } else { EqShape::HighPass };
+            let (n, qs) = crate::filter_stages(v(&f.slope), v(&f.q));
+            let stages: Vec<Biquad> = qs[..n].iter().map(|&q| {
+                let mut bq = Biquad::default();
+                bq.set(shape, v(&f.freq), q, 0.0, SR);
+                bq
+            }).collect();
+            return Some(freqs.iter().map(|&f| stages.iter().map(|bq| bq.magnitude_db(f, SR)).sum()).collect());
+        }
         _ => return None,
     };
     let mut bq = Biquad::default();
@@ -97,12 +105,25 @@ mod tests {
     }
 
     #[test]
-    fn low_pass_is_3_db_down_at_cutoff() {
-        let kind = BlockKind::LowPass(patch::chain::FilterSpec { freq: r(0), q: r(1) });
-        let vals = [1000.0, std::f32::consts::FRAC_1_SQRT_2];
+    fn low_pass_is_3_db_down_at_cutoff_at_every_slope() {
+        let kind = BlockKind::LowPass(patch::chain::FilterSpec { freq: r(0), q: r(1), slope: r(2) });
+        for slope in [12.0, 24.0, 36.0, 48.0] {
+            let vals = [1000.0, std::f32::consts::FRAC_1_SQRT_2, slope];
+            let v = |p: &ParamRef| vals[p.0];
+            let db = response_db(&kind, &v, &[100.0, 1000.0, 4000.0]).unwrap();
+            assert!(db[0].abs() < 0.1 && (db[1] + 3.01).abs() < 0.15, "{slope}: {db:?}");
+            // Two octaves above: about the slope × 2 down (a little less near the cutoff).
+            assert!((db[2] + 2.0 * slope).abs() < 2.5, "{slope}: {db:?}");
+        }
+    }
+
+    #[test]
+    fn high_pass_resonance_peaks_at_cutoff() {
+        let kind = BlockKind::HighPass(patch::chain::FilterSpec { freq: r(0), q: r(1), slope: r(2) });
+        let vals = [1000.0, 4.0, 24.0];
         let v = |p: &ParamRef| vals[p.0];
-        let db = response_db(&kind, &v, &[100.0, 1000.0]).unwrap();
-        assert!(db[0].abs() < 0.1 && (db[1] + 3.01).abs() < 0.1, "{db:?}");
+        let db = response_db(&kind, &v, &[1000.0, 10000.0]).unwrap();
+        assert!(db[0] > 6.0 && db[1].abs() < 0.5, "{db:?}");
     }
 
     #[test]

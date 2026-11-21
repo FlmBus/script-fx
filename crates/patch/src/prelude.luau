@@ -126,6 +126,9 @@ local KINDS = {
   macros   = { list_of(function(v) return is(v, Macro) end), "a non-empty list of Macros" },
   panel    = { function(v) return type(v) == "table" and type(v.__component) == "table" end, "a component instance (Panel.new(...))" },
   theme    = { function(v) return type(v) == "table" and getmetatable(v) == nil end, "a table (colors, fonts, images, library)" },
+  modulators = { list_of(function(v) return type(v) == "table" and getmetatable(v) == nil end), "a non-empty list of modulator tables" },
+  assignments = { list_of(function(v) return type(v) == "table" and getmetatable(v) == nil end), "a non-empty list of assignment tables" },
+  destination = { function(v) return is(v, Param) or is(v, Macro) end, "a Param or Macro" },
 }
 
 -- `fields` is an ordered list of "name:kind" or "name:kind!" (required), or knob settings
@@ -339,7 +342,7 @@ local function knob(unit, log)
     end
     return { name = name, kind = o.list and "settings" or "setting", required = o.required, optional = o.optional,
              meta = { unit = o.unit or unit, min = min, max = max, default = default, decimals = decimals,
-                      scale = (log and min > 0) and "log" or nil } }
+                      scale = (log and min > 0) and "log" or nil, step = o.step } }
   end
 end
 local dB, pct, hz, ms, sec = knob("dB"), knob("%"), knob("Hz", true), knob("ms", true), knob("s", true)
@@ -352,7 +355,7 @@ local function title(name) return (name:gsub("_", " "):gsub("^%l", string.upper)
 local function block_param(block_id, name, display, meta, value)
   return setmetatable({ id = block_id .. "." .. name, name = display, min = meta.min, max = meta.max,
                         default = value or meta.default, unit = meta.unit, decimals = meta.decimals,
-                        scale = meta.scale, __ref = "param." .. block_id .. "." .. name }, Param)
+                        scale = meta.scale, step = meta.step, __ref = "param." .. block_id .. "." .. name }, Param)
 end
 
 -- `check(o)` returns an error message for constraints between options.
@@ -424,7 +427,9 @@ local function define(name, kind, fields, check, metered)
 end
 
 local function eq(freq) return { hz("freq", 20, 20000, freq), dB("gain", -24, 24, 0), num("")("q", 0.1, 10, 0.707) } end
-local function filter(freq) return { hz("freq", 20, 20000, freq), num("")("q", 0.1, 10, 0.707) } end
+local function filter(freq)
+  return { hz("freq", 20, 20000, freq), num("")("q", 0.1, 10, 0.707), num("dB/oct")("slope", 12, 48, 12, { step = 12, decimals = 0 }) }
+end
 local function comp(r, a, rel, k)
   return { dB("threshold", -60, 0, -18), ratio("ratio", 1, 20, r), ms("attack", 0.1, 200, a), ms("release", 5, 2000, rel),
            dB("knee", 0, 24, k), dB("makeup", 0, 24, 0), "auto_makeup:boolean", pct("mix", 0, 100, 100) }
@@ -648,7 +653,71 @@ Patch.__name = "Patch"
 
 Patch.__is_patch = true
 
-local PATCH_FIELDS = parse_fields { "author:string", "chain:chain", "macros:macros", "theme:theme", "panel:panel" }
+local PATCH_FIELDS = parse_fields { "author:string", "chain:chain", "macros:macros", "modulators:modulators", "assignments:assignments", "theme:theme", "panel:panel" }
+
+local MOD_FOLLOW_FIELDS = parse_fields { "id:string!", "attack_ms:number", "release_ms:number" }
+-- sync (a note length, "1/8") overrides rate_hz: the LFO cycle / one step lasts that long at the host tempo.
+local MOD_LFO_FIELDS = parse_fields { "id:lfo1|lfo2|lfo3!", "rate_hz:number", "sync:sync", "phase:number", "shape:sine|triangle|square" }
+local MOD_STEP_FIELDS = parse_fields { "id:string!", "rate_hz:number", "sync:sync", "values:settings" }
+local ASSIGNMENT_FIELDS = parse_fields { "source:follow|lfo1|lfo2|lfo3|step!", "destination:destination!", "amount:number", "bipolar:boolean", "curve:number", "bypass:boolean" }
+
+local function check_modulators(list, what, level)
+  local out, seen = {}, {}
+  for i, m in ipairs(list) do
+    local id = m.id
+    if id ~= "follow" and id ~= "lfo1" and id ~= "lfo2" and id ~= "lfo3" and id ~= "step" then
+      fail(fmt("%s: modulators[%d].id must be 'follow', 'lfo1', 'lfo2', 'lfo3' or 'step', got %s", what, i, describe(id)), level + 1)
+    end
+    if seen[id] then fail(fmt("%s: duplicate modulator '%s'", what, id), level + 1) end
+    seen[id] = true
+    local mwhat = fmt("%s.modulators['%s']", what, id)
+    if id == "follow" then
+      options(mwhat, m, MOD_FOLLOW_FIELDS, level + 1)
+      out[#out + 1] = {
+        id = id,
+        settings = { kind = "follow", attack_ms = m.attack_ms or 10.0, release_ms = m.release_ms or 150.0 },
+      }
+    elseif id == "step" then
+      options(mwhat, m, MOD_STEP_FIELDS, level + 1)
+      out[#out + 1] = {
+        id = id,
+        settings = { kind = "step", rate_hz = m.rate_hz or 2.0, sync = m.sync and sync_beats(m.sync),
+                     values = m.values or { 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5 } },
+      }
+    else
+      options(mwhat, m, MOD_LFO_FIELDS, level + 1)
+      out[#out + 1] = {
+        id = id,
+        settings = { kind = "lfo", rate_hz = m.rate_hz or 1.0, sync = m.sync and sync_beats(m.sync), phase = m.phase or 0.0,
+                     shape = m.shape or "sine" },
+      }
+    end
+  end
+  return out
+end
+
+local function check_assignments(list, what, level)
+  local out = {}
+  for i, a in ipairs(list) do
+    local awhat = fmt("%s.assignments[%d]", what, i)
+    options(awhat, a, ASSIGNMENT_FIELDS, level + 1)
+    local dst = a.destination
+    if not is(dst, Param) and not is(dst, Macro) then
+      fail(fmt("%s: 'destination' must be a Param or Macro, got %s", awhat, describe(dst)), level + 1)
+    end
+    out[#out + 1] = {
+      source = a.source,
+      destination = dst,
+      settings = {
+        amount = a.amount or 0.0,
+        bipolar = a.bipolar or false,
+        curve = a.curve or 0.0,
+        bypass = a.bypass or false,
+      },
+    }
+  end
+  return out
+end
 
 function Patch.new(name, o)
   check_name("Patch.new", name, 2)
@@ -656,7 +725,10 @@ function Patch.new(name, o)
   o = options(what, o, PATCH_FIELDS, 2)
   if o.chain then take_chain(o.chain, what, 2) end
   if o.theme then check_theme(o.theme, what, 2) end
-  return setmetatable({ name = name, author = o.author, chain = o.chain, macros = o.macros or {}, theme = o.theme,
+  local modulators = o.modulators and check_modulators(o.modulators, what, 2) or {}
+  local assignments = o.assignments and check_assignments(o.assignments, what, 2) or {}
+  return setmetatable({ name = name, author = o.author, chain = o.chain, macros = o.macros or {},
+                        modulators = modulators, assignments = assignments, theme = o.theme,
                         panel = o.panel }, Patch)
 end
 
@@ -685,7 +757,8 @@ return function(p)
     if index[prm] == nil then
       index[prm] = #params
       params[#params + 1] = { id = prm.id, name = prm.name, min = prm.min, max = prm.max,
-                              default = prm.default, unit = prm.unit, decimals = prm.decimals, scale = prm.scale }
+                              default = prm.default, unit = prm.unit, decimals = prm.decimals, scale = prm.scale,
+                              step = prm.step }
     end
     return index[prm]
   end
@@ -737,5 +810,17 @@ return function(p)
     end
     macros[i] = { id = m.id, name = m.name, default = m.default, targets = targets }
   end
-  return { name = p.name, author = p.author, params = params, macros = macros, chain = chain, theme = export_theme(p.theme) }
+  local assignments = {}
+  for i, a in ipairs(p.assignments) do
+    local dst
+    if is(a.destination, Param) then
+      use(a.destination)
+      dst = { kind = "param", id = a.destination.id }
+    else
+      dst = { kind = "macro", id = a.destination.id }
+    end
+    assignments[i] = { source = a.source, destination = dst, settings = a.settings }
+  end
+  return { name = p.name, author = p.author, params = params, macros = macros,
+           modulators = p.modulators, assignments = assignments, chain = chain, theme = export_theme(p.theme) }
 end

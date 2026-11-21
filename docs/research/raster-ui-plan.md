@@ -6,7 +6,7 @@ _Decided 2026-11-18 (Flemming). Background: [`kontakt-ui.md`](kontakt-ui.md),
 > **Status (2026-11-20, Flemming):** decision 1 was reversed. The reactive component UI was parked,
 > then revised, and is the patch UI again: **still the plan**. The rest of this doc (raster layers,
 > sprite sheets, shader layers, the effects toggle) stays as open ideas for it; the GPU spike notes
-> below predate the iced shell (egui was replaced, see [`shell-ui-toolkit.md`](shell-ui-toolkit.md)).
+> below predate the iced shell (which replaced egui).
 
 ## Decisions
 

@@ -1,6 +1,7 @@
 //! `on_any_press`: reports every mouse press on its content, also the ones the content handles
 //! itself (a knob, a block, a button). The shell wraps the page with it (surface, chain, block
-//! page, …): a click on the page closes everything that floats over it.
+//! page, …): a click on the page closes what floats over it (`Shell::dismiss`: the library,
+//! sheets, the drawer, the value entry, menus; the macro rail stays).
 //!
 //! The message goes out *before* the content sees the press, so whatever the press opens (a
 //! value entry on right-click, a block page) is opened after the closing, not closed by it.

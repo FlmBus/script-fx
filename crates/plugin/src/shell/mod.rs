@@ -6,15 +6,22 @@
 //! - `top_bar`      the wordmark, sheet openers (library left; controls, chat, settings right)
 //! - `library`      the patch library (sheet, left)
 //! - `notch`        view switch (Panel | Chain | Matrix); reload / snapshot selector, save, load
-//! - `drawer`       rises from the window's bottom edge: modulator tabs, macros, the open modulator
+//! - `drawer`       rises from the window's bottom edge: modulator tabs and the open modulator
+//! - `macro_rail`   the patch's macros, a card on the left under the top bar
 //! - `stage`        the patch window: the ControlPanel and its pointer input
 //! - `chain_view`   the audio tree (notch: Chain), in place of the ControlPanel
+//! - `matrix`       every modulation route as a table, add/remove (notch: Matrix)
+//! - `routing`      how routes look (source names, colours, meta knobs) and the source drag
 //! - `block_page`   a block's page (click a block in the chain; `zoom` + the renderer's blur)
 //! - `chat`         the chat sheet (Listen lives here)
 //! - `controls`     the controls sheet (macros, params, patch settings)
 //! - `settings`     the settings sheet (theme, interface size, passive mode)
 //! - `empty`        the window when no patch is loaded
 //! - `entry`        typing a value (right-click a knob)
+//!
+//! Drag & drop: pressing a macro's grip (rail) or a modulator tab's grip (drawer) starts a
+//! `SourceDrag`; a chip follows the pointer, knobs that can take it outline themselves, and a
+//! release over one adds the route (`Session::add_route`).
 //!
 //! `session` holds the non-UI state (library scan, loaded patch, hot reload, values).
 //! This file owns what several sections share (which sheet is open, the frame clock), routes
@@ -37,9 +44,11 @@ mod hide_cursor;
 mod icons;
 mod library;
 mod macro_rail;
+mod matrix;
 mod meta_menu;
 mod notch;
 mod pointer_lock;
+mod routing;
 mod press;
 mod session;
 mod settings;
@@ -57,10 +66,10 @@ use std::time::{Duration, Instant};
 use nice_plug_iced::{
     IcedEditor, IcedEditorState, IcedNiceContext, IcedNiceSettings, PersistentState, application, create_iced_editor,
     iced::{
-        self, Border, Element, Fill, Padding, PollSubNotifier, Subscription, Task, Theme, alignment,
+        self, Border, Center, Element, Fill, Padding, PollSubNotifier, Shadow, Subscription, Task, Theme, alignment,
         animation::{Animation, Easing},
         futures::{Stream, channel::mpsc},
-        widget::{button, column, container, pin, row, stack, text},
+        widget::{button, column, container, pin, row, space, stack, text},
     },
 };
 
@@ -152,6 +161,13 @@ pub struct Shell {
     /// The pointer over the chain view (where a zoom starts).
     chain_pointer: iced::Point,
     drawer: drawer::Drawer,
+    /// The Matrix's add row (the source picked).
+    matrix: matrix::Matrix,
+    /// A macro or modulator being dragged onto a knob.
+    source_drag: Option<routing::SourceDrag>,
+    /// The drag the last button release ended: the knob under the pointer reports the drop
+    /// right after the window-wide release (see `hide_cursor`).
+    dropped: Option<(routing::SourceDrag, Instant)>,
     /// Tasks produced while handling a message (focus the value entry).
     tasks: Vec<Task<Message>>,
 }
@@ -165,10 +181,13 @@ pub enum Message {
     MetaMenu(meta_menu::Message),
     /// A press anywhere on the page (surface, chain, block page, …): close what floats.
     Dismiss,
+    /// The pointer moved while a source is dragged (window coordinates).
+    Pointer(iced::Point),
     /// The left button went up somewhere: no drag runs any more.
     Released,
     Surface(surface::Message),
     Notch(notch::Message),
+    Matrix(matrix::Message),
     Chain(chain_view::Event),
     Page(block_page::Message),
     Drawer(drawer::Message),
@@ -215,6 +234,9 @@ impl Shell {
             zoom: None,
             chain_pointer: iced::Point::ORIGIN,
             drawer: drawer::Drawer::new(),
+            matrix: matrix::Matrix::default(),
+            source_drag: None,
+            dropped: None,
             tasks: Vec::new(),
             dev_rescale: std::env::var("SCRIPTFX_DEV_RESCALE").ok().and_then(|s| s.parse().ok()).map(|v| (Instant::now() + Duration::from_secs(1), v)),
         }
@@ -255,6 +277,15 @@ impl Shell {
                 }
                 _ => None,
             }),
+            // Only while a source is dragged: every pointer move re-renders the chip.
+            if self.source_drag.is_some() {
+                iced::event::listen_with(|event, _, _| match event {
+                    iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => Some(Message::Pointer(position)),
+                    _ => None,
+                })
+            } else {
+                Subscription::none()
+            },
         ])
     }
 
@@ -295,10 +326,12 @@ impl Shell {
                         Ok("entry") => self.open_entry(stage::Target::Macro(0), iced::Point::new(165.0, 388.0)),
                         _ => {}
                     }
-                    // Dev aid: SCRIPTFX_DEV_VIEW=chain starts in the chain view.
-                    if std::env::var("SCRIPTFX_DEV_VIEW").as_deref() == Ok("chain") {
-                        self.view = notch::View::Chain;
-                    }
+                    // Dev aid: SCRIPTFX_DEV_VIEW=chain|matrix starts in that view.
+                    self.view = match std::env::var("SCRIPTFX_DEV_VIEW").as_deref() {
+                        Ok("chain") => notch::View::Chain,
+                        Ok("matrix") => notch::View::Matrix,
+                        _ => self.view,
+                    };
                     // Dev aid: SCRIPTFX_DEV_AUTOLISTEN=10 starts a 10 s listen right away.
                     if let Some(s) = std::env::var("SCRIPTFX_DEV_AUTOLISTEN").ok().and_then(|s| s.parse::<f32>().ok()) {
                         self.listen.seconds = s;
@@ -313,6 +346,7 @@ impl Shell {
                     }
                 }
                 self.session.tick(ctx, &params, &shared);
+                self.drawer.tick(&self.session.values.modulators, &self.session.values.modulator_phases);
                 self.zoom_tick();
                 if let Some(result) = self.listen.poll(&shared) {
                     self.chat.capture_done(result);
@@ -351,15 +385,23 @@ impl Shell {
             },
             Message::Notch(msg) => match msg {
                 notch::Message::Reload => self.session.reload(ctx, &params, &shared),
-                notch::Message::View(v) => {
-                    self.view = v;
-                    self.page = None;
-                    self.end_zoom();
-                }
+                notch::Message::View(v) => self.set_view(v),
             },
+            Message::Matrix(msg) => self.matrix.update(&mut self.session, &params, &shared, msg),
             Message::Drawer(msg) => {
                 self.now = Instant::now();
-                self.drawer.update(msg, self.now);
+                let mods = self.session.current.as_ref().map_or(&[][..], |c| &c.patch.modulators[..]);
+                match self.drawer.update(msg, self.now, mods) {
+                    Some(drawer::Event::Grab(id)) => self.start_source_drag(patch::RouteSource::Modulator(id)),
+                    Some(drawer::Event::Set(spec)) => self.session.set_modulator(&params, spec),
+                    Some(drawer::Event::Dragging(on)) => self.dragging = on,
+                    None => {}
+                }
+            }
+            Message::Pointer(p) => {
+                if let Some(d) = &mut self.source_drag {
+                    d.at = Some(p);
+                }
             }
             Message::Surface(surface::Message::Macro(slot, e)) => self.macro_knob(slot, e, &params, &shared),
             Message::Macros(msg) => {
@@ -396,7 +438,12 @@ impl Shell {
                 None => {}
             },
             Message::Dismiss => self.dismiss(),
-            Message::Released => self.dragging = false,
+            Message::Released => {
+                self.dragging = false;
+                if let Some(d) = self.source_drag.take() {
+                    self.dropped = Some((d, Instant::now()));
+                }
+            }
             Message::Panel(ev) => {
                 let Some(cur) = &mut self.session.current else { return };
                 let Some(panel) = &mut cur.panel else { return };
@@ -431,10 +478,15 @@ impl Shell {
             Message::Entry(entry::Message::Submit) => self.submit_entry(&params, &shared),
             Message::MetaMenu(meta_menu::Message::Set(settings)) => {
                 if let Some(m) = &self.meta_menu {
-                    let (param, k) = (m.param, m.k);
-                    self.session.set_mod(&params, &shared, param, k, settings);
+                    self.session.set_route(&params, &shared, m.route, settings);
                 }
             }
+            Message::MetaMenu(meta_menu::Message::Remove) => {
+                if let Some(m) = self.meta_menu.take() {
+                    self.session.remove_route(&params, m.route);
+                }
+            }
+            Message::MetaMenu(meta_menu::Message::OpenMatrix) => self.set_view(notch::View::Matrix),
             Message::Escape => {
                 if self.entry.take().is_none() && self.meta_menu.take().is_none() {
                     // Closes what floats first; with nothing open, leaves a block page.
@@ -449,6 +501,18 @@ impl Shell {
                 }
             }
             Message::DismissError => self.session.error = None,
+        }
+    }
+
+    /// Both the notch and the meta menu use the same view transition.
+    fn set_view(&mut self, view: notch::View) {
+        self.view = view;
+        self.meta_menu = None;
+        self.entry = None;
+        self.page = None;
+        self.end_zoom();
+        if view == notch::View::Matrix {
+            self.close_drawer();
         }
     }
 
@@ -498,15 +562,22 @@ impl Shell {
                 }
             }
             knob::KnobEvent::Entry(at) => self.open_entry(stage::Target::Macro(slot), window_to_panel(at)),
-            // Macro cells have no meta knobs.
-            knob::KnobEvent::Meta(..) => {}
+            knob::KnobEvent::Grab => self.start_source_drag(patch::RouteSource::Macro(slot)),
+            // A modulator dropped on the macro: it modulates the macro (and so all it drives).
+            knob::KnobEvent::Drop => {
+                let Some(source) = self.take_drop() else { return };
+                let Some(id) = self.session.current.as_ref().and_then(|c| c.patch.macros.get(slot)).map(|m| m.id.clone()) else { return };
+                self.session.add_route(params, source, patch::ModDestination::Macro(id));
+            }
+            // Macro cells have no meta knobs or modes.
+            knob::KnobEvent::Meta(..) | knob::KnobEvent::Mode(_) => {}
         }
     }
 
     /// Input on a block page's knob (param index). Free params only: the page shows the ones a
     /// macro drives read-only.
     fn param_knob(&mut self, i: usize, e: knob::KnobEvent, params: &FxParams, shared: &Shared) {
-        let Some(spec) = self.session.current.as_ref().and_then(|c| c.patch.params.get(i)) else { return };
+        let Some(spec) = self.session.current.as_ref().and_then(|c| c.patch.params.get(i)).cloned() else { return };
         match e {
             knob::KnobEvent::Set(v) | knob::KnobEvent::Step(v) => {
                 let plain = spec.plain(v);
@@ -515,18 +586,26 @@ impl Shell {
             // Free params aren't host parameters: no automation gesture to open or close.
             knob::KnobEvent::Begin => self.dragging = true,
             knob::KnobEvent::End => self.dragging = false,
-            knob::KnobEvent::Meta(_, knob::MetaEvent::Begin) => self.dragging = true,
-            knob::KnobEvent::Meta(_, knob::MetaEvent::End) => self.dragging = false,
             knob::KnobEvent::Entry(at) => self.open_entry(stage::Target::Param(i), window_to_panel(at)),
-            knob::KnobEvent::Meta(k, ev @ (knob::MetaEvent::Amount(_) | knob::MetaEvent::Reset)) => {
-                let Some(m) = self.session.current.as_ref().and_then(|c| c.patch.modulations.get(i)?.get(k)) else { return };
-                let settings = match ev {
-                    knob::MetaEvent::Amount(a) => patch::ModSettings { amount: a, ..m.settings },
-                    _ => m.patch,
-                };
-                self.session.set_mod(params, shared, i, k, settings);
+            knob::KnobEvent::Meta(k, ev) => {
+                // The knob's k-th meta knob is its k-th route (`routing::metas`).
+                let Some(p) = self.session.current.as_ref().map(|c| &c.patch) else { return };
+                let Some(&route) = routing::metas(p, i).0.get(k) else { return };
+                let (Some(current), Some(reset)) = (p.route_settings(route), p.route_reset(route)) else { return };
+                match ev {
+                    knob::MetaEvent::Begin => self.dragging = true,
+                    knob::MetaEvent::End => self.dragging = false,
+                    knob::MetaEvent::Amount(a) => self.session.set_route(params, shared, route, patch::ModSettings { amount: a, ..current }),
+                    knob::MetaEvent::Reset => self.session.set_route(params, shared, route, reset),
+                    knob::MetaEvent::Menu(at) => self.meta_menu = Some(meta_menu::MetaMenu { route, at }),
+                }
             }
-            knob::KnobEvent::Meta(k, knob::MetaEvent::Menu(at)) => self.meta_menu = Some(meta_menu::MetaMenu { param: i, k, at }),
+            knob::KnobEvent::Drop => {
+                let Some(source) = self.take_drop() else { return };
+                self.session.add_route(params, source, patch::ModDestination::Param(spec.id.clone()));
+            }
+            // Block knobs have no grip, and no modes yet.
+            knob::KnobEvent::Grab | knob::KnobEvent::Mode(_) => {}
         }
     }
 
@@ -537,7 +616,6 @@ impl Shell {
         self.now = Instant::now();
         let origin = self.zoom.as_ref().map_or(self.chain_pointer, |z| z.origin);
         self.zoom = Some(Zoom { inward, origin, start: self.now });
-        self.close_drawer();
     }
 
     /// Every frame: the renderer's blur follows the transition; at its end the page closes (when
@@ -559,11 +637,14 @@ impl Shell {
             rect: [x, y, w, h],
             // strongest mid-way, none at the ends
             amount: Zoom::BLUR * (std::f32::consts::PI * t).sin(),
-            // the notch (top centre) and the collapsed drawer (bottom centre) stay sharp
+            // What floats over the page stays sharp: the notch (top centre), the drawer at its
+            // current height (bottom centre, it may be sliding), the macro rail (top left).
             keep: {
                 let (nw, nh) = notch::size();
                 let dw = theme::drawer_width() + 2.0 * theme::RADIUS_WINDOW;
-                [[x + (w - nw) / 2.0, y, nw, nh], [x + (w - dw) / 2.0, y + h - theme::SIZE_DRAWER_BAR, dw, theme::SIZE_DRAWER_BAR]]
+                let dh = self.drawer.height(self.now);
+                let rail = if self.macros_t() > 0.0 { [x, y, macros_width(), macro_rail::HEIGHT + 2.0 * theme::SPACE_2] } else { [0.0; 4] };
+                [[x + (w - nw) / 2.0, y, nw, nh], [x + (w - dw) / 2.0, y + h - dh, dw, dh], rail]
             },
         }));
     }
@@ -666,13 +747,29 @@ impl Shell {
     /// A press on the page (any view: surface, chain, block page, …) closes everything that
     /// floats over it: sheets on both sides, the macro rail, the drawer, a value entry. New
     /// floating things belong in here too.
+    /// A press on the page closes what floats over it: the library, a sheet, the drawer, the value
+    /// entry, the meta menu. The macro rail stays (a tool for the page: turn a macro, drag it onto
+    /// a knob); it closes with its own button and Escape.
     fn dismiss(&mut self) {
         self.set_library(false);
-        self.set_macros(false);
         self.open_sheet(None);
         self.close_drawer();
         self.entry = None;
         self.meta_menu = None;
+    }
+
+    /// A macro's or modulator's grip was pressed: drag it (onto a knob).
+    fn start_source_drag(&mut self, source: patch::RouteSource) {
+        self.meta_menu = None;
+        self.entry = None;
+        self.dropped = None;
+        self.source_drag = Some(routing::SourceDrag { source, at: None });
+    }
+
+    /// A knob reported a drop: the drag that just ended (if it was this recent), once.
+    fn take_drop(&mut self) -> Option<patch::RouteSource> {
+        let (d, at) = self.dropped.take()?;
+        (at.elapsed() < Duration::from_millis(500)).then_some(d.source)
     }
 
     fn close_drawer(&mut self) {
@@ -733,7 +830,33 @@ impl Shell {
         let window = container(column![top_bar, main]).style(theme::frame).width(Fill).height(Fill);
         // While a knob, fader or meta knob drags, the cursor is hidden everywhere.
         let panel_drag = s.current.as_ref().and_then(|c| c.panel.as_ref()).is_some_and(|p| p.dragging());
-        hide_cursor::hide_cursor(window, self.dragging || panel_drag, Message::Released).into()
+        let window = hide_cursor::hide_cursor(window, self.dragging || panel_drag, Message::Released);
+        match self.drag_chip() {
+            Some(chip) => stack![window, chip].into(),
+            None => window.into(),
+        }
+    }
+
+    /// The dragged source's chip, next to the pointer: a dot in its colour and its name.
+    fn drag_chip(&self) -> Option<Element<'_, Message>> {
+        let d = self.source_drag.as_ref()?;
+        let at = d.at?;
+        let patch = &self.session.current.as_ref()?.patch;
+        let colour = routing::colour(d.source);
+        let dot = container(space::horizontal().width(8).height(8)).style(move |_: &Theme| container::Style {
+            background: Some(colour.into()),
+            border: Border { radius: theme::radius(4.0), ..Default::default() },
+            ..Default::default()
+        });
+        let chip = container(row![dot, text(routing::name(patch, d.source).to_string()).size(11.5).font(theme::font::SANS_MEDIUM).color(theme::c().frame_ink)].spacing(6).align_y(Center))
+            .padding(Padding { top: 4.0, bottom: 4.0, left: 8.0, right: 10.0 })
+            .style(move |_: &Theme| container::Style {
+                background: Some(theme::c().frame_raised.into()),
+                border: Border { radius: theme::radius(theme::RADIUS_BUTTON), width: 1.0, color: theme::alpha(colour, 0.6) },
+                shadow: Shadow { color: theme::shadow(0.4), offset: iced::Vector::new(0.0, 4.0), blur_radius: 12.0 },
+                ..Default::default()
+            });
+        Some(pin(chip).x(at.x + 14.0).y(at.y + 10.0).into())
     }
 
     /// The patch window with the shell's intrusions: the notch and the sheets.
@@ -755,7 +878,7 @@ impl Shell {
             .align_x(alignment::Horizontal::Center);
 
         // The drawer hangs into the window from its bottom edge, centred (sheets slide over it).
-        let drawer = container(self.drawer.view(self.now).map(Message::Drawer))
+        let drawer = container(self.drawer.view(self.now, &cur.patch.modulators).map(Message::Drawer))
             .width(Fill)
             .height(Fill)
             .align_x(alignment::Horizontal::Center)
@@ -763,7 +886,8 @@ impl Shell {
 
         let content: Element<'_, Message> = match self.view {
             notch::View::Chain => self.chain_content(cur),
-            _ => match &cur.panel {
+            notch::View::Matrix => self.matrix.view(&cur.patch, &self.session.values).map(Message::Matrix),
+            notch::View::Surface => match &cur.panel {
                 Some(panel) => stage::view(panel, bg).map(Message::Panel),
                 None => {
                     let brand = self.session.library.iter().find(|p| p.folder == cur.folder).map(|p| &p.brand);
@@ -808,11 +932,11 @@ impl Shell {
         let chain = || chain_view::view(&cur.patch, values).map(Message::Chain);
         let (Some(block), Some(z)) = (block, &self.zoom) else {
             return match block {
-                Some(b) => block_page::view(&cur.patch, values, b).map(Message::Page),
+                Some(b) => self.block_page(cur, b),
                 None => chain(),
             };
         };
-        let page = || block_page::view(&cur.patch, values, block).map(Message::Page);
+        let page = || self.block_page(cur, block);
         // p: 0 = the chain, 1 = the page.
         let t = z.progress(self.now);
         let p = if z.inward { t } else { 1.0 - t };
@@ -830,6 +954,12 @@ impl Shell {
             let q = (p - 0.5) / 0.5;
             stack![veil(1.0), zoom::zoom(page(), 0.3 + 0.7 * q, z.origin), veil(1.0 - q)].into()
         }
+    }
+
+    /// A block page, its knobs kept clear of the drawer (and taking a dragged source).
+    fn block_page<'a>(&'a self, cur: &'a session::Loaded, block: &'a patch::BlockSpec) -> Element<'a, Message> {
+        let bottom = self.drawer.height(self.now) + 16.0;
+        block_page::view(&cur.patch, &self.session.values, block, self.source_drag.as_ref(), bottom).map(Message::Page)
     }
 
     /// 0 = right sheet hidden, 1 = fully in.
@@ -864,6 +994,7 @@ impl Shell {
                     value_text: cur.patch.macro_text(slot, v),
                     value: v,
                     default: cur.patch.macro_default(slot),
+                    drop: self.source_drag.as_ref().and_then(routing::SourceDrag::macro_drop),
                 }
             })
             .collect();
@@ -876,14 +1007,14 @@ impl Shell {
     fn meta_menu_layer(&self) -> Option<Element<'_, Message>> {
         let menu = self.meta_menu.as_ref()?;
         let p = &self.session.current.as_ref()?.patch;
-        let m = p.modulations.get(menu.param)?.get(menu.k)?;
-        let title = format!("{} → {}", p.macros[m.slot].name, p.params[menu.param].name);
+        let title = routing::title(p, menu.route)?;
+        let (settings, reset) = (p.route_settings(menu.route)?, p.route_reset(menu.route)?);
         let (w, h) = theme::stage_size();
         let at = menu.at - iced::Vector::new(theme::SPACE_GUTTER, theme::SIZE_TOP_BAR + theme::SPACE_GUTTER);
         // The click is on a meta knob in the cell's top-left: clear the cell (64 px) to its right.
         let x = (at.x + 64.0).min(w - meta_menu::WIDTH - 8.0).max(8.0);
         let y = (at.y - 12.0).min(h - meta_menu::HEIGHT - 8.0).max(8.0);
-        Some(pin(menu.view(title, m.settings, m.patch).map(Message::MetaMenu)).x(x).y(y).into())
+        Some(pin(menu.view(title, settings, reset).map(Message::MetaMenu)).x(x).y(y).into())
     }
 
     /// The library sheet, over the left side of the window.

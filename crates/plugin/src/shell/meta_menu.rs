@@ -1,17 +1,19 @@
-//! The meta knob's menu (right-click a meta knob): one modulation slot, as in Serum's matrix row.
+//! The meta knob's menu (right-click a meta knob): one modulation route (a macro slot or a
+//! modulator assignment), as in Serum's matrix row.
 //! A small paper card next to the click, like the value entry:
 //!
-//! - **Amount**: −100…+100 % of the knob's travel (the meta knob's drag, finer here);
-//! - **Polarity**: uni (0…amount) | bi (−amount…+amount around the source's centre);
+//! - **Amount**: −100…+100 % of the knob's travel: the size of the range, negative = the other
+//!   way (the meta knob's drag, finer here);
+//! - **Polarity**: uni (0…amount) | bi (±amount/2 around the base: the same range, centred);
 //! - **Curve**: tension on the source, −1 (fast start) … 0 (linear) … +1 (slow start);
-//! - **Invert**: the range runs the other way (same amount);
 //! - **Bypass**: mute the slot, keep its settings;
-//! - **Reset** to what the patch defines. "Open in Matrix" comes with the Matrix.
+//! - **Reset** to what the patch defines (an assignment: the source's defaults), **Remove** the
+//!   route, or open the Matrix.
 //!
-//! Changes apply live and are saved with the project (`Session::set_mod`). A press elsewhere or
+//! Changes apply live and are saved with the project (`Session::set_route`). A press elsewhere or
 //! Escape closes it.
 
-use patch::ModSettings;
+use patch::{ModSettings, Route};
 
 use super::theme;
 use nice_plug_iced::iced::{
@@ -22,18 +24,19 @@ use nice_plug_iced::iced::{
 
 /// The card's width (logical px); its height is about `HEIGHT`, for placing it.
 pub const WIDTH: f32 = 220.0;
-pub const HEIGHT: f32 = 228.0;
+pub const HEIGHT: f32 = 200.0;
 
-/// The open menu: param `param`'s `k`-th modulation, opened at `at` (window point).
+/// The open menu: one route, opened at `at` (window point).
 pub struct MetaMenu {
-    pub param: usize,
-    pub k: usize,
+    pub route: Route,
     pub at: Point,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Set(ModSettings),
+    Remove,
+    OpenMatrix,
 }
 
 impl MetaMenu {
@@ -68,19 +71,17 @@ impl MetaMenu {
         .spacing(8)
         .align_y(Center);
 
-        let invert = row![label("Invert"), checkbox(s.invert).on_toggle(move |i| Message::Set(ModSettings { invert: i, ..s })).size(14)]
-            .spacing(8)
-            .align_y(Center);
-
         let bypass = row![label("Bypass"), checkbox(s.bypass).on_toggle(move |b| Message::Set(ModSettings { bypass: b, ..s })).size(14)]
             .spacing(8)
             .align_y(Center);
 
         let footer = row![
             button(text("Reset").size(11.5).font(theme::font::PAPER)).on_press(Message::Set(patch)).padding([3, 8]).style(theme::paper_small),
+            button(text("Remove").size(11.5).font(theme::font::PAPER)).on_press(Message::Remove).padding([3, 8]).style(theme::paper_small),
             space::horizontal(),
-            text("Matrix: later").size(11).font(theme::font::PAPER).color(c.paper_muted),
+            button(text("Open Matrix").size(11.5).font(theme::font::PAPER)).on_press(Message::OpenMatrix).padding([3, 8]).style(theme::paper_small),
         ]
+        .spacing(4)
         .align_y(Center);
 
         let card = container(
@@ -89,7 +90,6 @@ impl MetaMenu {
                 amount,
                 polarity,
                 curve,
-                invert,
                 bypass,
                 footer,
             ]

@@ -8,7 +8,7 @@ use std::time::{Instant, SystemTime};
 use nice_plug::context::gui::GuiContext;
 use nice_plug::prelude::*;
 use nice_plug_iced::iced::Color;
-use patch::{MACRO_SLOTS, ModSettings, Patch, Values};
+use patch::{MACRO_SLOTS, ModDestination, ModSettings, ModulatorSpec, Patch, Route, RouteSource, Values};
 
 use super::brand::{self, Brand};
 use super::stage::Panel;
@@ -50,6 +50,10 @@ pub struct Session {
     pub new_fonts: Vec<Vec<u8>>,
     start: Instant,
     last_poll: Instant,
+    /// Routes or modulator settings changed: the graph is rebuilt once at the next tick (it takes
+    /// over the playing graph's state, so this doesn't click). Until then the playing graph's
+    /// settings slots no longer match the patch's routes and aren't written.
+    graph_dirty: bool,
 }
 
 impl Session {
@@ -66,6 +70,7 @@ impl Session {
             hot_reload: true,
             start: now,
             last_poll: now,
+            graph_dirty: false,
         }
     }
 
@@ -123,6 +128,7 @@ impl Session {
             drop(stored);
             // A new patch starts with its own mappings.
             params.mod_settings.write().unwrap().clear();
+            *params.mod_edits.write().unwrap() = Default::default();
             for i in 0..patch.macros.len() {
                 let p = &params.macros[i].value;
                 setter.begin_set_parameter(p);
@@ -133,6 +139,7 @@ impl Session {
         params.apply_mod_settings(&mut patch);
         self.free = params.free_values(&patch);
         shared.publish(&patch, &self.free);
+        self.graph_dirty = false;
         params.set_macro_names(&patch);
         ctx.rescan_param_info();
 
@@ -170,26 +177,98 @@ impl Session {
         params.param_values.write().unwrap().insert(spec.id.clone(), plain);
     }
 
-    /// A meta knob changed param `param`'s `k`-th modulation: the UI's patch, the playing graph,
-    /// and the project (saved with it).
-    pub fn set_mod(&mut self, params: &FxParams, shared: &Shared, param: usize, k: usize, settings: ModSettings) {
+    /// A route's settings changed (meta knob, menu, Matrix): the UI's patch, the playing graph
+    /// (lock-free), and the project.
+    pub fn set_route(&mut self, params: &FxParams, shared: &Shared, route: Route, settings: ModSettings) {
         let Some(cur) = &mut self.current else { return };
-        let Some(m) = cur.patch.modulations.get_mut(param).and_then(|m| m.get_mut(k)) else { return };
-        m.settings = settings;
-        shared.set_mod(cur.patch.mod_index(param, k), settings);
-        params.mod_settings.write().unwrap().insert(cur.patch.mod_key(param, k), settings);
+        let p = &mut cur.patch;
+        match route {
+            Route::Macro { param, k } => {
+                let Some(m) = p.modulations.get_mut(param).and_then(|m| m.get_mut(k)) else { return };
+                m.settings = settings;
+                if !self.graph_dirty {
+                    shared.set_mod(p.mod_index(param, k), settings);
+                }
+                params.mod_settings.write().unwrap().insert(p.mod_key(param, k), settings);
+            }
+            Route::Assignment(i) => {
+                let Some(a) = p.assignments.get_mut(i) else { return };
+                a.settings = settings;
+                if !self.graph_dirty {
+                    shared.set_assignment(i, settings);
+                }
+                params.mod_edits.write().unwrap().assignments = Some(p.assignments.clone());
+            }
+        }
+    }
+
+    /// Drag & drop or the Matrix: a new route from `source` to `destination`, with the source's
+    /// default settings. `None`: it exists already or can't be made (macro → macro).
+    pub fn add_route(&mut self, params: &FxParams, source: RouteSource, destination: ModDestination) -> Option<Route> {
+        let p = &mut self.current.as_mut()?.patch;
+        let route = p.add_route(source, destination)?;
+        let mut edits = params.mod_edits.write().unwrap();
+        match route {
+            Route::Macro { param, k } => {
+                let key = p.mod_key(param, k);
+                params.mod_settings.write().unwrap().insert(key.clone(), p.modulations[param][k].settings);
+                edits.route_added(key);
+            }
+            Route::Assignment(_) => edits.assignments = Some(p.assignments.clone()),
+        }
+        self.graph_dirty = true;
+        Some(route)
+    }
+
+    /// The meta menu or the Matrix: removes a route (macro routes from the patch file too, for
+    /// this project).
+    pub fn remove_route(&mut self, params: &FxParams, route: Route) {
+        let Some(cur) = &mut self.current else { return };
+        let p = &mut cur.patch;
+        let key = match route {
+            Route::Macro { param, k } if p.route_source(route).is_some() => Some(p.mod_key(param, k)),
+            _ => None,
+        };
+        if !p.remove_route(route) {
+            return;
+        }
+        let mut edits = params.mod_edits.write().unwrap();
+        match key {
+            Some(key) => {
+                params.mod_settings.write().unwrap().remove(&key);
+                edits.route_removed(key);
+            }
+            None => edits.assignments = Some(p.assignments.clone()),
+        }
+        self.graph_dirty = true;
+    }
+
+    /// A modulator's settings changed (the drawer). Invalid settings are ignored.
+    pub fn set_modulator(&mut self, params: &FxParams, spec: ModulatorSpec) {
+        let Some(cur) = &mut self.current else { return };
+        if cur.patch.set_modulator(spec) {
+            params.mod_edits.write().unwrap().modulators = Some(cur.patch.modulators.clone());
+            self.graph_dirty = true;
+        }
     }
 
     /// Once per frame: hot reload, then the values the UI shows.
     pub fn tick(&mut self, ctx: &GuiContext, params: &FxParams, shared: &Shared) {
         self.poll_hot_reload(ctx, params, shared);
+        if std::mem::take(&mut self.graph_dirty) {
+            if let Some(cur) = &self.current {
+                shared.publish(&cur.patch, &self.free);
+            }
+        }
 
         for i in 0..MACRO_SLOTS {
             self.values.macros[i] = params.macros[i].value.modulated_normalized_value();
         }
+        (self.values.modulators, self.values.modulator_phases) = shared.modulator_values();
         if let Some(cur) = &self.current {
             let macros = self.values.macros;
-            cur.patch.compute_params(&macros, &self.free, &mut self.values.params);
+            let mods = self.values.modulators;
+            cur.patch.compute_params_with_modulators(&macros, &mods, &self.free, &mut self.values.params);
             self.values.bases.clear();
             self.values.bases.extend(cur.patch.params.iter().zip(&self.free).map(|(p, f)| p.normalize(*f)));
         }
