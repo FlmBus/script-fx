@@ -34,6 +34,10 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
   current height) and the rail sharp (`postfx` has three keep rects).
 - **Rates:** LFO and Step have `Hz | sync` (pills on the Rate knob; `sync = "1/8"` in Luau, a note
   length overriding `rate_hz`). Block rates (`sync` on Chorus, Delay, …) are still patch-only.
+- **Blocks (2026-11-21):** one versatile compressor (detector, topology, ratio curve, program,
+  link, saturation, lookahead; Compressor/FET/Opto/VariMu are presets), `lookahead` on Gate,
+  DeEsser, Transient, `phase = "linear"` on EQs, filters and BandSplit
+  ([`research/blocks.md`](research/blocks.md) §4).
 - **Filters:** LowPass/HighPass have a `slope` param (12/24/36/48 dB/oct, cascaded biquads with
   Butterworth stage Q's; `q` = resonance on the steepest stage). Params can be stepped
   (`ParamSpec::step`: values snap). The Matrix shows each route's source level and the
@@ -67,10 +71,10 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
 2. **Surface naming:** the macro fallback already appears for patches without a panel. Rename
    panels to surfaces throughout the API (`ui.Panel`), code and docs (decided, Flemming).
 3. **Block pages:** displays for the remaining blocks; more input types (switches, choices).
-4. **Blocks for professional chains** ([`research/blocks.md`](research/blocks.md) §4, P1 first):
-   sidechain (an internal detector chain on dynamics blocks, then an external key input), one
-   versatile compressor (detector, topology, ratio curve, program-dependent timing, lookahead,
-   link, saturation; FET/opto/vari-mu as presets), lookahead on dynamics, linear-phase EQ.
+4. **Blocks for professional chains** ([`research/blocks.md`](research/blocks.md) §4): next the
+   sidechain (an internal detector chain on dynamics blocks, then an external key input), then
+   the P2 list. Block pages need groups and choices for the bigger blocks (the compressor has 14
+   knobs; `phase` and `lookahead` aren't shown on the page yet).
 5. **Hands-on check in Reaper and Carla**: everything above plus knob drag/double-click on all
    panels, chat typing (Enter/Shift+Enter, selection, clipboard, dead keys), Listen, UI scale
    (live and reopening at ≠ 100 %, host accepts the resize), library wheel scrolling, controls
@@ -203,6 +207,12 @@ loads only safe data and shows a generic UI. See the research for the threat mod
 ## Backlog by area
 
 ### Shell / UI
+- **Serum-matched design mockup** (Flemming, 2026-11-21: todo). Come up with a design that tightly
+  matches Serum's, as a mockup first (like the chain-editor mockup artifact): the drawer's
+  modulator panels (LFO shape editor with grid and playhead, envelope/step views), source drag
+  handles, meta knobs and range arcs on knobs, the Matrix. Reference:
+  [`research/serum-modulation.md`](research/serum-modulation.md); pairs with the editable LFO
+  shape (backlog "DSP / chain").
 - **Chain editor: more input types for block/modulator params** (Flemming, 2026-11-19). The
   chain-editor mockup (claude.ai artifact "ScriptFX Chain Editor Mockup") uses knob cells only; a
   knob cell may carry a pill group at its top for the knob's mode (e.g. `Hz | sync` on rate,

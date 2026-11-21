@@ -53,7 +53,7 @@ impl Picture {
                 Self::Response
             }
             BlockKind::Drive { .. } | BlockKind::Waveshaper { .. } | BlockKind::Wavefolder { .. } | BlockKind::Clipper { .. } => Self::Transfer,
-            BlockKind::Compressor(_) | BlockKind::FetCompressor(_) | BlockKind::OptoCompressor(_) | BlockKind::Limiter { .. } => {
+            BlockKind::Compressor(_) | BlockKind::FetCompressor(_) | BlockKind::OptoCompressor(_) | BlockKind::VariMuCompressor(_) | BlockKind::Limiter { .. } => {
                 Self::Dynamics
             }
             BlockKind::Delay { .. } => Self::Taps,

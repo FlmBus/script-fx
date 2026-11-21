@@ -1019,7 +1019,7 @@ mod tests {
         assert_eq!(p.params[0].id, "c1.threshold");
         assert_eq!(p.params[i("s.crossover_1")].name, "Crossover 1");
         assert_eq!(p.params[i("lp.freq")].scale, Scale::Log);
-        assert_eq!(p.params.len(), 7 + 1 + 3 + 2 + 2 + 1 + 3 + 2 + 1); // + the low-pass's slope
+        assert_eq!(p.params.len(), 14 + 1 + 3 + 2 + 2 + 1 + 3 + 2 + 1); // compressor 14, the low-pass with slope 3
         // A stepped param snaps: the knob between 24 and 36 dB/oct plays one of them.
         let slope = &p.params[i("lp.slope")];
         assert_eq!((slope.default_plain(), slope.step), (12.0, Some(12.0)));
@@ -1056,7 +1056,10 @@ mod tests {
     fn blocks_list_their_own_knobs() {
         let p = load(BASE).unwrap();
         let ids = |b: &BlockSpec| b.params.iter().map(|r| p.params[r.0].id.as_str()).collect::<Vec<_>>();
-        assert_eq!(ids(&p.chain[0]), ["c1.threshold", "c1.ratio", "c1.attack", "c1.release", "c1.knee", "c1.makeup", "c1.mix"]);
+        assert_eq!(ids(&p.chain[0]), [
+            "c1.threshold", "c1.ratio", "c1.attack", "c1.release", "c1.knee", "c1.makeup", "c1.mix", "c1.detector", "c1.window",
+            "c1.feedback", "c1.ratio_curve", "c1.program", "c1.link", "c1.saturation",
+        ]);
         assert_eq!(ids(&p.chain[1]), ["s.crossover_1"]); // the bands' blocks have their own
         let chain::BlockKind::Drive { amount, .. } = &p.chain[1].kind.sub_chains()[1].0[0].kind else { panic!() };
         assert_eq!(p.params[amount.0].id, "d.amount"); // settings point at their param

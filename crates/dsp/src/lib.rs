@@ -13,6 +13,8 @@
 //! reports the total ([`Graph::latency`]) for the host's delay compensation.
 
 mod fx;
+pub use fx::comp_static;
+mod linear;
 pub mod modulators;
 mod oversample;
 pub mod preview;
@@ -21,7 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use atomic_float::AtomicF32;
-use patch::chain::{BlockKind, BlockSpec, Chain, Channels, CompSpec, EqSpec, FilterSpec, ParamRef, Side};
+use patch::chain::{BlockKind, BlockSpec, Chain, Channels, EqSpec, FilterSpec, Phase, ParamRef, Side};
 
 use oversample::{Delay, Oversampler};
 use patch::{MACRO_SLOTS, ModDestination, Modulation, ModulatorId, ModulatorLfoShape, ModulatorSettings, ParamSpec, Patch};
@@ -136,14 +138,6 @@ pub(crate) enum EqShape {
     AllPass,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-enum CompStyle {
-    Fet,
-    Opto,
-    #[default]
-    Clean,
-}
-
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Biquad {
     b0: f32,
@@ -193,6 +187,16 @@ impl Biquad {
         self.a2 = a2 / a0;
     }
 
+    /// |H(e^jω)| (linear) at `freq`.
+    pub(crate) fn magnitude(&self, freq: f32, sr: f32) -> f32 {
+        let w = std::f32::consts::TAU * freq / sr;
+        let (c1, s1) = (w.cos(), -w.sin());
+        let (c2, s2) = ((2.0 * w).cos(), -(2.0 * w).sin());
+        let num = (self.b0 + self.b1 * c1 + self.b2 * c2, self.b1 * s1 + self.b2 * s2);
+        let den = (1.0 + self.a1 * c1 + self.a2 * c2, self.a1 * s1 + self.a2 * s2);
+        ((num.0 * num.0 + num.1 * num.1) / (den.0 * den.0 + den.1 * den.1).max(1e-20)).sqrt()
+    }
+
     /// Forgets the signal (a stage that was off and comes back on).
     pub(crate) fn clear(&mut self) {
         self.z1 = [0.0; 2];
@@ -227,40 +231,11 @@ pub(crate) fn filter_stages(slope: f32, q: f32) -> (usize, [f32; FILTER_STAGES])
     (n, qs)
 }
 
-struct Comp {
-    style: CompStyle,
-    threshold: P,
-    ratio: P,
-    attack: P,
-    release: P,
-    knee: P,
-    makeup: P,
-    mix: P,
-    auto_makeup: bool,
-    /// Current gain reduction, dB (≥ 0).
-    env: f32,
-    rms: f32,
-    /// Opto: how long/much it has been compressing (0..1), slows the release.
-    sustain: f32,
-    /// Slow average of the gain reduction (dB), for adaptive auto makeup.
-    avg_gr: f32,
-    meter: usize,
-}
-
 struct Rider {
     target: P,
     range: P,
     speed: P,
     rms: f32,
-    gain_db: f32,
-    meter: usize,
-}
-
-struct Transient {
-    attack: P,
-    sustain: P,
-    fast: f32,
-    slow: f32,
     gain_db: f32,
     meter: usize,
 }
@@ -377,11 +352,11 @@ pub(crate) enum Node {
     /// Low/high-pass with a slope: `stages` of `bqs` run ([`filter_stages`]).
     Filter { shape: EqShape, freq: P, q: P, slope: P, last: [f32; 3], bqs: [Biquad; FILTER_STAGES], stages: usize },
     Drive { amount: P, mix: P },
-    Comp(Box<Comp>),
     Rider(Box<Rider>),
-    Transient(Box<Transient>),
     BandSplit(Box<BandSplit>),
     Parallel(Box<Parallel>),
+    LinearEq(Box<linear::LinearEq>),
+    LinearSplit(Box<linear::LinearSplit>),
 }
 
 /// `sr` = the rate the nodes run at, `max_frames` = the most frames per call there.
@@ -444,7 +419,7 @@ fn build_kind(kind: &BlockKind, params: &[ParamSpec], sr: f32, max_frames: usize
         *meter += 1;
         m
     }
-    let eq = |shape: EqShape, e: &EqSpec| Node::Eq {
+    let eq_node = |shape: EqShape, e: &EqSpec| Node::Eq {
         shape,
         freq: p(&e.freq),
         q: p(&e.q),
@@ -452,7 +427,7 @@ fn build_kind(kind: &BlockKind, params: &[ParamSpec], sr: f32, max_frames: usize
         last: [f32::NAN; 3],
         bq: Biquad::default(),
     };
-    let filter = |shape: EqShape, f: &FilterSpec| Node::Filter {
+    let filter_node = |shape: EqShape, f: &FilterSpec| Node::Filter {
         shape,
         freq: p(&f.freq),
         q: p(&f.q),
@@ -460,6 +435,17 @@ fn build_kind(kind: &BlockKind, params: &[ParamSpec], sr: f32, max_frames: usize
         last: [f32::NAN; 3],
         bqs: [Biquad::default(); FILTER_STAGES],
         stages: 0,
+    };
+    let linear = |r: linear::Response, freq: &ParamRef, q: &ParamRef, gain: P, slope: P| {
+        Node::LinearEq(Box::new(linear::LinearEq::new(r, p(freq), p(q), gain, slope, sr)))
+    };
+    let eq = |shape: EqShape, e: &EqSpec| match e.phase {
+        Phase::Linear => linear(linear::Response::Eq(shape), &e.freq, &e.q, p(&e.gain), P::constant(12.0)),
+        Phase::Minimum => eq_node(shape, e),
+    };
+    let filter = |shape: EqShape, f: &FilterSpec| match f.phase {
+        Phase::Linear => linear(linear::Response::Filter(shape), &f.freq, &f.q, P::constant(0.0), p(&f.slope)),
+        Phase::Minimum => filter_node(shape, f),
     };
     // Sub-chains in the same depth-first order as `patch::chain::walk`.
     let chains = |cs: &[&Chain], meter: &mut usize| -> Vec<Vec<Node>> {
@@ -476,22 +462,11 @@ fn build_kind(kind: &BlockKind, params: &[ParamSpec], sr: f32, max_frames: usize
         BlockKind::LowPass(f) => filter(EqShape::LowPass, f),
         BlockKind::HighPass(f) => filter(EqShape::HighPass, f),
         BlockKind::Drive { amount, mix } => Node::Drive { amount: p(amount), mix: p(mix) },
-        BlockKind::Compressor(c) => comp(CompStyle::Clean, c, next_meter(meter)),
-        BlockKind::FetCompressor(c) => comp(CompStyle::Fet, c, next_meter(meter)),
-        BlockKind::OptoCompressor(c) => comp(CompStyle::Opto, c, next_meter(meter)),
         BlockKind::Rider { target, range, speed } => Node::Rider(Box::new(Rider {
             target: p(target),
             range: p(range),
             speed: p(speed),
             rms: 0.0,
-            gain_db: 0.0,
-            meter: next_meter(meter),
-        })),
-        BlockKind::Transient { attack, sustain } => Node::Transient(Box::new(Transient {
-            attack: p(attack),
-            sustain: p(sustain),
-            fast: 0.0,
-            slow: 0.0,
             gain_db: 0.0,
             meter: next_meter(meter),
         })),
@@ -532,7 +507,22 @@ fn build_kind(kind: &BlockKind, params: &[ParamSpec], sr: f32, max_frames: usize
                 latency,
             }))
         }
-        BlockKind::BandSplit { crossovers, bands } => {
+        BlockKind::BandSplit { crossovers, bands, phase: Phase::Linear } => {
+            let n = crossovers.len();
+            let bands = chains(&bands.iter().collect::<Vec<_>>(), meter);
+            let (align, chain_latency) = align(&bands);
+            Node::LinearSplit(Box::new(linear::LinearSplit {
+                freqs: crossovers.iter().map(p).collect(),
+                last: vec![f32::NAN; n],
+                cur: vec![0.0; n],
+                convs: (0..=n).map(|_| linear::Convolver::new(sr)).collect(),
+                bufs: (0..=n).map(|_| frame_buf(max_frames)).collect(),
+                bands,
+                align,
+                chain_latency,
+            }))
+        }
+        BlockKind::BandSplit { crossovers, bands, .. } => {
             let n = crossovers.len();
             let bands = chains(&bands.iter().collect::<Vec<_>>(), meter);
             let (align, latency) = align(&bands);
@@ -563,28 +553,6 @@ fn build_kind(kind: &BlockKind, params: &[ParamSpec], sr: f32, max_frames: usize
     }
 }
 
-fn comp(style: CompStyle, c: &CompSpec, meter: usize) -> Node {
-    // The defaults per style (FET 4:1, 0.3/80 ms, knee 2; opto 3:1, 10/250, 8; clean 2:1, 5/100,
-    // 4) are the prelude's: every setting arrives as a param.
-    let p = |r: &ParamRef| P::param(*r);
-    Node::Comp(Box::new(Comp {
-        style,
-        threshold: p(&c.threshold),
-        ratio: p(&c.ratio),
-        attack: p(&c.attack),
-        release: p(&c.release),
-        knee: p(&c.knee),
-        makeup: p(&c.makeup),
-        mix: p(&c.mix),
-        auto_makeup: c.auto_makeup,
-        env: 0.0,
-        rms: 0.0,
-        sustain: 0.0,
-        avg_gr: 0.0,
-        meter,
-    }))
-}
-
 pub(crate) fn process_nodes(nodes: &mut [Node], frames: &mut [Frame], ctx: &Ctx) {
     for n in nodes {
         n.process(frames, ctx);
@@ -597,6 +565,8 @@ impl Node {
         match self {
             Node::Oversampled(o) => o.os.latency(),
             Node::BandSplit(b) => b.latency,
+            Node::LinearEq(l) => l.latency(),
+            Node::LinearSplit(l) => l.latency(),
             Node::Parallel(p) => p.latency,
             Node::Split2(s) => s.latency,
             Node::Fx(f) => f.latency(),
@@ -726,11 +696,11 @@ impl Node {
                     }
                 }
             }
-            Node::Comp(c) => c.process(frames, ctx),
             Node::Rider(r) => r.process(frames, ctx),
-            Node::Transient(t) => t.process(frames, ctx),
             Node::BandSplit(b) => b.process(frames, ctx),
             Node::Parallel(p) => p.process(frames, ctx),
+            Node::LinearEq(l) => l.process(frames, ctx),
+            Node::LinearSplit(l) => l.process(frames, ctx),
         }
     }
 }
@@ -885,54 +855,6 @@ pub(crate) fn drive_curve(x: f32, g: f32) -> f32 {
     (x * g).tanh() / g.sqrt()
 }
 
-impl Comp {
-    fn process(&mut self, frames: &mut [Frame], ctx: &Ctx) {
-        let sr = ctx.sr;
-        let thr = self.threshold.update(ctx);
-        let ratio = self.ratio.update(ctx).max(1.0);
-        let knee = self.knee.update(ctx).max(0.0);
-        let makeup_db = self.makeup.update(ctx);
-        let wet = (self.mix.update(ctx) / 100.0).clamp(0.0, 1.0);
-        let att = coef(self.attack.update(ctx), sr);
-        let mut release_ms = self.release.update(ctx);
-        if self.style == CompStyle::Opto {
-            // Program-dependent: the longer/harder it compressed, the slower it lets go.
-            release_ms *= 1.0 + 4.0 * self.sustain;
-        }
-        let rel = coef(release_ms, sr);
-        let rms_c = coef(10.0, sr);
-        let sus_c = coef(1500.0, sr);
-        // Adaptive auto makeup: give back most of the *average* gain reduction
-        // (level-independent, unlike the static threshold/ratio formula).
-        let avg_c = coef(1500.0, sr);
-        let auto = if self.auto_makeup { 0.8 } else { 0.0 };
-        let slope = 1.0 - 1.0 / ratio;
-
-        for f in frames {
-            let x = f[0].abs().max(f[1].abs());
-            let level = match self.style {
-                CompStyle::Opto => {
-                    self.rms = rms_c * self.rms + (1.0 - rms_c) * x * x;
-                    10.0 * self.rms.max(1e-18).log10()
-                }
-                _ => gain_to_db(x),
-            };
-            let gr = comp_gr(level - thr, slope, knee);
-            let c = if gr > self.env { att } else { rel };
-            self.env = c * self.env + (1.0 - c) * gr;
-            if self.style == CompStyle::Opto {
-                self.sustain = sus_c * self.sustain + (1.0 - sus_c) * (self.env / 12.0).min(1.0);
-            }
-            self.avg_gr = avg_c * self.avg_gr + (1.0 - avg_c) * self.env;
-            let g = db_to_gain(-self.env + makeup_db + auto * self.avg_gr);
-            for x in f.iter_mut() {
-                *x += wet * (*x * g - *x);
-            }
-        }
-        ctx.meters[self.meter].store((self.env / 24.0).clamp(0.0, 1.0), Ordering::Relaxed);
-    }
-}
-
 impl Rider {
     fn process(&mut self, frames: &mut [Frame], ctx: &Ctx) {
         let target = self.target.update(ctx);
@@ -950,31 +872,6 @@ impl Rider {
                 self.gain_db = move_c * self.gain_db + (1.0 - move_c) * desired;
             }
             let g = db_to_gain(self.gain_db.clamp(-range, range));
-            f[0] *= g;
-            f[1] *= g;
-        }
-        ctx.meters[self.meter].store((0.5 + self.gain_db / 24.0).clamp(0.0, 1.0), Ordering::Relaxed);
-    }
-}
-
-impl Transient {
-    fn process(&mut self, frames: &mut [Frame], ctx: &Ctx) {
-        let sr = ctx.sr;
-        let attack = self.attack.update(ctx);
-        let sustain = self.sustain.update(ctx);
-        let (fa, fr) = (coef(0.5, sr), coef(30.0, sr));
-        let (sa, sr_) = (coef(25.0, sr), coef(200.0, sr));
-        let gs = coef(1.0, sr);
-        for f in frames {
-            let x = f[0].abs().max(f[1].abs());
-            let c = if x > self.fast { fa } else { fr };
-            self.fast = c * self.fast + (1.0 - c) * x;
-            let c = if x > self.slow { sa } else { sr_ };
-            self.slow = c * self.slow + (1.0 - c) * x;
-            let diff = gain_to_db(self.fast) - gain_to_db(self.slow);
-            let target = attack * (diff / 6.0).clamp(0.0, 1.0) + sustain * (-diff / 6.0).clamp(0.0, 1.0);
-            self.gain_db = gs * self.gain_db + (1.0 - gs) * target;
-            let g = db_to_gain(self.gain_db);
             f[0] *= g;
             f[1] *= g;
         }

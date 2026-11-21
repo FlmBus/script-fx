@@ -37,6 +37,8 @@ pub struct EqSpec {
     pub freq: ParamRef,
     pub gain: ParamRef,
     pub q: ParamRef,
+    #[serde(default)]
+    pub phase: Phase,
 }
 
 /// Low/high pass (12 dB/oct). q default 0.707.
@@ -48,6 +50,8 @@ pub struct FilterSpec {
     pub q: ParamRef,
     /// 12, 24, 36 or 48 dB/oct.
     pub slope: ParamRef,
+    #[serde(default)]
+    pub phase: Phase,
 }
 
 /// Shared by all compressor types (defaults differ per type, see `dsp`).
@@ -65,6 +69,21 @@ pub struct CompSpec {
     pub auto_makeup: bool,
     /// Parallel compression wet amount, % (default 100).
     pub mix: ParamRef,
+    /// Detector: 0 = peak, 100 = RMS over `window` ms.
+    pub detector: ParamRef,
+    pub window: ParamRef,
+    /// Topology: 0 = feed-forward, 100 = feedback (detects its own output).
+    pub feedback: ParamRef,
+    /// How much the ratio rises with the overshoot (vari-mu), %.
+    pub ratio_curve: ParamRef,
+    /// Program-dependent release: long, heavy compression lets go slower, %.
+    pub program: ParamRef,
+    /// Stereo link, %: 0 = each channel on its own, 100 = both by the louder one.
+    pub link: ParamRef,
+    /// Saturation of the gain stage (asymmetric, even harmonics), %.
+    pub saturation: ParamRef,
+    /// Lookahead, ms (0..20, fixed: it is latency).
+    pub lookahead: Option<f32>,
 }
 
 /// Which channel a one-sided block acts on.
@@ -84,6 +103,17 @@ pub enum Channels {
     Both,
     Left,
     Right,
+}
+
+/// How an EQ, filter or band split treats phase: `minimum` (IIR, no latency, the phase shifts
+/// around the changes like analog gear) or `linear` (FIR, no phase shift at all, ~90 ms latency
+/// and pre-ringing; for mastering and multiband).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Phase {
+    #[default]
+    Minimum,
+    Linear,
 }
 
 /// `Rectifier` mode.
@@ -178,6 +208,8 @@ pub enum BlockKind {
     FetCompressor(CompSpec),
     /// RMS detector, soft knee, program-dependent release (LA-2A-ish).
     OptoCompressor(CompSpec),
+    /// Ratio rising with level, feedback, slow program-dependent timing, tube colour (Fairchild-ish).
+    VariMuCompressor(CompSpec),
     /// Slow automatic gain ("fader riding") towards `target` dBFS, within ±`range` dB.
     Rider {
         target: ParamRef,
@@ -189,6 +221,7 @@ pub enum BlockKind {
     Transient {
         attack: ParamRef,
         sustain: ParamRef,
+        lookahead: Option<f32>,
     },
     /// Linkwitz-Riley (4th order) split into `crossovers.len() + 1` bands
     /// (phase-aligned, sums flat); each band is processed, then all are summed.
@@ -197,6 +230,9 @@ pub enum BlockKind {
         crossovers: Vec<ParamRef>,
         #[serde(deserialize_with = "crate::list")]
         bands: Vec<Chain>,
+        /// Linear: complementary linear-phase bands (no phase shift between them).
+        #[serde(default)]
+        phase: Phase,
     },
     /// Stereo balance, -100 (left) .. 100 (right); the other side is attenuated.
     Pan {
@@ -427,12 +463,14 @@ pub enum BlockKind {
         attack: ParamRef,
         hold: ParamRef,
         release: ParamRef,
+        lookahead: Option<f32>,
     },
     /// Reduces the band above `freq` when it exceeds `threshold`.
     DeEsser {
         freq: ParamRef,
         threshold: ParamRef,
         range: ParamRef,
+        lookahead: Option<f32>,
     },
     /// Every branch gets the full signal; outputs are summed. With `mix` (exactly
     /// two branches) it crossfades instead: 0 % = first branch only, 100 % = second.
@@ -445,7 +483,7 @@ pub enum BlockKind {
 
 impl BlockKind {
     pub fn is_compressor(&self) -> bool {
-        matches!(self, BlockKind::Compressor(_) | BlockKind::FetCompressor(_) | BlockKind::OptoCompressor(_))
+        matches!(self, BlockKind::Compressor(_) | BlockKind::FetCompressor(_) | BlockKind::OptoCompressor(_) | BlockKind::VariMuCompressor(_))
     }
 
     /// The meter value (0..1) of a metered block at rest: no gain reduction / no
@@ -538,7 +576,7 @@ fn validate_chain(
             return Err(invalid("metered blocks can't be called 'in' or 'out' (reserved meters)"));
         }
         match &b.kind {
-            BlockKind::BandSplit { crossovers, bands } if crossovers.is_empty() || bands.len() != crossovers.len() + 1 => {
+            BlockKind::BandSplit { crossovers, bands, .. } if crossovers.is_empty() || bands.len() != crossovers.len() + 1 => {
                 return Err(invalid(format!("band split '{id}': needs n crossovers and n+1 bands")));
             }
             BlockKind::Parallel { branches, mix } if branches.len() < 2 || (mix.is_some() && branches.len() != 2) => {

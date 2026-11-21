@@ -438,3 +438,147 @@ fn de_esser_cuts_only_the_highs() {
     };
     assert!(lo.abs() < 0.5, "lows untouched: {lo}");
 }
+
+// ---- the versatile compressor -----------------------------------------------------------------
+
+/// Gain reduction (dB) on a 1 kHz sine at `db` dBFS once settled.
+fn comp_gr(chain: &str, db: f32) -> f32 {
+    let x = sine(1000.0, db, 1.0);
+    let y = through(chain, x.clone());
+    rms_db(&x[36_000..], 0) - rms_db(&y[36_000..], 0)
+}
+
+#[test]
+fn compressor_feedback_keeps_the_dialled_ratio() {
+    // -6 dBFS, threshold -20, 4:1, hard knee: 14 dB over → 10.5 dB reduction, either topology.
+    let ff = comp_gr("Blocks.Compressor.new('c', { threshold = -20, ratio = 4, knee = 0 })", -6.0);
+    let fb = comp_gr("Blocks.Compressor.new('c', { threshold = -20, ratio = 4, knee = 0, feedback = 100 })", -6.0);
+    assert!((ff - 10.5).abs() < 1.0, "feed-forward {ff}");
+    assert!((fb - 10.5).abs() < 1.0, "feedback {fb}");
+    // A fast, hard feedback compressor stays stable (no blow-up, no NaN).
+    let y = through("Blocks.Compressor.new('c', { threshold = -40, ratio = 100, attack = 0.05, feedback = 100 })", sine(100.0, 0.0, 0.5));
+    assert!(all_finite(&y) && peak(&y, 0) < 1.0);
+}
+
+#[test]
+fn compressor_ratio_curve_compresses_gently_first() {
+    // Vari-mu: a little over the threshold it barely compresses, far over it reaches the ratio.
+    let c = |curve: f32| format!("Blocks.Compressor.new('c', {{ threshold = -30, ratio = 6, knee = 0, ratio_curve = {curve} }})");
+    let (fixed_low, vari_low) = (comp_gr(&c(0.0), -24.0), comp_gr(&c(100.0), -24.0));
+    assert!(vari_low < fixed_low * 0.4, "6 dB over: fixed {fixed_low}, vari {vari_low}");
+    // 30 dB over, the local ratio has reached 6:1; the reduction so far is its integral,
+    // 15 · (1 − 1/6) = 12.5 dB. The peak detector follows the waveform, and with a rising ratio
+    // the troughs of each cycle count for less: a little under that.
+    let vari_high = comp_gr(&c(100.0), 0.0);
+    assert!((10.5..=13.0).contains(&vari_high), "30 dB over: {vari_high}");
+    // The output never falls as the input rises.
+    let curve = |over: f32| over - dsp::comp_static(over, 6.0, 0.0, 1.0);
+    assert!((0..60).all(|o| curve(o as f32 + 1.0) >= curve(o as f32)));
+}
+
+#[test]
+fn compressor_link_decides_whether_a_loud_channel_ducks_the_other() {
+    let loud_left = |link: f32| {
+        let x: Vec<Frame> = sine(1000.0, -6.0, 1.0).into_iter().map(|f| [f[0], f[1] * 0.01]).collect();
+        let y = through(&format!("Blocks.Compressor.new('c', {{ threshold = -30, ratio = 10, link = {link} }})"), x.clone());
+        rms_db(&x[36_000..], 1) - rms_db(&y[36_000..], 1)
+    };
+    assert!(loud_left(0.0).abs() < 0.5, "unlinked: the quiet right channel is untouched");
+    assert!(loud_left(100.0) > 15.0, "linked: it follows the left");
+}
+
+#[test]
+fn compressor_lookahead_catches_the_onset_and_reports_its_latency() {
+    let onset_peak = |extra: &str| {
+        let mut x = vec![[0.0; 2]; 4800];
+        x.extend(sine(1000.0, -6.0, 0.2));
+        let g = graph(&format!("Blocks.Compressor.new('c', {{ threshold = -30, ratio = 20, attack = 2, knee = 0{extra} }})"));
+        let lat = g.latency();
+        let mut g = g;
+        let mut y = x.clone();
+        g.process_all(&[0.0; MACRO_SLOTS], &mut y);
+        // The first 2 ms after the onset, wherever the latency put it.
+        (peak(&y[4800 + lat..4800 + lat + 96], 0), lat)
+    };
+    let (without, lat0) = onset_peak("");
+    let (with, lat) = onset_peak(", lookahead = 5");
+    assert_eq!((lat0, lat), (0, 240));
+    assert!(20.0 * (without / with).log10() > 6.0, "without {without}, with {with}");
+}
+
+#[test]
+fn compressor_saturation_adds_even_harmonics() {
+    let h2 = |sat: f32| {
+        let y = through(&format!("Blocks.Compressor.new('c', {{ threshold = 0, saturation = {sat} }})"), sine(1000.0, -3.0, 0.5));
+        tone_db(&y[12_000..], 2000.0, 0) - tone_db(&y[12_000..], 1000.0, 0)
+    };
+    assert!(h2(0.0) < -80.0 && h2(100.0) > -40.0, "clean {}, saturated {}", h2(0.0), h2(100.0));
+}
+
+#[test]
+fn compressor_presets_load_and_compress() {
+    for b in ["Compressor", "FETCompressor", "OptoCompressor", "VariMuCompressor"] {
+        let gr = comp_gr(&format!("Blocks.{b}.new('c', {{ threshold = -30 }})"), -6.0);
+        assert!(gr > 6.0, "{b}: {gr}");
+    }
+}
+
+#[test]
+fn dynamics_lookahead_is_latency() {
+    for b in ["Gate", "DeEsser", "Transient", "FETCompressor"] {
+        assert_eq!(graph(&format!("Blocks.{b}.new('x', {{ lookahead = 2 }})")).latency(), 96, "{b}");
+    }
+}
+
+// ---- linear phase -----------------------------------------------------------------------------
+
+/// `y` against `x` delayed by `lat` and scaled by `g`: the largest difference after `from`.
+fn delayed_error(x: &[Frame], y: &[Frame], lat: usize, g: f32, from: usize) -> f32 {
+    (from..x.len()).map(|i| (y[i][0] - g * x[i - lat][0]).abs()).fold(0.0, f32::max)
+}
+
+#[test]
+fn linear_phase_eq_matches_the_magnitude_without_phase_shift() {
+    let lin = "Blocks.PeakEq.new('e', { freq = 1000, q = 1, gain = 6, phase = 'linear' })";
+    let min = "Blocks.PeakEq.new('e', { freq = 1000, q = 1, gain = 6 })";
+    let lat = graph(lin).latency();
+    assert_eq!(lat, 4096 + 256);
+    for f in [100.0, 700.0, 1000.0, 5000.0] {
+        // The same gain as the minimum-phase EQ…
+        let (gl, gm) = (gain_through(lin, f), gain_through(min, f));
+        assert!((gl - gm).abs() < 0.1, "{f} Hz: linear {gl}, minimum {gm}");
+        // …and the output is the input, delayed by the latency and scaled: no phase shift.
+        let x = sine(f, -12.0, 0.5);
+        let y = through(lin, x.clone());
+        let g = 10f32.powf(gl / 20.0);
+        let err = delayed_error(&x, &y, lat, g, 12_000);
+        assert!(err < 0.003, "{f} Hz: {err}");
+    }
+}
+
+#[test]
+fn linear_phase_high_pass_keeps_its_slope() {
+    let c = |slope: f32| format!("Blocks.HighPass.new('h', {{ freq = 1000, slope = {slope}, phase = 'linear' }})");
+    assert!((gain_through(&c(24.0), 1000.0) + 3.0).abs() < 0.3);
+    assert!((gain_through(&c(24.0), 250.0) + 48.0).abs() < 3.0, "{}", gain_through(&c(24.0), 250.0));
+}
+
+#[test]
+fn linear_phase_band_split_reconstructs_exactly() {
+    let split = "Blocks.BandSplit.new('s', { crossovers = { 120, 800, 4000 }, phase = 'linear',
+        bands = { Chain.new(), Chain.new(), Chain.new(), Chain.new() } })";
+    let lat = graph(split).latency();
+    let x: Vec<Frame> = (0..24_000).map(|i| {
+        let t = i as f32 / SR;
+        let s = 0.3 * (6.28 * 90.0 * t).sin() + 0.2 * (6.28 * 1300.0 * t).sin() + 0.1 * (6.28 * 7000.0 * t).sin();
+        [s, s]
+    }).collect();
+    let y = through(split, x.clone());
+    let err = delayed_error(&x, &y, lat, 1.0, lat + 1);
+    assert!(err < 1e-3, "{err}");
+    // Muting the middle bands takes out 800 Hz–4 kHz and keeps the outside.
+    let muted = "Blocks.BandSplit.new('s', { crossovers = { 200, 3000 }, phase = 'linear',
+        bands = { Chain.new(), Chain.new { Blocks.Gain.new('m', { db = -120 }) }, Chain.new() } })";
+    assert!(gain_through(muted, 800.0) < -20.0);
+    assert!(gain_through(muted, 50.0).abs() < 0.5 && gain_through(muted, 12000.0).abs() < 0.5);
+}

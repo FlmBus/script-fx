@@ -159,14 +159,21 @@ end
 declare extern type StutterBlock extends Block with
   params: { active: Param, length: Param, mix: Param }
 end
+export type CompParams = {
+  threshold: Param, ratio: Param, attack: Param, release: Param, knee: Param, makeup: Param, mix: Param,
+  detector: Param, window: Param, feedback: Param, ratio_curve: Param, program: Param, link: Param, saturation: Param,
+}
 declare extern type CompressorBlock extends MeteredBlock with
-  params: { threshold: Param, ratio: Param, attack: Param, release: Param, knee: Param, makeup: Param, mix: Param }
+  params: CompParams
 end
 declare extern type FETCompressorBlock extends MeteredBlock with
-  params: { threshold: Param, ratio: Param, attack: Param, release: Param, knee: Param, makeup: Param, mix: Param }
+  params: CompParams
 end
 declare extern type OptoCompressorBlock extends MeteredBlock with
-  params: { threshold: Param, ratio: Param, attack: Param, release: Param, knee: Param, makeup: Param, mix: Param }
+  params: CompParams
+end
+declare extern type VariMuCompressorBlock extends MeteredBlock with
+  params: CompParams
 end
 declare extern type RiderBlock extends MeteredBlock with
   params: { target: Param, range: Param, speed: Param }
@@ -215,14 +222,23 @@ export type Setting = number
 export type Sync = string                                                        -- "1/8", "1/8.", "1/16t", "1/1"
 export type LfoShape = "sine" | "triangle" | "square"
 
-export type EqOptions = { freq: Setting?, gain: Setting?, q: Setting?, oversampling: number? }          -- Hz, dB; q default 0.707
-export type FilterOptions = { freq: Setting?, q: Setting?, slope: Setting?, oversampling: number? }      -- Hz, resonance, dB/oct (12, 24, 36, 48)
+-- phase: "minimum" (default; IIR, no latency) or "linear" (FIR: no phase shift, ~90 ms latency, pre-ringing)
+export type Phase = "minimum" | "linear"
+export type EqOptions = { freq: Setting?, gain: Setting?, q: Setting?, phase: Phase?, oversampling: number? }          -- Hz, dB; q default 0.707
+export type FilterOptions = { freq: Setting?, q: Setting?, slope: Setting?, phase: Phase?, oversampling: number? }      -- Hz, resonance, dB/oct (12, 24, 36, 48)
 export type CompOptions = {
   threshold: Setting?,                                                           -- dB
   ratio: Setting?, attack: Setting?, release: Setting?,                         -- :1, ms, ms
   knee: Setting?, makeup: Setting?,                                             -- dB, dB
   auto_makeup: boolean?,                                                        -- gives back ~80 % of the average reduction
   mix: Setting?,                                                                -- % wet (parallel compression), default 100
+  detector: Setting?, window: Setting?,                                         -- % 0 = peak .. 100 = RMS; RMS window ms
+  feedback: Setting?,                                                           -- % 0 = feed-forward .. 100 = feedback
+  ratio_curve: Setting?,                                                        -- % the ratio rises with level (vari-mu)
+  program: Setting?,                                                            -- % program-dependent release
+  link: Setting?,                                                               -- % stereo link (default 100)
+  saturation: Setting?,                                                         -- % gain-stage colour (even harmonics)
+  lookahead: number?,                                                           -- ms 0..20, fixed (adds latency)
   oversampling: number?,
 }
 
@@ -265,7 +281,7 @@ declare Blocks: {
   --- Utility · passive peak meter at this point of the chain (a component `source`, level like Meters.IN)
   Meter: { new: (id: string, o: { oversampling: number? }?) -> MeterBlock },
 
-  --- EQ · bell boost/cut (q default 0.707)
+  --- EQ · bell boost/cut (q default 0.707); phase "minimum" (default) or "linear"
   PeakEq: { new: (id: string, o: EqOptions) -> PeakEqBlock },
   --- EQ · low shelf
   LowShelf: { new: (id: string, o: EqOptions) -> LowShelfBlock },
@@ -357,33 +373,42 @@ declare Blocks: {
   --- length ms (default 125) or sync that started then repeats; mix % (default 100)
   Stutter: { new: (id: string, o: { active: Setting?, length: Setting?, sync: Sync?, mix: Setting?, oversampling: number? }) -> StutterBlock },
 
-  --- Dynamics · clean feed-forward compressor (defaults 2:1, 5/100 ms, knee 4). Meter: gain reduction
+  --- Dynamics · versatile compressor, every behaviour a knob (detector, topology, ratio curve, program-
+  --- dependent release, link, saturation, lookahead); defaults: clean feed-forward, peak, 2:1, 5/100 ms,
+  --- knee 4. The other compressors are presets of it. Meter: gain reduction
   Compressor: { new: (id: string, o: CompOptions) -> CompressorBlock },
-  --- Dynamics · FET compressor: peak, fast (defaults 4:1, 0.3/80 ms, knee 2). Meter: gain reduction
+  --- Dynamics · compressor preset FET (1176-ish): peak, feedback, fast (4:1, 0.3/80 ms, knee 2, saturation 15).
+  --- Meter: gain reduction
   FETCompressor: { new: (id: string, o: CompOptions) -> FETCompressorBlock },
-  --- Dynamics · opto compressor: RMS, program-dependent release (defaults 3:1, 10/250 ms, knee 8). Meter: gain reduction
+  --- Dynamics · compressor preset opto (LA-2A-ish): RMS 30 ms, feedback, program-dependent release (3:1,
+  --- 10/250 ms, knee 8). Meter: gain reduction
   OptoCompressor: { new: (id: string, o: CompOptions) -> OptoCompressorBlock },
+  --- Dynamics · compressor preset vari-mu (Fairchild-ish): ratio rising with level (6:1 at the top), feedback,
+  --- slow program-dependent timing (25/400 ms), soft knee 12, tube saturation 30. Meter: gain reduction
+  VariMuCompressor: { new: (id: string, o: CompOptions) -> VariMuCompressorBlock },
   --- Dynamics · slow leveler towards target dBFS within ±range dB (speed ms, default 300). Meter: gain
   Rider: { new: (id: string, o: { target: Setting?, range: Setting?, speed: Setting?, oversampling: number? }) -> RiderBlock },
-  --- Dynamics · transient shaper, dB boost/cut of attacks / sustain. Meter: gain
-  Transient: { new: (id: string, o: { attack: Setting?, sustain: Setting?, oversampling: number? }) -> TransientBlock },
+  --- Dynamics · transient shaper, dB boost/cut of attacks / sustain; lookahead ms (0..20, fixed). Meter: gain
+  Transient: { new: (id: string, o: { attack: Setting?, sustain: Setting?, lookahead: number?, oversampling: number? }) -> TransientBlock },
   --- Dynamics · lookahead peak limiter: ceiling dB (default -0.3), release ms (default 80), lookahead ms
   --- (fixed number 0..20, default 1.5; adds that much latency). Meter: gain reduction
   Limiter: { new: (id: string, o: { ceiling: Setting?, release: Setting?, lookahead: number?, oversampling: number? }?) -> LimiterBlock },
   --- Dynamics · gate / downward expander below threshold dB: ratio (default 20 ≈ gate, 2 = gentle
-  --- expander), range = max attenuation dB (default 60), attack/hold/release ms (1/20/150). Meter: attenuation
-  Gate: { new: (id: string, o: { threshold: Setting?, ratio: Setting?, range: Setting?, attack: Setting?, hold: Setting?, release: Setting?, oversampling: number? }) -> GateBlock },
+  --- expander), range = max attenuation dB (default 60), attack/hold/release ms (1/20/150), lookahead ms
+  --- (0..20, fixed: opens before the hit). Meter: attenuation
+  Gate: { new: (id: string, o: { threshold: Setting?, ratio: Setting?, range: Setting?, attack: Setting?, hold: Setting?, release: Setting?, lookahead: number?, oversampling: number? }) -> GateBlock },
   --- Dynamics · de-esser: reduces the band above freq Hz (default 6000) when it exceeds threshold dB, by
-  --- at most range dB (default 12). Meter: gain reduction
-  DeEsser: { new: (id: string, o: { freq: Setting?, threshold: Setting?, range: Setting?, oversampling: number? }) -> DeEsserBlock },
+  --- at most range dB (default 12); lookahead ms (0..20, fixed). Meter: gain reduction
+  DeEsser: { new: (id: string, o: { freq: Setting?, threshold: Setting?, range: Setting?, lookahead: number?, oversampling: number? }) -> DeEsserBlock },
 
   --- Routing · mid/side: runs `mid` and `side` (each as mono), then decodes back to L/R
   MidSide: { new: (id: string, o: { mid: Chain?, side: Chain?, oversampling: number? }) -> MidSideBlock },
   --- Routing · runs `left` and `right` on their own channel (each as mono)
   LeftRight: { new: (id: string, o: { left: Chain?, right: Chain?, oversampling: number? }) -> LeftRightBlock },
   --- Routing · Linkwitz-Riley split into #crossovers+1 bands (ascending Hz, phase-aligned, sums flat);
-  --- each band is processed by its Chain, then all are summed
-  BandSplit: { new: (id: string, o: { crossovers: { Setting }, bands: { Chain }, oversampling: number? }) -> BandSplitBlock },
+  --- each band is processed by its Chain, then all are summed. phase "linear": complementary linear-phase
+  --- bands (no phase shift between them, reconstructs exactly; ~90 ms latency)
+  BandSplit: { new: (id: string, o: { crossovers: { Setting }, bands: { Chain }, phase: Phase?, oversampling: number? }) -> BandSplitBlock },
   --- Routing · every branch gets the full signal, outputs summed; with mix (exactly 2 branches) a
   --- crossfade instead: 0 % = first, 100 % = second. Chain.new() = a dry branch
   Parallel: { new: (id: string, o: { branches: { Chain }, mix: Setting?, oversampling: number? }) -> ParallelBlock },

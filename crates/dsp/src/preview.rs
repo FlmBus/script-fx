@@ -11,7 +11,7 @@
 use patch::chain::{BlockKind, ParamRef};
 
 use crate::fx::distortion::{clip, fold, lut_at};
-use crate::{Biquad, EqShape, comp_gr, db_to_gain, drive_curve};
+use crate::{Biquad, EqShape, db_to_gain, drive_curve};
 
 /// The sample rate the responses are drawn at (shapes barely differ at others below ~15 kHz).
 const SR: f32 = 48_000.0;
@@ -64,9 +64,8 @@ pub fn transfer(kind: &BlockKind, v: &dyn Fn(&ParamRef) -> f32, x: f32) -> Optio
 /// so they're not in it.
 pub fn dynamics(kind: &BlockKind, v: &dyn Fn(&ParamRef) -> f32, level_db: f32) -> Option<f32> {
     match kind {
-        BlockKind::Compressor(c) | BlockKind::FetCompressor(c) | BlockKind::OptoCompressor(c) => {
-            let slope = 1.0 - 1.0 / v(&c.ratio).max(1.0);
-            Some(comp_gr(level_db - v(&c.threshold), slope, v(&c.knee).max(0.0)))
+        BlockKind::Compressor(c) | BlockKind::FetCompressor(c) | BlockKind::OptoCompressor(c) | BlockKind::VariMuCompressor(c) => {
+            Some(crate::fx::comp_static(level_db - v(&c.threshold), v(&c.ratio), v(&c.knee).max(0.0), (v(&c.ratio_curve) / 100.0).clamp(0.0, 1.0)))
         }
         BlockKind::Limiter { ceiling, .. } => Some((level_db - v(ceiling).min(0.0)).max(0.0)),
         _ => None,
@@ -76,13 +75,7 @@ pub fn dynamics(kind: &BlockKind, v: &dyn Fn(&ParamRef) -> f32, level_db: f32) -
 impl Biquad {
     /// |H(e^jω)| in dB at `freq`.
     fn magnitude_db(&self, freq: f32, sr: f32) -> f32 {
-        let w = std::f32::consts::TAU * freq / sr;
-        let (c1, s1) = (w.cos(), -w.sin());
-        let (c2, s2) = ((2.0 * w).cos(), -(2.0 * w).sin());
-        let num = (self.b0 + self.b1 * c1 + self.b2 * c2, self.b1 * s1 + self.b2 * s2);
-        let den = (1.0 + self.a1 * c1 + self.a2 * c2, self.a1 * s1 + self.a2 * s2);
-        let mag2 = (num.0 * num.0 + num.1 * num.1) / (den.0 * den.0 + den.1 * den.1).max(1e-20);
-        10.0 * mag2.max(1e-20).log10()
+        20.0 * self.magnitude(freq, sr).max(1e-10).log10()
     }
 }
 
@@ -96,7 +89,7 @@ mod tests {
 
     #[test]
     fn peak_eq_response_peaks_at_its_gain() {
-        let kind = BlockKind::PeakEq(patch::chain::EqSpec { freq: r(0), gain: r(1), q: r(2) });
+        let kind = BlockKind::PeakEq(patch::chain::EqSpec { freq: r(0), gain: r(1), q: r(2), phase: Default::default() });
         let vals = [1000.0, 6.0, 1.0];
         let v = |p: &ParamRef| vals[p.0];
         let db = response_db(&kind, &v, &[20.0, 1000.0, 15000.0]).unwrap();
@@ -106,7 +99,7 @@ mod tests {
 
     #[test]
     fn low_pass_is_3_db_down_at_cutoff_at_every_slope() {
-        let kind = BlockKind::LowPass(patch::chain::FilterSpec { freq: r(0), q: r(1), slope: r(2) });
+        let kind = BlockKind::LowPass(patch::chain::FilterSpec { freq: r(0), q: r(1), slope: r(2), phase: Default::default() });
         for slope in [12.0, 24.0, 36.0, 48.0] {
             let vals = [1000.0, std::f32::consts::FRAC_1_SQRT_2, slope];
             let v = |p: &ParamRef| vals[p.0];
@@ -119,7 +112,7 @@ mod tests {
 
     #[test]
     fn high_pass_resonance_peaks_at_cutoff() {
-        let kind = BlockKind::HighPass(patch::chain::FilterSpec { freq: r(0), q: r(1), slope: r(2) });
+        let kind = BlockKind::HighPass(patch::chain::FilterSpec { freq: r(0), q: r(1), slope: r(2), phase: Default::default() });
         let vals = [1000.0, 4.0, 24.0];
         let v = |p: &ParamRef| vals[p.0];
         let db = response_db(&kind, &v, &[1000.0, 10000.0]).unwrap();

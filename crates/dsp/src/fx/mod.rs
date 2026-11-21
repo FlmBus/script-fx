@@ -6,6 +6,8 @@
 
 pub(crate) mod distortion;
 mod dynamics;
+
+pub use dynamics::comp_static;
 mod filter;
 mod modulation;
 mod pitch;
@@ -73,7 +75,14 @@ pub(crate) fn build(kind: &BlockKind, a: &Args, meter: &mut usize) -> Option<Box
         K::Delay { .. } | K::Reverb(_) | K::Shimmer(_) => space::build(kind, a, meter),
         K::PitchShift { .. } | K::Granular { .. } => pitch::build(kind, a),
         K::Stutter { .. } => rhythm::build(kind, a),
-        K::Limiter { .. } | K::Gate { .. } | K::DeEsser { .. } => dynamics::build(kind, a, meter),
+        K::Limiter { .. }
+        | K::Gate { .. }
+        | K::DeEsser { .. }
+        | K::Transient { .. }
+        | K::Compressor(_)
+        | K::FetCompressor(_)
+        | K::OptoCompressor(_)
+        | K::VariMuCompressor(_) => dynamics::build(kind, a, meter),
         _ => return None,
     })
 }

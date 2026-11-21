@@ -30,6 +30,14 @@ later"); these left the top bar. The notch is now reload | snapshots only. Icons
   pointer logic tested on Neon (`stage::tests`). Not checked by hand: real wheel/Shift/right-
   click in a host (hosts may eat Escape or keystrokes). `SCRIPTFX_DEV_SHEET=entry`.
 
+## 2026-11-21 · Versatile compressor, lookahead, linear phase
+
+Blocks roadmap P1 items 2–4 (`research/blocks.md`): the compressor blocks became presets of one
+compressor with every behaviour as a knob (+ `VariMuCompressor`); `lookahead` on all dynamics
+blocks; linear-phase EQ, filters and band split (partitioned FFT convolution, `dsp/src/linear.rs`).
+Found on the way: a first "rising ratio" made the output fall at the top of the curve (the block
+page's display showed it); now the local ratio rises and the reduction is its integral.
+
 ## 2026-11-21 · Modulators, routes, drag & drop, Matrix
 
 Follow, LFO 1–3 and Step as allocation-free DSP (`dsp/src/modulators.rs`), parsed from Luau

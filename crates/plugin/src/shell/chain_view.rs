@@ -434,7 +434,7 @@ pub fn type_name(kind: &BlockKind) -> String {
             out.push(ch);
         }
     }
-    out.replace("Fet ", "FET ").replace("Dc ", "DC ").replace("De esser", "De-esser")
+    out.replace("Fet ", "FET ").replace("Dc ", "DC ").replace("De esser", "De-esser").replace("Vari mu", "Vari-mu")
 }
 
 fn hz(v: f32) -> String {

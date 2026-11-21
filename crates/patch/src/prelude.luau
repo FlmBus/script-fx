@@ -426,13 +426,26 @@ local function define(name, kind, fields, check, metered)
   Blocks[name] = strict("Blocks." .. name, B)
 end
 
-local function eq(freq) return { hz("freq", 20, 20000, freq), dB("gain", -24, 24, 0), num("")("q", 0.1, 10, 0.707) } end
+-- phase: "minimum" (default: IIR, no latency) or "linear" (FIR, no phase shift, ~90 ms latency).
+local function eq(freq) return { hz("freq", 20, 20000, freq), dB("gain", -24, 24, 0), num("")("q", 0.1, 10, 0.707), "phase:minimum|linear" } end
 local function filter(freq)
-  return { hz("freq", 20, 20000, freq), num("")("q", 0.1, 10, 0.707), num("dB/oct")("slope", 12, 48, 12, { step = 12, decimals = 0 }) }
+  return { hz("freq", 20, 20000, freq), num("")("q", 0.1, 10, 0.707), num("dB/oct")("slope", 12, 48, 12, { step = 12, decimals = 0 }),
+           "phase:minimum|linear" }
 end
-local function comp(r, a, rel, k)
-  return { dB("threshold", -60, 0, -18), ratio("ratio", 1, 20, r), ms("attack", 0.1, 200, a), ms("release", 5, 2000, rel),
-           dB("knee", 0, 24, k), dB("makeup", 0, 24, 0), "auto_makeup:boolean", pct("mix", 0, 100, 100) }
+-- One versatile compressor; the compressor blocks are its presets (`d` = the defaults).
+-- detector: 0 = peak .. 100 = RMS over `window`; feedback: 0 = feed-forward .. 100 = feedback;
+-- ratio_curve: the ratio rises with level (vari-mu); program: program-dependent release.
+local function comp(d)
+  return { dB("threshold", -60, 0, -18), num(":1", true)("ratio", 1, 100, d.ratio, { decimals = 1 }),
+           ms("attack", 0.05, 200, d.attack), ms("release", 5, 3000, d.release), dB("knee", 0, 30, d.knee),
+           dB("makeup", 0, 24, 0), "auto_makeup:boolean", pct("mix", 0, 100, 100),
+           pct("detector", 0, 100, d.detector), ms("window", 1, 300, d.window or 10), pct("feedback", 0, 100, d.feedback),
+           pct("ratio_curve", 0, 100, d.curve or 0), pct("program", 0, 100, d.program or 0), pct("link", 0, 100, 100),
+           pct("saturation", 0, 100, d.saturation or 0), "lookahead:number" }
+end
+-- Lookahead (ms) is latency: a fixed number, not a knob.
+local function check_lookahead(o)
+  if o.lookahead and (o.lookahead < 0 or o.lookahead > 20) then return "lookahead must be 0..20 ms" end
 end
 local function reverb(extra)
   local f = { pct("size", 0, 100, 50), sec("decay", 0.1, 30, 2), pct("damping", 0, 100, 50), ms("predelay", 0, 500, 0),
@@ -449,11 +462,17 @@ define("HighShelf", "high_shelf", eq(6000))
 define("LowPass", "low_pass", filter(20000))
 define("HighPass", "high_pass", filter(20))
 define("Drive", "drive", { dB("amount", 0, 36, 0), pct("mix", 0, 100, 100) })
-define("Compressor", "compressor", comp(2, 5, 100, 4), nil, true)
-define("FETCompressor", "fet_compressor", comp(4, 0.3, 80, 2), nil, true)
-define("OptoCompressor", "opto_compressor", comp(3, 10, 250, 8), nil, true)
+define("Compressor", "compressor", comp { ratio = 2, attack = 5, release = 100, knee = 4, detector = 0, feedback = 0 }, check_lookahead, true)
+define("FETCompressor", "fet_compressor",
+       comp { ratio = 4, attack = 0.3, release = 80, knee = 2, detector = 0, feedback = 100, saturation = 15 }, check_lookahead, true)
+define("OptoCompressor", "opto_compressor",
+       comp { ratio = 3, attack = 10, release = 250, knee = 8, detector = 100, window = 30, feedback = 100, program = 100 },
+       check_lookahead, true)
+define("VariMuCompressor", "vari_mu_compressor",
+       comp { ratio = 6, attack = 25, release = 400, knee = 12, detector = 60, window = 20, feedback = 100, curve = 100,
+              program = 60, saturation = 30 }, check_lookahead, true)
 define("Rider", "rider", { dB("target", -48, 0, -18), dB("range", 0, 24, 6), ms("speed", 10, 5000, 300) }, nil, true)
-define("Transient", "transient", { dB("attack", -24, 24, 0), dB("sustain", -24, 24, 0) }, nil, true)
+define("Transient", "transient", { dB("attack", -24, 24, 0), dB("sustain", -24, 24, 0), "lookahead:number" }, check_lookahead, true)
 define("Pan", "pan", { num("")("pan", -100, 100, 0, { decimals = 0 }) })
 define("Width", "width", { pct("width", 0, 200, 100) })
 define("MonoBass", "mono_bass", { hz("freq", 20, 500, 120) })
@@ -519,12 +538,12 @@ define("Stutter", "stutter", { num("")("active", 0, 1, 0, { decimals = 0 }), ms(
                                pct("mix", 0, 100, 100) })
 
 -- Dynamics
-define("Limiter", "limiter", { dB("ceiling", -24, 0, -0.3), ms("release", 1, 1000, 80), "lookahead:number" }, function(o)
-  if o.lookahead and (o.lookahead < 0 or o.lookahead > 20) then return "lookahead must be 0..20 ms" end
-end, true)
+define("Limiter", "limiter", { dB("ceiling", -24, 0, -0.3), ms("release", 1, 1000, 80), "lookahead:number" }, check_lookahead, true)
 define("Gate", "gate", { dB("threshold", -80, 0, -40), ratio("ratio", 1, 100, 20), dB("range", 0, 90, 60),
-                         ms("attack", 0.1, 100, 1), ms("hold", 0, 500, 20), ms("release", 5, 2000, 150) }, nil, true)
-define("DeEsser", "de_esser", { hz("freq", 2000, 16000, 6000), dB("threshold", -60, 0, -20), dB("range", 0, 24, 12) }, nil, true)
+                         ms("attack", 0.1, 100, 1), ms("hold", 0, 500, 20), ms("release", 5, 2000, 150), "lookahead:number" },
+       check_lookahead, true)
+define("DeEsser", "de_esser", { hz("freq", 2000, 16000, 6000), dB("threshold", -60, 0, -20), dB("range", 0, 24, 12), "lookahead:number" },
+       check_lookahead, true)
 
 -- Routing
 define("MidSide", "mid_side", { "mid:chain", "side:chain" }, function(o)
@@ -533,7 +552,7 @@ end)
 define("LeftRight", "left_right", { "left:chain", "right:chain" }, function(o)
   if not o.left and not o.right then return "needs a 'left' and/or a 'right' chain" end
 end)
-define("BandSplit", "band_split", { hz("crossovers", 20, 20000, 1000, { list = true, required = true }), "bands:chains!" }, function(o)
+define("BandSplit", "band_split", { hz("crossovers", 20, 20000, 1000, { list = true, required = true }), "bands:chains!", "phase:minimum|linear" }, function(o)
   if #o.bands ~= #o.crossovers + 1 then
     return fmt("%d crossover(s) need %d bands, got %d", #o.crossovers, #o.crossovers + 1, #o.bands)
   end
