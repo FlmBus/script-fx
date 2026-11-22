@@ -53,6 +53,19 @@ pub fn metas(patch: &Patch, param: usize) -> (Vec<Route>, Vec<knob::Meta<'_>>) {
         .unzip()
 }
 
+/// What moves these params, each source once, in route order.
+pub fn sources_of(patch: &Patch, params: &[patch::chain::ParamRef]) -> Vec<RouteSource> {
+    let mut out = Vec::new();
+    for r in params {
+        for (_, source, _) in patch.routes_to_param(r.0) {
+            if !out.contains(&source) {
+                out.push(source);
+            }
+        }
+    }
+    out
+}
+
 /// A source being dragged: from a macro's grip or a modulator tab's grip.
 #[derive(Debug, Clone, Copy)]
 pub struct SourceDrag {

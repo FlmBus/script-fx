@@ -6,7 +6,7 @@ What each file is and how current it is. The project's state and decisions are i
 | File | What | Status |
 |---|---|---|
 | [`serum-modulation.md`](serum-modulation.md) | How Serum does modulation (slots, normalized deltas, knob layers, matrix) | **Source of truth** for our modulation; partly built |
-| [`blocks.md`](blocks.md) | What blocks are for (building blocks: expose every parameter), the catalogue, what's missing for professional chains (sidechain, one versatile compressor, lookahead, linear phase, convolution, …) | **Source of truth** for the block roadmap; nothing of §4 built |
+| [`blocks.md`](blocks.md) | What blocks are for (building blocks: expose every parameter), the catalogue, what's missing for professional chains (sidechain, convolution, …) and the elementary layer (DelayLine, TransientSplit, Feedback, …) | **Source of truth** for the block roadmap; compressor, lookahead, linear phase built |
 | [`chain-editor.md`](chain-editor.md) | Concept: chain view, block pages, drawer, modulators, Matrix, knob cell (mockup session) | Reference; partly built, deviations listed at its top |
 | [`llm-adapter.md`](llm-adapter.md) | Which layer the LLM integration builds on (backends, CLI runners, patch tools) | Decided (own `Backend` layer); not built |
 | [`patch-code-and-sharing.md`](patch-code-and-sharing.md) | How much code patches get; sharing them safely (precedents, threat model) | Background for "Open directions" in STATUS |

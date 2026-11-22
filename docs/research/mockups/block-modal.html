@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ScriptFX · Block modal (zoom into the chain) · mockup</title>
+<style>
+:root{
+  --bg:#0b0b0c; --win:#18181a; --txt:#ececef; --dim:#8a8a92; --ok:#4ade80;
+  --follow:#60a5fa; --lfo1:#2dd4bf; --lfo2:#f472b6; --lfo3:#a78bfa; --step:#a3e635; --macro:#facc15;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#050506;color:var(--txt);
+  font-family:Inter,"Noto Sans",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+#stage{position:fixed;inset:0 0 70px 0;display:flex;align-items:center;justify-content:center;overflow:hidden}
+#frame{position:relative;width:1000px;height:615px;background:var(--bg);border-radius:12px;overflow:hidden;flex:none;transform-origin:center}
+
+/* top bar + library */
+#top{position:absolute;left:0;right:0;top:0;height:42px;display:flex;align-items:center;padding:0 16px;font-size:12.5px}
+#top b{font-weight:650}
+#top .r{margin-left:auto;display:flex;gap:18px;color:#9a9aa2}
+#top .r span:last-child{color:var(--txt)}
+#lib{position:absolute;left:12px;top:42px;width:186px}
+#lib h4{margin:6px 4px 10px;font-size:12px;font-weight:650}
+.pc{height:34px;border-radius:8px;margin-bottom:8px;display:flex;align-items:center;padding:0 12px;font-size:12px;border:1px solid rgba(255,255,255,.06)}
+.pc.sel{height:62px;flex-direction:column;align-items:stretch;padding:0;border-color:#4ade8099;overflow:hidden}
+.pc.sel div{flex:1;display:flex;align-items:center;padding:0 12px}
+.pc.sel div+div{background:rgba(255,255,255,.04);font-size:11.5px;color:#ddd;gap:8px}
+
+/* patch window */
+#win{position:absolute;left:206px;top:42px;width:784px;height:563px;background:var(--win);border-radius:14px;overflow:hidden}
+#viewport{position:absolute;inset:0;overflow:hidden}
+.world{position:absolute;left:0;top:0;width:784px;height:563px;transform-origin:0 0;will-change:transform,filter;
+  background-image:radial-gradient(rgba(255,255,255,.07) 1px,transparent 1.3px);background-size:18px 18px;background-position:9px 9px}
+.world.ghost{pointer-events:none;opacity:0}
+#scrim{position:absolute;inset:0;background:#08080a;opacity:0;pointer-events:none;z-index:4}
+#scrim.on{pointer-events:auto;cursor:zoom-out}
+
+/* chain */
+#chain{position:absolute;left:0;right:0;top:150px;display:flex;align-items:center;justify-content:center}
+.io{display:flex;flex-direction:column;align-items:center;gap:6px;font-size:9.5px;letter-spacing:.14em;color:#9a9aa2;font-weight:650;margin:0 2px}
+.io .port{width:10px;height:10px;border:1.5px solid #8a8a92;border-radius:50%}
+.io.in{margin-top:-16px}.io.out{margin-top:-16px}
+.wire{height:1.5px;background:#38383e;width:14px;flex:none}
+.blk{display:flex;align-items:center;gap:6px;height:28px;min-width:80px;padding:0 9px;background:#232326;border:1px solid #333338;
+  border-radius:7px;font-size:11.5px;font-weight:620;cursor:zoom-in;flex:none;transition:border-color .12s,background .12s}
+.blk:hover,.chead:hover{border-color:#62626b;background:#2a2a2e}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--ok);flex:none}
+.mods{margin-left:auto;display:flex;gap:4px;padding-left:6px}
+.mods i{width:6px;height:6px;border-radius:50%;background:var(--c)}
+.container{background:#1d1d20;border:1px solid #2e2e33;border-radius:10px;padding:5px;display:flex;flex-direction:column;gap:5px;flex:none}
+.chead{display:flex;align-items:center;gap:6px;font-size:11.5px;font-weight:620;height:24px;padding:0 8px;border-radius:6px;cursor:zoom-in;border:1px solid transparent}
+.type{color:var(--dim);font-weight:400}
+.chead .meta{margin-left:auto;font-family:ui-monospace,"Noto Sans Mono",monospace;font-size:10px;color:var(--dim);padding-left:16px}
+.slot{display:flex;align-items:center;background:#242427;border-radius:6px;padding:5px 8px;min-height:40px}
+.slabel{width:32px;font-size:10.5px;color:var(--dim);flex:none}
+.slot .fill{flex:1;height:1.5px;background:#38383e;min-width:18px}
+.slot .container{flex:1;background:#202023}
+.slot .container .slot{background:#29292d}
+
+/* notch + drawer (stay sharp, above everything) */
+#notch{position:absolute;top:0;left:229px;width:326px;height:74px;background:var(--bg);border-radius:0 0 16px 16px;z-index:6;padding:6px 8px}
+.seg{display:flex;background:#161618;border-radius:9px;padding:3px;font-size:11.5px}
+.seg span{flex:1;text-align:center;padding:4px 0;border-radius:7px;color:#cfcfd4}
+.seg span.on{background:#f2f2f4;color:#111;font-weight:650}
+.row2{display:flex;align-items:center;gap:10px;margin-top:6px;padding:0 6px;font-size:11.5px;color:#9a9aa2}
+.row2 .sel{flex:1;background:#18181b;border-radius:7px;padding:5px 9px;color:#eee;display:flex}
+.row2 .sel:after{content:"⌄";margin-left:auto;color:#888}
+#drawer{position:absolute;left:40px;right:40px;bottom:0;height:50px;background:#101012;border-radius:14px 14px 0 0;z-index:6;padding:6px 10px 0}
+#drawer .h{width:40px;height:3px;border-radius:2px;background:#3a3a40;margin:0 auto 6px}
+#drawer .tabs{display:flex;background:#19191c;border-radius:9px;height:28px;align-items:center}
+#drawer .tabs span{flex:1;text-align:center;font-size:11.5px;color:#ddd;display:flex;align-items:center;justify-content:center;gap:6px}
+.grip{display:inline-grid;grid-template-columns:repeat(2,2.5px);gap:1.5px}
+.grip i{width:2.5px;height:2.5px;border-radius:50%;background:var(--c)}
+
+/* the modal (= the block, grown) */
+#modal{position:absolute;display:none;z-index:5;overflow:hidden;border:1px solid #333338;left:0;top:0}
+.mtitle{position:absolute;left:0;top:0;transform-origin:0 0;display:flex;align-items:center;gap:8px;font-size:15px;font-weight:650;white-space:nowrap;line-height:18px;height:18px}
+.mtitle .dot{width:8px;height:8px}
+.lmods{position:absolute;right:9px;top:50%;transform:translateY(-50%);display:flex;gap:4px}
+.lmods i{width:6px;height:6px;border-radius:50%;background:var(--c)}
+.mbody{position:absolute;left:0;top:0;transform-origin:0 0}
+.mtitle .mtype{font-size:12px;font-weight:400;color:var(--dim);margin-left:2px}
+.mbody .mright{position:absolute;right:14px;top:17px;display:flex;align-items:center;gap:6px}
+.chip{display:flex;align-items:center;gap:5px;font-size:10.5px;color:#cfcfd4;background:#26262a;border-radius:20px;padding:3px 8px 3px 7px}
+.chip i{width:6px;height:6px;border-radius:50%;background:var(--c)}
+.ib{width:26px;height:26px;border-radius:7px;display:flex;align-items:center;justify-content:center;color:#b9b9c0;cursor:pointer;font-size:14px;user-select:none}
+.ib:hover{background:#2c2c31;color:#fff}
+.sep{width:1px;height:16px;background:#333338;margin:0 2px}
+.nav{position:absolute;z-index:5;width:36px;height:36px;border-radius:50%;display:none;align-items:center;justify-content:center;
+  color:#8a8a92;cursor:pointer;user-select:none;filter:drop-shadow(0 2px 8px rgba(0,0,0,.8));transition:color .12s,transform .12s}
+.nav path{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.nav:hover{color:#fff}
+#navL:hover{transform:translateX(-2px)}#navR:hover{transform:translateX(2px)}
+.nav.dis{cursor:default}
+.disp{position:absolute;background:#111113;border-radius:10px;overflow:hidden}
+.disp svg{display:block}
+.cap{position:absolute;left:12px;top:9px;font-size:10.5px;color:#8a8a92}
+.knobs{position:absolute;display:grid;gap:6px}
+.cell{width:64px;height:92px;background:rgba(255,255,255,.035);border-radius:8px;position:relative;cursor:ns-resize;user-select:none}
+.cell:hover{background:rgba(255,255,255,.055)}
+.cell svg{position:absolute;left:0;top:0}
+.cell .lbl{position:absolute;left:3px;right:3px;bottom:9px;text-align:center;font-size:10.5px;color:#9a9aa2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cell .lbl.val{color:#fff;font-family:ui-monospace,"Noto Sans Mono",monospace;font-size:10px}
+.pills{position:absolute;left:6px;right:6px;top:4px;display:flex;background:#141416;border-radius:6px;padding:2px;font-size:8.5px}
+.pills span{flex:1;text-align:center;border-radius:4px;color:#8a8a92;padding:1px 0}
+.pills span.on{background:#3a3a3f;color:#fff;font-weight:650}
+
+/* mockup controls (not part of the design) */
+#ctl{position:fixed;left:0;right:0;bottom:0;height:70px;display:flex;align-items:center;gap:22px;padding:0 22px;
+  font-size:12px;color:#9a9aa2;border-top:1px solid #1c1c20;background:#09090b;flex-wrap:wrap}
+#ctl .g{display:flex;align-items:center;gap:6px}
+#ctl button{background:#18181b;border:1px solid #2a2a2f;color:#cfcfd4;border-radius:6px;padding:4px 9px;font:inherit;cursor:pointer}
+#ctl button.on{background:#e9e9ec;color:#111;border-color:#e9e9ec}
+#ctl input[type=range]{width:160px}
+#ctl .hint{margin-left:auto;color:#6d6d75}
+</style>
+</head>
+<body>
+<div id="stage"><div id="frame">
+  <div id="top"><b>ScriptFX</b><div class="r"><span>100 %</span><span>Passive listener</span><span>💬 Chat</span></div></div>
+  <div id="lib">
+    <h4>Patches</h4>
+    <div class="pc" style="background:linear-gradient(90deg,#2a2210,#18150c);color:#f5c542;letter-spacing:.14em;font-weight:700">BASS HELPER</div>
+    <div class="pc" style="background:linear-gradient(90deg,#0f2524,#121a1a);color:#5eead4">Clean Gain</div>
+    <div class="pc sel" style="background:linear-gradient(90deg,#11261a,#141a16)"><div style="color:#86efac;font-weight:650">Drum Bus</div><div><span class="dot"></span>Init</div></div>
+    <div class="pc" style="background:linear-gradient(90deg,#2a0f22,#1a1218);color:#f472b6;font-weight:650">Neon Saturator</div>
+    <div class="pc" style="background:linear-gradient(90deg,#2a1a0f,#1a1510);color:#fb923c;font-style:italic">Tape Glow</div>
+  </div>
+
+  <div id="win">
+    <div id="viewport">
+      <div class="world" id="world">
+        <div id="chain">
+          <div class="io in">IN<span class="port"></span></div><div class="wire"></div>
+          <div class="container">
+            <div class="chead" data-block="split"><span class="dot"></span>split<span class="type">Band split</span><span class="meta">200 Hz · 3 kHz</span></div>
+            <div class="slot"><span class="slabel">high</span>
+              <div class="blk" data-block="punch"><span class="dot"></span>punch</div><div class="wire"></div>
+              <div class="blk" data-block="verb"><span class="dot"></span>verb</div><div class="wire"></div>
+              <div class="blk" data-block="tail"><span class="dot"></span>tail<span class="mods"><i style="--c:var(--follow)"></i></span></div>
+              <div class="fill"></div></div>
+            <div class="slot"><span class="slabel">mid</span>
+              <div class="container">
+                <div class="chead" data-block="midsplit"><span class="dot"></span>mid split<span class="type">Parallel</span></div>
+                <div class="slot"><span class="slabel">dry</span><div class="fill"></div></div>
+                <div class="slot"><span class="slabel">wet</span>
+                  <div class="blk" data-block="echo"><span class="dot"></span>echo<span class="mods"><i style="--c:var(--step)"></i><i style="--c:var(--lfo3)"></i></span></div><div class="wire"></div>
+                  <div class="blk" data-block="sweep"><span class="dot"></span>sweep<span class="mods"><i style="--c:var(--lfo1)"></i></span></div>
+                  <div class="fill"></div></div>
+              </div></div>
+            <div class="slot"><span class="slabel">low</span>
+              <div class="blk" data-block="glue"><span class="dot"></span>glue</div><div class="wire"></div>
+              <div class="blk" data-block="grit"><span class="dot"></span>grit<span class="mods"><i style="--c:var(--follow)"></i></span></div>
+              <div class="fill"></div></div>
+          </div>
+          <div class="wire" style="width:18px"></div>
+          <div class="blk" data-block="wide"><span class="dot"></span>wide<span class="mods"><i style="--c:var(--lfo2)"></i></span></div><div class="wire"></div>
+          <div class="blk" data-block="limit"><span class="dot"></span>limit</div><div class="wire"></div>
+          <div class="io out">OUT<span class="port"></span></div>
+        </div>
+      </div>
+      <div id="ghosts"></div>
+      <div id="scrim"></div>
+      <div id="modal"></div>
+      <div class="nav" id="navL" title="previous block (←)"><svg width="14" height="26" viewBox="0 0 14 26"><path d="M12 2 2 13l10 11"/></svg></div>
+      <div class="nav" id="navR" title="next block (→)"><svg width="14" height="26" viewBox="0 0 14 26"><path d="M2 2l10 11L2 24"/></svg></div>
+    </div>
+    <div id="notch">
+      <div class="seg"><span>Surface</span><span class="on">Chain</span><span>Matrix</span></div>
+      <div class="row2"><span>⟳ <span style="color:var(--ok)">●</span></span><span class="sel">Init</span><span>▣</span><span>▭</span><span>⚙</span></div>
+    </div>
+    <div id="drawer"><div class="h"></div><div class="tabs">
+      <span><i class="grip" style="--c:var(--follow)"><i></i><i></i><i></i><i></i><i></i><i></i></i>Follow</span>
+      <span><i class="grip" style="--c:var(--lfo1)"><i></i><i></i><i></i><i></i><i></i><i></i></i>LFO 1</span>
+      <span><i class="grip" style="--c:var(--lfo2)"><i></i><i></i><i></i><i></i><i></i><i></i></i>LFO 2</span>
+      <span><i class="grip" style="--c:var(--lfo3)"><i></i><i></i><i></i><i></i><i></i><i></i></i>LFO 3</span>
+      <span><i class="grip" style="--c:var(--step)"><i></i><i></i><i></i><i></i><i></i><i></i></i>Step</span>
+    </div></div>
+  </div>
+</div></div>
+
+<div id="ctl">
+  <div class="g">Duration <button data-dur="150">150 ms</button><button data-dur="280" class="on">280 ms</button><button data-dur="1400">slow-mo</button></div>
+  <div class="g">Zoom <button data-z="0" class="on">size ratio</button><button data-z="2.6">fixed 2.6×</button></div>
+  <div class="g">Zoom trails <button data-gh="1" class="on">on</button><button data-gh="0">off</button></div>
+  <div class="g">Scrub (echo) <input id="scrub" type="range" min="0" max="1" step="0.005" value="0"></div>
+  <div class="hint">Click a block or container header · Esc / × / click outside closes · ← → walk the chain · drag knobs</div>
+</div>
+
+<script>
+// ---------- helpers ----------
+const clamp=(x,a=0,b=1)=>Math.max(a,Math.min(b,x));
+const lerp=(a,b,t)=>a+(b-a)*t;
+const ease=t=>t<.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2;
+const hex=c=>[1,3,5].map(i=>parseInt(c.slice(i,i+2),16));
+const mix=(a,b,t)=>{const A=hex(a),B=hex(b);return `rgb(${A.map((v,i)=>Math.round(lerp(v,B[i],t))).join(',')})`};
+function rng(seed){return()=>{seed|=0;seed=seed+0x6D2B79F5|0;let t=Math.imul(seed^seed>>>15,1|seed);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+const MOD={follow:'#60a5fa',lfo1:'#2dd4bf',lfo2:'#f472b6',lfo3:'#a78bfa',step:'#a3e635'};
+const MODN={follow:'Follow',lfo1:'LFO 1',lfo2:'LFO 2',lfo3:'LFO 3',step:'Step'};
+
+// ---------- formatting ----------
+const pct=v=>Math.round(v*100)+' %';
+const hz=(lo,hi)=>v=>{const f=lo*Math.pow(hi/lo,v);return f>=1000?(f/1000).toFixed(f>=10000?1:2)+' kHz':Math.round(f)+' Hz'};
+const ms=(lo,hi)=>v=>{const x=lo*Math.pow(hi/lo,v);return x>=1000?(x/1000).toFixed(2)+' s':(x<10?x.toFixed(1):Math.round(x))+' ms'};
+const db=(lo,hi)=>v=>{const x=lerp(lo,hi,v);return (x>0?'+':'')+x.toFixed(1)+' dB'};
+const K=(l,v,o={})=>({l,v,d:v,f:pct,...o});
+
+// ---------- blocks ----------
+const B={
+  split:{name:'split',type:'Band split',disp:'bands',cap:'LR4 · 200 Hz · 3 kHz',knobs:[K('low ⁄ mid',.3,{f:hz(40,1000)}),K('mid ⁄ high',.62,{f:hz(500,12000)}),K('slope',.5,{pills:['12','24','48'],pa:1,f:v=>['12','24','48'][Math.round(v*2)]+' dB/oct'})]},
+  punch:{name:'punch',type:'Transient',disp:'transient',cap:'attack +6 dB · sustain −2 dB',knobs:[K('attack',.7,{f:db(-12,12)}),K('sustain',.42,{f:db(-12,12)}),K('mix',1),K('output',.5,{f:db(-12,12)})]},
+  verb:{name:'verb',type:'Reverb',disp:'reverb',cap:'room · 1.4 s · predelay 18 ms',knobs:[K('size',.45),K('decay',.5,{f:ms(100,10000)}),K('predelay',.3,{pills:['ms','sync'],pa:0,f:ms(0.5,200)}),K('damp',.6),K('width',.8),K('mix',.22)]},
+  tail:{name:'tail',type:'Gate',mods:['follow'],disp:'gate',cap:'−32 dB · range 40 dB',knobs:[K('threshold',.45,{mod:['follow',-.2],f:db(-80,0)}),K('attack',.15,{f:ms(.1,50)}),K('hold',.3,{f:ms(1,500)}),K('release',.4,{f:ms(5,2000)}),K('range',.6,{f:db(0,80)}),K('lookahead',.2,{f:ms(0,10)})]},
+  midsplit:{name:'mid split',type:'Parallel',disp:'parallel',cap:'dry ‖ wet: echo → sweep',knobs:[K('mix',.38),K('dry',.5,{f:db(-24,6)}),K('wet',.6,{f:db(-24,6)})]},
+  echo:{name:'echo',type:'Delay',mods:['step','lfo3'],disp:'delay',cap:'1/8 · 40 % feedback · each repeat −8 dB',knobs:[K('time',.42,{pills:['ms','sync'],pa:1,f:v=>['1/32','1/16','1/8','1/8.','1/4','1/2'][Math.round(v*5)]}),K('feedback',.42,{mod:['step',.28]}),K('mix',.5,{mod:['lfo3',.2]}),K('lo cut',.15,{f:hz(20,2000)}),K('hi cut',.7,{f:hz(1000,20000)}),K('stereo width',.6),K('duck',.3),K('wow',.2)]},
+  sweep:{name:'sweep',type:'Low pass',mods:['lfo1'],disp:'filter',cap:'24 dB/oct · LFO 1 → cutoff',knobs:[K('cutoff',.42,{mod:['lfo1',.32],f:hz(20,20000)}),K('resonance',.45),K('slope',.33,{pills:['12','24','36','48'],pa:1,f:v=>['12','24','36','48'][Math.round(v*3)]+' dB/oct'}),K('drive',.2),K('mix',1)]},
+  glue:{name:'glue',type:'Compressor',disp:'comp',cap:'−20 dB · 4:1 · GR −4.5 dB',knobs:[K('threshold',.67,{f:db(-60,0)}),K('ratio',.16,{f:v=>(1+v*19).toFixed(1)+':1'}),K('attack',.35,{f:ms(.05,200)}),K('release',.5,{f:ms(10,2000)}),K('knee',.4,{f:db(0,20)}),K('makeup',.55,{f:db(-12,12)}),K('mix',.85),K('lookahead',0,{f:ms(0,10)})]},
+  grit:{name:'grit',type:'Saturation',mods:['follow'],disp:'sat',cap:'tape · drive follows the input',knobs:[K('drive',.45,{mod:['follow',.3]}),K('tone',.5),K('bias',.3),K('mix',.7),K('output',.48,{f:db(-12,12)})]},
+  wide:{name:'wide',type:'Width',mods:['lfo2'],disp:'width',cap:'side +3 dB · mono below 120 Hz',knobs:[K('width',.6,{mod:['lfo2',.22]}),K('mono below',.35,{f:hz(20,500)}),K('mix',1)]},
+  limit:{name:'limit',type:'Limiter',disp:'limiter',cap:'ceiling −0.3 dB · GR peak −2.1 dB',knobs:[K('ceiling',.97,{f:db(-12,0)}),K('release',.35,{f:ms(1,1000)}),K('lookahead',.4,{f:ms(0,10)})]},
+};
+const ORDER=['split','punch','verb','tail','midsplit','echo','sweep','glue','grit','wide','limit'];
+
+// ---------- displays ----------
+function svg(w,h,inner){return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${inner}</svg>`}
+const G='#232327', F='#5d5d65';
+function grid(w,h,x0,y0,x1,y1,nx,ny){let s='';for(let i=0;i<=nx;i++){const x=lerp(x0,x1,i/nx);s+=`<line x1="${x}" y1="${y0}" x2="${x}" y2="${y1}" stroke="${G}"/>`}for(let i=0;i<=ny;i++){const y=lerp(y0,y1,i/ny);s+=`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="${G}"/>`}return s}
+const DISP={
+  delay(w,h){let s='';const base=h-22,top=36,n=9;s+=`<line x1="16" y1="${base}" x2="${w-16}" y2="${base}" stroke="#2c2c31"/>`;
+    for(let i=0;i<n;i++){const x=24+i*(w-48)/(n-1);s+=`<line x1="${x}" y1="${top}" x2="${x}" y2="${base}" stroke="${G}"/>`;const a=i==0?.92:.98*Math.pow(.7,i-1);const y=base-a*(base-top);s+=`<rect x="${x-2}" y="${y}" width="4" height="${base-y}" rx="2" fill="${i==0?F:'#f2f2f5'}"/>`}return s},
+  comp(w,h){const x0=30,y0=30,sz=h-48,x1=x0+sz,y1=y0+sz;const X=d=>x0+(d+60)/60*sz,Y=d=>y1-(d+60)/60*sz;
+    const out=i=>{const T=-20,R=4,Kn=8;if(i<T-Kn/2)return i;if(i>T+Kn/2)return T+(i-T)/R;const x=i-T+Kn/2;return i+(1/R-1)*x*x/(2*Kn)};
+    let s=grid(w,h,x0,y0,x1,y1,5,5)+`<line x1="${x0}" y1="${y1}" x2="${x1}" y2="${y0}" stroke="${F}" stroke-dasharray="3 4"/>`;let p='';for(let d=-60;d<=0;d+=.5)p+=(p?'L':'M')+X(d).toFixed(1)+','+Y(out(d)).toFixed(1);
+    s+=`<path d="${p}" fill="none" stroke="#f2f2f5" stroke-width="2"/><circle cx="${X(-20)}" cy="${Y(out(-20))}" r="3.5" fill="#111113" stroke="#fff" stroke-width="1.5"/>`;
+    const gx=x1+40;s+=`<rect x="${gx}" y="${y0}" width="10" height="${sz}" rx="3" fill="#1c1c20"/><rect x="${gx}" y="${y0}" width="10" height="${sz*4.5/24}" rx="3" fill="#f2f2f5"/>`+
+      `<text x="${gx+5}" y="${y1+14}" fill="#8a8a92" font-size="9.5" text-anchor="middle">GR</text>`;
+    for(const d of [0,6,12,18,24])s+=`<text x="${gx+16}" y="${y0+sz*d/24+3}" fill="#5d5d65" font-size="8.5">−${d}</text>`;return s},
+  filter(w,h){return `<g id="fgrid">${grid(w,h,16,30,w-16,h-16,9,4)}</g><rect id="fband" y="30" height="${h-46}" fill="#fff" opacity=".04"/><path id="fpath" fill="none" stroke="#f2f2f5" stroke-width="2"/><line id="fmark" y1="30" y2="${h-16}" stroke="#8a8a92" stroke-dasharray="2 3"/>`},
+  reverb(w,h){const r=rng(7),base=h-20,top=34;let s=`<line x1="16" y1="${base}" x2="${w-16}" y2="${base}" stroke="#2c2c31"/>`;
+    s+=`<rect x="20" y="${top}" width="3" height="${base-top}" rx="1.5" fill="${F}"/>`;
+    for(let i=0;i<120;i++){const x=46+i*(w-70)/120;const env=Math.exp(-i/38);const er=i<14&&i%3==0?1.2:1;const a=clamp(env*er*(.55+.45*r()));const y=base-a*(base-top)*.9;s+=`<rect x="${x}" y="${y}" width="1.6" height="${base-y}" fill="${i<14&&i%3==0?'#f2f2f5':'#b9b9c2'}" opacity="${i<14&&i%3==0?1:.75}"/>`}
+    return s+`<text x="34" y="${base+13}" fill="#5d5d65" font-size="8.5" text-anchor="middle">pre</text>`},
+  gate(w,h){const r=rng(3),base=h-18,top=32;const thr=base-.42*(base-top);let env=[],e=0;for(let i=0;i<=200;i++){if(i%50==4)e=1;e*=.955;env.push(clamp(e*(.8+.2*r())+.04*r()))}
+    let p=`M16,${base}`,open='';env.forEach((a,i)=>{const x=16+i*(w-32)/200;p+=`L${x.toFixed(1)},${(base-a*(base-top)).toFixed(1)}`});p+=`L${w-16},${base}Z`;
+    let st=-1;env.forEach((a,i)=>{const o=a>.42;if(o&&st<0)st=i;if((!o||i==200)&&st>=0){const x0=16+st*(w-32)/200,x1=16+i*(w-32)/200;open+=`<rect x="${x0}" y="${top}" width="${x1-x0+8}" height="${base-top}" fill="#fff" opacity=".05"/>`;st=-1}});
+    return open+`<path d="${p}" fill="#7a7a83" opacity=".55"/><line x1="16" x2="${w-16}" y1="${thr}" y2="${thr}" stroke="#f2f2f5" stroke-dasharray="4 4"/><text x="${w-18}" y="${thr-5}" fill="#8a8a92" font-size="9" text-anchor="end">threshold</text>`},
+  transient(w,h){const base=h-18,top=30,n=160;let pin=`M16,${base}`,pout='';for(let i=0;i<=n;i++){const t=i/n;const x=16+t*(w-32);const a=t<.06?t/.06:Math.exp(-(t-.06)*5);const b=t<.06?t/.06*1.45:(t<.16?lerp(1.45,Math.exp(-.1*5),(t-.06)/.1):Math.exp(-(t-.06)*5)*.8);
+      pin+=`L${x.toFixed(1)},${(base-a*.62*(base-top)).toFixed(1)}`;pout+=(pout?'L':'M')+x.toFixed(1)+','+(base-clamp(b/1.45)*(base-top)).toFixed(1)}
+    return `<path d="${pin}L${w-16},${base}Z" fill="#7a7a83" opacity=".45"/><path d="${pout}" fill="none" stroke="#f2f2f5" stroke-width="2"/><text x="${w-18}" y="${top+10}" fill="#8a8a92" font-size="9" text-anchor="end">in ▒  out ━</text>`},
+  sat(w,h){const x0=(w-(h-44))/2,y0=30,sz=h-44,x1=x0+sz,y1=y0+sz;let s=grid(w,h,x0,y0,x1,y1,4,4)+`<line x1="${x0}" y1="${y1}" x2="${x1}" y2="${y0}" stroke="${F}" stroke-dasharray="3 4"/>`;
+    let p='';for(let i=0;i<=100;i++){const x=i/50-1;const y=Math.tanh(2.6*x+.25)/Math.tanh(2.6);p+=(p?'L':'M')+lerp(x0,x1,i/100).toFixed(1)+','+(y1-(clamp(y,-1,1)+1)/2*sz).toFixed(1)}
+    let hb='';[1,.42,.2,.11,.06].forEach((a,i)=>{hb+=`<rect x="${x1+30+i*12}" y="${y1-a*sz*.6}" width="6" height="${a*sz*.6}" rx="2" fill="${i?'#b9b9c2':'#f2f2f5'}"/>`});
+    return s+`<path d="${p}" fill="none" stroke="#f2f2f5" stroke-width="2"/>`+hb+`<text x="${x1+54}" y="${y1+13}" fill="#5d5d65" font-size="8.5" text-anchor="middle">harmonics</text>`},
+  width(w,h){const cx=w/2,cy=h-18,R=h-46;const r=rng(11);let s=`<path d="M${cx-R},${cy} A${R},${R} 0 0 1 ${cx+R},${cy}" fill="none" stroke="#2c2c31"/>`+
+      `<line x1="${cx}" y1="${cy}" x2="${cx}" y2="${cy-R}" stroke="${G}"/><line x1="${cx}" y1="${cy}" x2="${cx-R*.707}" y2="${cy-R*.707}" stroke="${G}"/><line x1="${cx}" y1="${cy}" x2="${cx+R*.707}" y2="${cy-R*.707}" stroke="${G}"/>`+
+      `<text x="${cx}" y="${cy-R-5}" fill="#5d5d65" font-size="9" text-anchor="middle">M</text><text x="${cx-R*.74}" y="${cy-R*.74}" fill="#5d5d65" font-size="9" text-anchor="end">L</text><text x="${cx+R*.74}" y="${cy-R*.74}" fill="#5d5d65" font-size="9">R</text>`;
+    s+='<g id="wdots">';for(let i=0;i<260;i++){const a=(r()+r()+r()-1.5)*.9;const rr=Math.sqrt(r())*R*.92;s+=`<circle data-a="${a}" data-r="${rr}" r="1.2" fill="#f2f2f5" opacity="${.25+.5*r()}"/>`}return s+'</g>'},
+  limiter(w,h){const r=rng(5),mid=(h+20)/2,amp=(h-56)/2;let s=`<line x1="16" x2="${w-16}" y1="${mid}" y2="${mid}" stroke="${G}"/>`;const cl=amp*.86;
+    let gr='';for(let i=0;i<150;i++){const x=16+i*(w-32)/150;const a=(.35+.65*Math.abs(Math.sin(i*.09)))*(.6+.4*r())*amp*1.05;const c=Math.min(a,cl);s+=`<rect x="${x}" y="${mid-c}" width="1.6" height="${2*c}" fill="#8a8a92" opacity=".6"/>`;gr+=(gr?'L':'M')+x.toFixed(1)+','+(30+Math.max(0,a-cl)*.9).toFixed(1)}
+    return s+`<line x1="16" x2="${w-16}" y1="${mid-cl}" y2="${mid-cl}" stroke="#f2f2f5" stroke-dasharray="3 3"/><line x1="16" x2="${w-16}" y1="${mid+cl}" y2="${mid+cl}" stroke="#f2f2f5" stroke-dasharray="3 3"/><path d="${gr}" fill="none" stroke="#f2f2f5" stroke-width="1.6"/><text x="${w-18}" y="26" fill="#8a8a92" font-size="9" text-anchor="end">gain reduction</text>`},
+  bands(w,h){const x0=16,x1=w-16,y0=30,y1=h-18;const X=f=>lerp(x0,x1,Math.log(f/20)/Math.log(1000)),Y=d=>lerp(y0,y1,(6-d)/42);
+    const lp=(f,c)=>1/(1+Math.pow(f/c,4)),hp=(f,c)=>Math.pow(f/c,4)/(1+Math.pow(f/c,4));const bands=[f=>lp(f,200),f=>hp(f,200)*lp(f,3000),f=>hp(f,3000)];const col=['#9a9aa2','#f2f2f5','#c9c9d0'];
+    let s=grid(w,h,x0,y0,x1,y1,9,6);bands.forEach((fn,b)=>{let p='';for(let i=0;i<=200;i++){const f=20*Math.pow(1000,i/200);const d=Math.max(-36,20*Math.log10(Math.max(1e-6,fn(f))));p+=(p?'L':'M')+X(f).toFixed(1)+','+Y(d).toFixed(1)}s+=`<path d="${p}" fill="none" stroke="${col[b]}" stroke-width="2"/>`});
+    [200,3000].forEach(f=>s+=`<line x1="${X(f)}" x2="${X(f)}" y1="${y0}" y2="${y1}" stroke="#f2f2f5" stroke-dasharray="2 3" opacity=".5"/>`);
+    [['low',60],['mid',800],['high',9000]].forEach(([t,f])=>s+=`<text x="${X(f)}" y="${y0+14}" fill="#8a8a92" font-size="9.5" text-anchor="middle">${t}</text>`);return s},
+  parallel(w,h){let s='';const rows=[['dry',.62,F],['wet',.38,'#f2f2f5']];rows.forEach(([t,a,c],i)=>{const y=60+i*50;s+=`<text x="22" y="${y+4}" fill="#8a8a92" font-size="10.5">${t}</text><rect x="56" y="${y-6}" width="${w-90}" height="12" rx="6" fill="#1c1c20"/><rect x="56" y="${y-6}" width="${(w-90)*a}" height="12" rx="6" fill="${c}"/>`});
+    return s+`<g transform="translate(56,${h-44})"><rect width="58" height="22" rx="6" fill="#232326" stroke="#333338"/><text x="29" y="15" fill="#ddd" font-size="10.5" text-anchor="middle">echo</text><line x1="58" x2="72" y1="11" y2="11" stroke="#38383e"/><rect x="72" width="58" height="22" rx="6" fill="#232326" stroke="#333338"/><text x="101" y="15" fill="#ddd" font-size="10.5" text-anchor="middle">sweep</text></g>`},
+};
+
+// ---------- knob cell ----------
+const ang=v=>(-135+270*v)*Math.PI/180;
+const pt=(cx,cy,r,a)=>[cx+r*Math.sin(a),cy-r*Math.cos(a)];
+function arc(cx,cy,r,v1,v2){if(v2<v1)[v1,v2]=[v2,v1];const a1=ang(v1),a2=ang(v2),[x1,y1]=pt(cx,cy,r,a1),[x2,y2]=pt(cx,cy,r,a2);return `M${x1.toFixed(2)},${y1.toFixed(2)}A${r},${r} 0 ${a2-a1>Math.PI?1:0} 1 ${x2.toFixed(2)},${y2.toFixed(2)}`}
+function knobSVG(k){const cx=32,cy=40;let s='';
+  for(let i=0;i<11;i++){const v=i/10,a=ang(v),[x1,y1]=pt(cx,cy,14.5,a),[x2,y2]=pt(cx,cy,17.5,a);s+=`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="rgba(255,255,255,${v<=k.v+1e-6?.45:.16})" stroke-width="1.3" stroke-linecap="round"/>`}
+  if(k.mod){const [src,a]=k.mod,c=MOD[src];s+=`<path d="${arc(cx,cy,20.5,k.v,clamp(k.v+a))}" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" opacity=".9"/>`;
+    s+=`<g class="gl"><circle r="4.6" fill="${c}" opacity=".35"/><circle r="1.9" fill="#fff"/></g>`;
+    const [mx,my]=[10,10];s+=`<circle cx="${mx}" cy="${my}" r="5" fill="none" stroke="#3a3a40" stroke-width="1.6"/><path d="${(()=>{const a2=Math.abs(a)*2*Math.PI*0.999;const [x2,y2]=[mx+5*Math.sin(a2),my-5*Math.cos(a2)];return `M${mx},${my-5}A5,5 0 ${a2>Math.PI?1:0} 1 ${x2.toFixed(2)},${y2.toFixed(2)}`})()}" fill="none" stroke="${c}" stroke-width="1.6"/>`}
+  const a=ang(k.v),[px1,py1]=pt(cx,cy,3,a),[px2,py2]=pt(cx,cy,8.5,a);
+  s+=`<circle cx="${cx}" cy="${cy}" r="10" fill="#141417" stroke="#2b2b30"/><line x1="${px1}" y1="${py1}" x2="${px2}" y2="${py2}" stroke="#fff" stroke-width="2" stroke-linecap="round"/>`;
+  return `<svg width="64" height="62">${s}</svg>`}
+function cellHTML(k,i){return `<div class="cell" data-i="${i}">${knobSVG(k)}${k.pills?`<div class="pills">${k.pills.map((p,j)=>`<span class="${j==k.pa?'on':''}">${p}</span>`).join('')}</div>`:''}<div class="lbl">${k.l}</div></div>`}
+
+// modulator signals 0..1 (what plays)
+const STEPS=[.9,.2,.6,.1,1,.35,.7,.15];
+function msig(s,t){switch(s){case'follow':return Math.pow(Math.abs(Math.sin(t*2.2)),3)*.9+.05*Math.sin(t*13);case'lfo1':return .5+.5*Math.sin(t*2*Math.PI*.45);case'lfo2':return .5+.5*Math.sin(t*2*Math.PI*.22);
+  case'lfo3':{const p=(t*.6)%1;return p<.5?p*2:2-p*2}case'step':return STEPS[Math.floor(t*4)%8]}return 0}
+
+// ---------- shell refs ----------
+const frame=document.getElementById('frame'),win=document.getElementById('win'),world=document.getElementById('world'),ghostsEl=document.getElementById('ghosts'),scrim=document.getElementById('scrim'),modal=document.getElementById('modal');
+const WIN_W=784,NOTCH_B=74,DRAWER_T=563-50;
+const MODAL_W=18+300+16+(4*64+3*6)+18, MODAL_H=58+(2*92+6)+18; // 626 × 266
+let S=1,DUR=280,ZFIX=0,GHOST=true; // ZFIX 0 = zoom by size ratio
+const R={},L={},CONT={};
+function fit(){const st=document.getElementById('stage');S=Math.min((st.clientWidth-24)/1000,(st.clientHeight-24)/615);frame.style.transform=`scale(${S})`}
+// R = the node the modal grows out of (a block, or a whole container), L = where its label sits in it
+function measure(){const wr=world.getBoundingClientRect(),rel=a=>({x:(a.left-wr.left)/S,y:(a.top-wr.top)/S,w:a.width/S,h:a.height/S}),sc0=11.5/15;
+  for(const el of world.querySelectorAll('[data-block]')){const id=el.dataset.block,me=rel(el.getBoundingClientRect());
+    if(el.classList.contains('chead')){const c=rel(el.parentElement.getBoundingClientRect());R[id]=c;L[id]={x:me.x-c.x+9,y:me.y-c.y+(me.h-18*sc0)/2-1};CONT[id]=true}
+    else{R[id]=me;L[id]={x:9,y:(me.h-18*sc0)/2-1}}}}
+// the zoom factor: how much the node has to grow to become the modal (geometric mean of the
+// width and height ratios, so the areas match; aspect differences are absorbed by the box)
+function zoomOf(r,T){return ZFIX||Math.max(1.4,Math.sqrt((T.w/r.w)*(T.h/r.h)))}
+
+// ---------- modal content ----------
+let cur=null; // {id, tw, th}
+function build(id){const b=B[id],n=b.knobs.length,cols=n<=4?n:Math.min(4,Math.ceil(n/2)),rows=Math.ceil(n/cols);
+  // one fixed size for every block (fits 4×2 knobs); the display takes whatever the knobs leave
+  const tw=MODAL_W,th=MODAL_H,kw=cols*64+(cols-1)*6,kh=rows*92+(rows-1)*6,dh=th-58-18,dw=tw-18-16-kw-18;
+  const mods=(b.mods||[]);
+  modal.innerHTML=`<div class="mtitle"><span class="dot"></span><span>${b.name}</span><span class="mtype">${b.type}</span></div>
+   <div class="lmods">${mods.map(m=>`<i style="--c:${MOD[m]}"></i>`).join('')}</div>
+   <div class="mbody" style="width:${tw}px;height:${th}px">
+     <div class="mright">${mods.map(m=>`<span class="chip" style="--c:${MOD[m]}"><i></i>${MODN[m]}</span>`).join('')}${mods.length?'<span class="sep"></span>':''}
+       <span class="ib" title="bypass" style="color:var(--ok)">⏻</span><span class="ib" data-act="close" title="close (Esc)">✕</span></div>
+     <div class="disp" style="left:18px;top:58px;width:${dw}px;height:${dh}px">${svg(dw,dh,DISP[b.disp](dw,dh))}<div class="cap">${b.cap}</div></div>
+     <div class="knobs" style="left:${18+dw+16}px;top:${58+(dh-kh)/2}px;grid-template-columns:repeat(${cols},64px)">${b.knobs.map(cellHTML).join('')}</div>
+   </div>`;
+  cur={id,tw,th,dw,dh};}
+const target=c=>({x:(WIN_W-c.tw)/2,y:(NOTCH_B+DRAWER_T)/2-c.th/2+4,w:c.tw,h:c.th});
+const center=r=>[r.x+r.w/2,r.y+r.h/2];
+// camera: scale s, and the node's centre travels from where it is to the modal's centre
+function cam(r,T,e,s){const [ox,oy]=center(r),[mx,my]=center(T);return [ox+(mx-ox)*e-ox*s,oy+(my-oy)*e-oy*s]}
+// blur is given on screen; CSS blurs before the transform, so divide by the scale
+function place(el,tx,ty,s,blur){el.style.transform=`translate(${tx}px,${ty}px) scale(${s})`;el.style.filter=blur>.05?`blur(${(blur/s).toFixed(3)}px)`:'none'}
+const BLUR=7;
+// ‹ › sit outside the modal, one on each side
+const navL=document.getElementById('navL'),navR=document.getElementById('navR');
+function placeNav(cx,cy,w,o){const i=cur?ORDER.indexOf(cur.id):-1;
+  [[navL,cx-w/2-50,i>0],[navR,cx+w/2+14,i<ORDER.length-1]].forEach(([n,x,ok])=>{n.style.display='flex';n.style.left=x+'px';n.style.top=(cy-18)+'px';n.style.opacity=(ok?o:o*.25).toFixed(3);n.classList.toggle('dis',!ok);n.style.pointerEvents=o>.99&&ok?'auto':'none'})}
+function srcEl(id){return world.querySelector(`[data-block="${id}"]`)}
+
+// ghost copies = fake radial (zoom) blur
+let ghosts=[];
+function makeGhosts(){killGhosts();for(let k=0;k<4;k++){const g=world.cloneNode(true);g.removeAttribute('id');g.classList.add('ghost');ghostsEl.appendChild(g);ghosts.push(g)}}
+function killGhosts(){ghosts.forEach(g=>g.remove());ghosts=[]}
+
+// e: eased open progress of block `id` (0 = in the chain, 1 = modal)
+function renderOpen(lin,vel,dir){const id=cur.id,r=R[id],T=target(cur),e=ease(lin),Z=zoomOf(r,T);
+  // zoom is multiplicative: interpolate the scale geometrically so the zoom speed feels even
+  const s=Math.pow(Z,e),[tx,ty]=cam(r,T,e,s);place(world,tx,ty,s,BLUR*e);
+  ghosts.forEach((g,k)=>{const ek=ease(clamp(lin-dir*(k+1)*.07)),sk=Math.pow(Z,ek),[gx,gy]=cam(r,T,ek,sk);place(g,gx,gy,sk,BLUR*ek);g.style.opacity=GHOST?(.2*(1-k*.22)*vel).toFixed(3):0});
+  scrim.style.opacity=(.5*e).toFixed(3);
+  // the box IS the node under the camera (r × s), plus a correction for the aspect difference
+  const [ox,oy]=center(r),[mx,my]=center(T),cx=lerp(ox,mx,e),cy=lerp(oy,my,e),
+    w=r.w*s*lerp(1,T.w/(r.w*Z),e),h=r.h*s*lerp(1,T.h/(r.h*Z),e);
+  const ct=CONT[id],a=ct?clamp(e/.4):1; // containers: start transparent, the container itself shows through
+  Object.assign(modal.style,{display:'block',left:(cx-w/2)+'px',top:(cy-h/2)+'px',width:w+'px',height:h+'px',borderRadius:lerp(ct?10:7,16,e)+'px',
+    background:`rgba(${hex('#232326').map((v,i)=>Math.round(lerp(v,hex('#1c1c1f')[i],e))).join(',')},${a})`,borderColor:`rgba(56,56,61,${a})`,
+    boxShadow:`0 ${24*e}px ${70*e}px rgba(0,0,0,${(.6*e).toFixed(3)})`});
+  const k=Math.min(w/T.w,h/T.h),bx=(w-T.w*k)/2,by=(h-T.h*k)/2,body=modal.querySelector('.mbody');
+  body.style.transform=`translate(${bx}px,${by}px) scale(${k})`;body.style.opacity=clamp((e-.3)/.55);
+  // the node's label travels into the header title (same element), locked to the growing body;
+  const sc0=11.5/15,sc=lerp(sc0,k,e);
+  modal.querySelector('.mtitle').style.transform=`translate(${lerp(L[id].x,bx+18*k,e)}px,${lerp(L[id].y,by+22*k,e)}px) scale(${sc})`;
+  modal.querySelector('.mtitle').style.opacity=1;
+  modal.querySelector('.mtype').style.opacity=CONT[id]?1:clamp((e-.3)/.5); // containers show their type in the chain already
+  modal.querySelector('.lmods').style.opacity=clamp(1-e/.25);
+  placeNav(cx,cy,w,clamp((e-.6)/.4));}
+
+// ---------- state machine ----------
+let state='closed',lin=0,raf=0;
+function run(from,to,dur,frameFn,done){cancelAnimationFrame(raf);const t0=performance.now(),d=Math.max(1,dur*Math.abs(to-from));
+  const step=now=>{const p=Math.min(1,(now-t0)/d);frameFn(lerp(from,to,p),Math.sin(Math.PI*p),p);if(p<1)raf=requestAnimationFrame(step);else done&&done()};raf=requestAnimationFrame(step)}
+function open(id){if(state!=='closed')return;build(id);srcEl(id).style.visibility='hidden';makeGhosts();scrim.classList.add('on');state='opening';
+  run(0,1,DUR,(l,v)=>{lin=l;renderOpen(l,v,1)},()=>{killGhosts();state='open'})}
+function close(){if(state!=='open'&&state!=='opening')return;makeGhosts();state='closing';
+  run(lin,0,DUR,(l,v)=>{lin=l;renderOpen(l,v,-1)},finishClosed)}
+function finishClosed(){killGhosts();state='closed';lin=0;modal.style.display='none';navL.style.display=navR.style.display='none';scrim.classList.remove('on');scrim.style.opacity=0;place(world,0,0,1,0);
+  world.querySelectorAll('[data-block]').forEach(e=>e.style.visibility='')}
+function step(dir){if(state!=='open')return;const A=cur.id,iB=ORDER.indexOf(A)+dir;if(iB<0||iB>=ORDER.length)return;const Bid=ORDER[iB];
+  const ca={...cur},TA=target(ca);
+  // measure B without showing it yet
+  const keep=modal.innerHTML;build(Bid);const cb={...cur},TB=target(cb);const htmlB=modal.innerHTML;modal.innerHTML=keep;cur=ca;
+  // pan: the point under the modal's centre travels from A's centre to B's, the zoom goes from A's factor to B's
+  const ZA=zoomOf(R[A],TA),ZB=zoomOf(R[Bid],TB),[oax,oay]=center(R[A]),[obx,oby]=center(R[Bid]),[mx,my]=center(TA);
+  const camAt=e=>{const s=ZA*Math.pow(ZB/ZA,e),ox=lerp(oax,obx,e),oy=lerp(oay,oby,e);return [mx-ox*s,my-oy*s,s]};
+  srcEl(A).style.visibility='';srcEl(Bid).style.visibility='hidden';makeGhosts();state='panning';let swapped=false;
+  run(0,1,DUR*1.15,(l,v)=>{const e=ease(l),[tx,ty,s]=camAt(e);place(world,tx,ty,s,BLUR);
+    ghosts.forEach((g,k)=>{const [gx,gy,gs]=camAt(ease(clamp(l-(k+1)*.07)));place(g,gx,gy,gs,BLUR);g.style.opacity=GHOST?(.16*(1-k*.22)*v).toFixed(3):0});
+    const w=lerp(TA.w,TB.w,e),h=lerp(TA.h,TB.h,e);Object.assign(modal.style,{left:(mx-w/2)+'px',top:(my-h/2)+'px',width:w+'px',height:h+'px',background:'#1c1c1f',borderColor:'#38383d'});placeNav(mx,my,w,1);
+    if(l>=.5&&!swapped){modal.innerHTML=htmlB;cur=cb;swapped=true;modal.querySelector('.lmods').style.opacity=0}
+    const ph=swapped?(1-l)*2:l*2,o=1-ph,dx=(swapped?1:-1)*dir*28*ph;
+    const T=swapped?TB:TA,k=Math.min(w/T.w,h/T.h);
+    modal.querySelector('.mtitle').style.transform=`translate(${18+dx}px,22px)`;modal.querySelector('.mtitle').style.opacity=o;
+    const body=modal.querySelector('.mbody');body.style.transform=`translate(${(w-T.w*k)/2+dx}px,${(h-T.h*k)/2}px) scale(${k})`;body.style.opacity=o;
+  },()=>{killGhosts();state='open';lin=1;renderOpen(1,0,1)})}
+
+// ---------- events ----------
+world.addEventListener('click',e=>{const el=e.target.closest('[data-block]');if(el)open(el.dataset.block)});
+scrim.addEventListener('click',close);
+modal.addEventListener('click',e=>{const a=e.target.closest('[data-act]');if(!a)return;const act=a.dataset.act;if(act==='close')close();if(act==='prev')step(-1);if(act==='next')step(1)});
+addEventListener('keydown',e=>{if(e.key==='Escape')close();if(e.key==='ArrowRight')step(1);if(e.key==='ArrowLeft')step(-1)});
+// knob drag
+modal.addEventListener('pointerdown',e=>{const c=e.target.closest('.cell');if(!c||state!=='open')return;const k=B[cur.id].knobs[+c.dataset.i];const y0=e.clientY,v0=k.v;c.setPointerCapture(e.pointerId);
+  const lbl=()=>c.querySelector('.lbl');lbl().textContent=k.f(k.v);lbl().classList.add('val');
+  const mv=ev=>{k.v=clamp(v0+(y0-ev.clientY)/(160*S));c.querySelector('svg').outerHTML=knobSVG(k);if(k.pills&&k.pa!=null&&k.l.includes('slope')){}lbl().textContent=k.f(k.v)};
+  const up=()=>{c.removeEventListener('pointermove',mv);c.removeEventListener('pointerup',up);lbl().textContent=k.l;lbl().classList.remove('val')};
+  c.addEventListener('pointermove',mv);c.addEventListener('pointerup',up)});
+modal.addEventListener('dblclick',e=>{const c=e.target.closest('.cell');if(!c)return;const k=B[cur.id].knobs[+c.dataset.i];k.v=k.d;c.querySelector('svg').outerHTML=knobSVG(k)});
+// mockup controls
+document.querySelectorAll('[data-dur]').forEach(b=>b.onclick=()=>{DUR=+b.dataset.dur;document.querySelectorAll('[data-dur]').forEach(x=>x.classList.toggle('on',x===b))});
+navL.onclick=()=>step(-1);navR.onclick=()=>step(1);
+document.querySelectorAll('[data-z]').forEach(b=>b.onclick=()=>{ZFIX=+b.dataset.z;document.querySelectorAll('[data-z]').forEach(x=>x.classList.toggle('on',x===b));if(state==='open')renderOpen(1,0,1)});
+document.querySelectorAll('[data-gh]').forEach(b=>b.onclick=()=>{GHOST=b.dataset.gh==='1';document.querySelectorAll('[data-gh]').forEach(x=>x.classList.toggle('on',x===b))});
+const scrub=document.getElementById('scrub');
+scrub.addEventListener('input',()=>{cancelAnimationFrame(raf);const v=+scrub.value;
+  if(!cur||cur.id!=='echo'||state==='closed'){if(state!=='closed')finishClosed();build('echo');srcEl('echo').style.visibility='hidden';scrim.classList.add('on')}
+  if(!ghosts.length)makeGhosts();state='opening';lin=v;renderOpen(v,Math.sin(Math.PI*v),1);
+  if(v>=1){killGhosts();state='open'}if(v<=0)finishClosed()});
+window.__render=(id,v)=>{finishClosed();build(id);srcEl(id).style.visibility='hidden';scrim.classList.add('on');makeGhosts();state='opening';lin=v;renderOpen(v,Math.sin(Math.PI*v),1);if(v>=1){killGhosts();state='open'}};
+
+// ---------- live loop: modulation glare dots, filter, width ----------
+function live(now){const t=now/1000;
+  if(cur&&modal.style.display==='block'){const b=B[cur.id];
+    modal.querySelectorAll('.cell').forEach(c=>{const k=b.knobs[+c.dataset.i];if(!k.mod)return;const g=c.querySelector('.gl');if(!g)return;const vm=clamp(k.v+k.mod[1]*msig(k.mod[0],t));const [x,y]=pt(32,40,20.5,ang(vm));g.setAttribute('transform',`translate(${x.toFixed(2)},${y.toFixed(2)})`)});
+    if(b.disp==='filter'){const w=cur.dw,h=cur.dh,ck=b.knobs[0],res=b.knobs[1].v,x0=16,x1=w-16,y0=30,y1=h-16;
+      const vm=clamp(ck.v+ck.mod[1]*msig('lfo1',t)),fc=20*Math.pow(1000,vm);const X=f=>lerp(x0,x1,Math.log(f/20)/Math.log(1000)),Y=d=>lerp(y0,y1,(18-clamp(d,-48,18))/66);
+      const q1=.541,q2=1.307*(.5+res*4);let p='';for(let i=0;i<=160;i++){const f=20*Math.pow(1000,i/160),r=f/fc;const m=1/Math.sqrt((1-r*r)**2+(r/q1)**2)/Math.sqrt((1-r*r)**2+(r/q2)**2);p+=(p?'L':'M')+X(f).toFixed(1)+','+Y(20*Math.log10(m)).toFixed(1)}
+      const fp=modal.querySelector('#fpath');if(fp){fp.setAttribute('d',p);const lo=20*Math.pow(1000,ck.v),hi=20*Math.pow(1000,clamp(ck.v+ck.mod[1]));const bd=modal.querySelector('#fband');bd.setAttribute('x',X(lo));bd.setAttribute('width',X(hi)-X(lo));const mk=modal.querySelector('#fmark');mk.setAttribute('x1',X(fc));mk.setAttribute('x2',X(fc))}}
+    if(b.disp==='width'){const wv=clamp(b.knobs[0].v+b.knobs[0].mod[1]*msig('lfo2',t));const cx=cur.dw/2,cy=cur.dh-18;modal.querySelectorAll('#wdots circle').forEach(d=>{const a=+d.dataset.a*wv*1.6,r=+d.dataset.r;d.setAttribute('cx',(cx+r*Math.sin(a)).toFixed(1));d.setAttribute('cy',(cy-r*Math.cos(a)).toFixed(1))})}
+  }requestAnimationFrame(live)}
+
+fit();measure();addEventListener('resize',()=>{fit()});requestAnimationFrame(live);
+</script>
+</body>
+</html>

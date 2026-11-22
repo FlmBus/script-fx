@@ -1,4 +1,5 @@
-//! PATCH(scriptfx): a full-frame post-process pass: a radial (zoom) blur inside a rectangle.
+//! PATCH(scriptfx): a full-frame post-process pass: a radial (zoom) blur and/or a soft (disc)
+//! blur inside a rectangle.
 //!
 //! The app sets the effect for the next frames (`set`); while one is set, `Renderer::present`
 //! renders the frame into an offscreen texture and draws it to the surface through the blur.
@@ -8,9 +9,9 @@
 
 use std::sync::Mutex;
 
-/// A zoom blur towards `center`, applied inside `rect` (pixels outside it pass through; samples
-/// stay inside, so nothing from outside bleeds in). `keep`: areas inside `rect` that stay sharp
-/// (UI drawn over the zooming content; zero-sized = unused).
+/// A zoom blur towards `center` plus a soft blur of radius `soft`, applied inside `rect` (pixels
+/// outside it pass through; samples stay inside, so nothing from outside bleeds in). `keep`:
+/// areas inside `rect` that stay sharp (UI drawn over the blurred content; zero-sized = unused).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RadialBlur {
     pub center: [f32; 2],
@@ -18,15 +19,20 @@ pub struct RadialBlur {
     pub rect: [f32; 4],
     /// How far each pixel smears towards the centre, as a fraction of its distance (0 = none).
     pub amount: f32,
+    /// Radius of the soft blur in logical pixels (0 = none): the samples spread over a disc.
+    pub soft: f32,
     /// x, y, width, height each.
-    pub keep: [[f32; 4]; 3],
+    pub keep: [[f32; 4]; KEEP],
 }
+
+/// How many areas can stay sharp.
+pub const KEEP: usize = 8;
 
 static EFFECT: Mutex<Option<RadialBlur>> = Mutex::new(None);
 
 /// The effect for the coming frames (`None` = off).
 pub fn set(effect: Option<RadialBlur>) {
-    *EFFECT.lock().unwrap_or_else(|e| e.into_inner()) = effect.filter(|e| e.amount > 0.0);
+    *EFFECT.lock().unwrap_or_else(|e| e.into_inner()) = effect.filter(|e| e.amount > 0.0 || e.soft > 0.0);
 }
 
 pub(crate) fn current() -> Option<RadialBlur> {
@@ -40,16 +46,15 @@ struct Uniforms {
     rect_min: [f32; 2],
     rect_max: [f32; 2],
     size: [f32; 2],
-    keep0: [f32; 4],
-    keep1: [f32; 4],
-    keep2: [f32; 4],
+    keep: [[f32; 4]; KEEP],
     amount: f32,
-    _pad: [f32; 3],
+    soft: f32,
+    _pad: [f32; 2],
 }
 
 const SHADER: &str = r#"
 // keep: min.xy, max.xy of an area that stays sharp
-struct U { center: vec2f, rect_min: vec2f, rect_max: vec2f, size: vec2f, keep0: vec4f, keep1: vec4f, keep2: vec4f, amount: f32 };
+struct U { center: vec2f, rect_min: vec2f, rect_max: vec2f, size: vec2f, keep: array<vec4f, 8>, amount: f32, soft: f32 };
 @group(0) @binding(0) var frame: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var<uniform> u: U;
@@ -67,8 +72,10 @@ const N: i32 = 24;
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let px = pos.xy;
     let inside = all(px >= u.rect_min) && all(px <= u.rect_max);
-    let kept = (all(px >= u.keep0.xy) && all(px < u.keep0.zw)) || (all(px >= u.keep1.xy) && all(px < u.keep1.zw))
-        || (all(px >= u.keep2.xy) && all(px < u.keep2.zw));
+    var kept = false;
+    for (var k = 0; k < 8; k = k + 1) {
+        kept = kept || (all(px >= u.keep[k].xy) && all(px < u.keep[k].zw));
+    }
     if (!inside || kept) {
         return textureSampleLevel(frame, samp, px / u.size, 0.0);
     }
@@ -76,7 +83,10 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     var acc = vec4f(0.0);
     for (var i = 0; i < N; i = i + 1) {
         let f = f32(i) / f32(N - 1) * u.amount;
-        let q = clamp(px + to_center * f, u.rect_min + 0.5, u.rect_max - 0.5);
+        // soft: the samples on a golden-angle spiral filling a disc of radius `soft`
+        let a = f32(i) * 2.39996;
+        let disc = vec2f(cos(a), sin(a)) * sqrt((f32(i) + 0.5) / f32(N)) * u.soft;
+        let q = clamp(px + to_center * f + disc, u.rect_min + 0.5, u.rect_max - 0.5);
         acc = acc + textureSampleLevel(frame, samp, q / u.size, 0.0);
     }
     return acc / f32(N);
@@ -218,11 +228,10 @@ impl PostFx {
             rect_min: [x, y],
             rect_max: [x + w, y + h],
             size: [size.width as f32, size.height as f32],
-            keep0: keep(effect.keep[0]),
-            keep1: keep(effect.keep[1]),
-            keep2: keep(effect.keep[2]),
+            keep: effect.keep.map(keep),
             amount: effect.amount,
-            _pad: [0.0; 3],
+            soft: effect.soft * scale,
+            _pad: [0.0; 2],
         };
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&u));
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

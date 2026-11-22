@@ -6,8 +6,9 @@
 //! - **Dynamics** (compressors, limiter): input level → output level, −60…0 dB, plus the live
 //!   gain reduction as a bar on the right.
 //! - **Taps** (delay): the dry hit and the repeats, each as high as it's loud.
-//! - Everything else: a card that says what the block does (designs for those are still open,
-//!   `docs/research/chain-editor.md`).
+//! - Everything else: a card that says what the block does. Designs for every block type are in
+//!   `docs/research/mockups/block-displays.html` (white and grey only); building them is on the
+//!   list (`docs/STATUS.md`).
 //!
 //! The curves come from `dsp::preview`, i.e. the DSP's own formulas.
 
@@ -25,15 +26,13 @@ use nice_plug_iced::iced::{
     },
 };
 
-const WIDTH: f32 = 520.0;
-const HEIGHT: f32 = 180.0;
-
-pub fn display<'a, M: 'a>(patch: &'a Patch, values: &'a Values, block: &'a BlockSpec) -> Element<'a, M> {
+/// The display at `size` (the block modal gives it what its knobs leave).
+pub fn display<'a, M: 'a>(patch: &'a Patch, values: &'a Values, block: &'a BlockSpec, size: Size) -> Element<'a, M> {
     let Some(picture) = Picture::of(&block.kind) else {
-        return card(description(&block.kind));
+        return card(description(&block.kind), size);
     };
     let display = Display { patch, values, block, picture };
-    container(canvas::Canvas::new(display).width(Fill).height(HEIGHT)).max_width(WIDTH).style(ground).into()
+    container(canvas::Canvas::new(display).width(Fill).height(Fill)).width(size.width).height(size.height).style(ground).into()
 }
 
 // ---- which picture -----------------------------------------------------------------------------
@@ -180,7 +179,7 @@ fn dynamics(f: &mut Frame, plot: Plot, kind: &BlockKind, v: &dyn Fn(&ParamRef) -
         f.fill(&Path::rounded_rectangle(bar.position(), bar.size(), 3.0.into()), theme::alpha(theme::c().frame_ink, 0.06));
         let h = bar.height * m.clamp(0.0, 1.0);
         if h > 0.5 {
-            f.fill(&Path::rounded_rectangle(bar.position(), Size::new(bar.width, h), 3.0.into()), theme::c().led_reduce);
+            f.fill(&Path::rounded_rectangle(bar.position(), Size::new(bar.width, h), 3.0.into()), theme::c().frame_ink);
         }
         axis_label(f, &format!("GR {:.1}", m * 24.0), Point::new(bar.x + bar.width / 2.0, bar.y + bar.height + 4.0), alignment::Horizontal::Center);
     }
@@ -221,11 +220,10 @@ fn taps(f: &mut Frame, plot: Plot, kind: &BlockKind, v: &dyn Fn(&ParamRef) -> f3
 // ---- fallback card -----------------------------------------------------------------------------
 
 /// Blocks without a picture yet: what the block does, in words.
-fn card<'a, M: 'a>(description: String) -> Element<'a, M> {
+fn card<'a, M: 'a>(description: String, size: Size) -> Element<'a, M> {
     container(column![text(description).size(13).font(theme::font::SANS_MEDIUM).color(theme::c().frame_ink_2)].align_x(Center))
-        .width(Fill)
-        .max_width(WIDTH)
-        .center_y(HEIGHT)
+        .width(size.width)
+        .center_y(size.height)
         .padding(Padding::from(18))
         .align_x(Center)
         .style(ground)

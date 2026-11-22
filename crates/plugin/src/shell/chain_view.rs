@@ -7,25 +7,33 @@
 //! says it. Only the main line has wires.
 //!
 //! A block shows its LED (amber while a compressor reduces, as the signal line did) and small
-//! dots in the colours of what moves it: yellow for a macro (modulators come later).
+//! dots in the colours of what moves it: macro yellow, the modulators' colours.
 //!
 //! Every node and card gets an exact width, measured bottom-up from its text: iced can't stretch
 //! a card's slots to the widest one on its own; oversized cards scroll rather than squeeze.
 //!
-//! Clicking a block (or a container's header) opens its page; the shell zooms into the point of
-//! the click (`Event::Pointer` keeps it). A press anywhere closes what floats (the shell does that
-//! for every page).
+//! Clicking a block (or a container's header bar) opens its modal; both light up under the
+//! pointer. The shell zooms the camera into the block: every block records where it is on
+//! screen ([`rect`]) while the chain is drawn unmoved. A press anywhere closes what floats (the
+//! shell does that for every page).
+
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 use patch::chain::{BlockKind, BlockSpec, ParamRef};
-use patch::{Patch, Values};
+use patch::{Patch, RouteSource, Values};
 
-use super::{knob, theme};
+use super::{routing, theme};
 use nice_plug_iced::iced::{
-    Border, Center, Color, Element, Fill, Font, Length, Padding, Pixels, Point, Rectangle, Renderer, Size, Theme,
-    alignment,
+    Background, Border, Center, Color, Element, Event as IcedEvent, Fill, Font, Length, Padding, Pixels, Point, Rectangle, Renderer, Size, Theme,
+    Vector, alignment,
+    advanced::{
+        Clipboard, Layout, Shell, Widget, layout, overlay, renderer,
+        widget::{self as adv_widget, Tree},
+    },
     core::text::{self as core_text, Paragraph as _},
     mouse,
-    widget::{Column, Row, canvas, column, container, mouse_area, responsive, row, scrollable, space, stack, text},
+    widget::{Column, Row, canvas, column, container, responsive, row, scrollable, space, stack, text},
 };
 
 // ---- sizes -------------------------------------------------------------------------------------
@@ -33,22 +41,27 @@ use nice_plug_iced::iced::{
 /// The wire between two blocks on the main line, and inside a slot.
 const WIRE: f32 = 16.0;
 const SLOT_WIRE: f32 = 10.0;
-const NODE_HEIGHT: f32 = 30.0;
+pub const NODE_HEIGHT: f32 = 30.0;
 /// IN / OUT: the ring with its label (about as wide as "OUT").
 const TERMINAL_WIDTH: f32 = 24.0;
-const NODE_PAD: (f32, f32) = (11.0, 12.0);
+pub const NODE_PAD: (f32, f32) = (11.0, 12.0);
 const LED: f32 = 6.0;
 const GAP: f32 = 7.0;
 const SLOT_LABEL: f32 = 38.0;
 /// Room for a slot's trailing wire, and the slot's right padding.
 const SLOT_END: f32 = 16.0 + 8.0;
-const CARD_PAD: f32 = 6.0;
+pub const CARD_PAD: f32 = 6.0;
 /// Room above the chain for the notch.
 const NOTCH_CLEARANCE: f32 = 84.0;
 /// Room below the chain for the collapsed drawer, which hangs into the window.
 const DRAWER_CLEARANCE: f32 = theme::SIZE_DRAWER_BAR + 16.0;
 
-const NAME: f32 = 12.5;
+/// The card's header bar (the container's button).
+const CARD_HEADER: f32 = 22.0;
+const DOT_GAP: f32 = 4.0;
+
+/// The block name's size in a node (the modal's title grows from it).
+pub const NAME: f32 = 12.5;
 const TYPE: f32 = 11.5;
 const SETTINGS: f32 = 10.5;
 const EMPTY: &str = "empty · passes through";
@@ -56,21 +69,21 @@ const EMPTY: &str = "empty · passes through";
 /// What the chain view asks of the shell.
 #[derive(Debug, Clone)]
 pub enum Event {
-    /// Open this block's page.
+    /// Open this block's modal.
     Open(String),
-    /// The pointer moved, in the view's coordinates (where a zoom would start).
-    Pointer(Point),
 }
 
-pub fn view<'a>(patch: &'a Patch, values: &'a Values) -> Element<'a, Event> {
+/// `record`: note where every block is ([`rect`]); only while the chain is drawn unmoved (no
+/// camera on it), so the rectangles are the ones the user sees and clicks.
+pub fn view<'a>(patch: &'a Patch, values: &'a Values, record: bool) -> Element<'a, Event> {
     // The rows depend on the width: lay out inside `responsive`.
-    let content = responsive(move |size| snake(Cx { patch, values }, size.width));
+    let content = responsive(move |size| snake(Cx { patch, values, record }, size.width));
     let ground = container(canvas(Dots).width(Fill).height(Fill)).style(|_: &Theme| container::Style {
         background: Some(theme::c().frame_raised.into()),
         border: Border { radius: theme::radius(theme::RADIUS_WINDOW), ..Default::default() },
         ..Default::default()
     });
-    mouse_area(stack![ground, content].width(Fill).height(Fill)).on_move(Event::Pointer).into()
+    Mark { content: stack![ground, content].width(Fill).height(Fill).into(), kind: MarkKind::Root, record }.into()
 }
 
 // ---- the snake ---------------------------------------------------------------------------------
@@ -140,6 +153,7 @@ fn snake<'a>(cx: Cx<'a>, width: f32) -> Element<'a, Event> {
 
     // Centred while it fits; a card wider than the window scrolls.
     let padded = container(rows).padding(Padding { left: SIDE_PAD, right: SIDE_PAD, top: NOTCH_CLEARANCE, bottom: DRAWER_CLEARANCE });
+    let padded = Mark { content: padded.into(), kind: MarkKind::Scrolled, record: cx.record };
     let scroll = scrollable(padded)
         .direction(scrollable::Direction::Both { vertical: thin(), horizontal: thin() })
         .style(theme::frame_hscrollbar);
@@ -249,6 +263,7 @@ mod tests {
 struct Cx<'a> {
     patch: &'a Patch,
     values: &'a Values,
+    record: bool,
 }
 
 impl<'a> Cx<'a> {
@@ -264,9 +279,10 @@ impl<'a> Cx<'a> {
     fn node(self, b: &'a BlockSpec) -> (Element<'a, Event>, f32) {
         let mut r = row![led(self.led(b)), text(&b.id).size(NAME).font(theme::font::SANS_MEDIUM).color(theme::c().frame_ink)].spacing(GAP).align_y(Center);
         let mut width = NODE_PAD.0 + LED + GAP + measure(&b.id, NAME, theme::font::SANS_MEDIUM) + NODE_PAD.1;
-        if self.moved_by_macro(b) {
-            r = r.push(dot(knob::MACRO, LED));
-            width += GAP + LED;
+        let (dots, w) = self.dots(b);
+        if let Some(dots) = dots {
+            r = r.push(dots);
+            width += GAP + w;
         }
         let width = width.ceil();
         let node = container(r)
@@ -275,7 +291,7 @@ impl<'a> Cx<'a> {
             .padding(Padding { left: NODE_PAD.0, right: NODE_PAD.1, ..Padding::ZERO })
             .align_y(Center)
             .style(node_style);
-        (open(node, &b.id), width)
+        (self.mark(node, &b.id, None), width)
     }
 
     /// Header (LED, id, type, settings), then one row per slot; as wide as its widest part.
@@ -289,9 +305,10 @@ impl<'a> Cx<'a> {
         ]
         .spacing(GAP)
         .align_y(Center);
-        if self.moved_by_macro(b) {
-            header = header.push(dot(knob::MACRO, LED));
-            header_width += GAP + LED;
+        let (dots, w) = self.dots(b);
+        if let Some(dots) = dots {
+            header = header.push(dots);
+            header_width += GAP + w;
         }
         header = header.push(space::horizontal().width(Fill).height(1));
         if let Some(s) = self.settings(&b.kind) {
@@ -303,9 +320,10 @@ impl<'a> Cx<'a> {
         let inner = slots.iter().map(|(_, w)| *w).fold(header_width, f32::max);
         let width = (inner + 2.0 * CARD_PAD + 2.0).ceil();
 
-        // The header opens the container's own page (crossovers, mix); the slots hold its blocks.
-        let header = container(header).height(22).padding(Padding { left: 4.0, right: 4.0, ..Padding::ZERO });
-        let mut col = Column::new().spacing(4).push(open(header, &b.id));
+        // The header bar opens the container's own modal (crossovers, mix); the slots hold its
+        // blocks. The whole card is what the camera zooms into.
+        let header = container(header).height(CARD_HEADER).padding(Padding { left: 4.0, right: 4.0, ..Padding::ZERO });
+        let mut col = Column::new().spacing(4).push(header);
         for (slot, _) in slots {
             col = col.push(slot);
         }
@@ -314,7 +332,25 @@ impl<'a> Cx<'a> {
             border: Border { radius: theme::radius(12.0), width: 1.0, color: theme::c().frame_hairline_strong },
             ..Default::default()
         });
-        (card.into(), width)
+        (self.mark(card, &b.id, Some(CARD_HEADER)), width)
+    }
+
+    /// Clickable, lights up under the pointer, records where it is; `header`: only the card's
+    /// header bar (this tall) is the button.
+    fn mark(self, content: impl Into<Element<'a, Event>>, id: &str, header: Option<f32>) -> Element<'a, Event> {
+        Mark { content: content.into(), kind: MarkKind::Block { id: id.to_string(), header }, record: self.record }.into()
+    }
+
+    /// A dot per source that moves the block (macro yellow, the modulators' colours); with the
+    /// row's width.
+    fn dots(self, b: &BlockSpec) -> (Option<Element<'a, Event>>, f32) {
+        let sources = sources(self.patch, b);
+        if sources.is_empty() {
+            return (None, 0.0);
+        }
+        let n = sources.len() as f32;
+        let row = Row::with_children(sources.into_iter().map(|s| dot(routing::colour(s), LED))).spacing(DOT_GAP);
+        (Some(row.into()), n * LED + (n - 1.0) * DOT_GAP)
     }
 
     /// A slot: its label, its blocks on a wire that runs to the card's edge; with its least width.
@@ -345,19 +381,8 @@ impl<'a> Cx<'a> {
         (slot.into(), width)
     }
 
-    /// Amber while the block's meter is away from idle (a compressor reducing), else green.
     fn led(self, b: &BlockSpec) -> Color {
-        let Some(idle) = b.kind.idle_meter() else { return theme::c().led_ok };
-        let v = self.patch.meters.iter().position(|m| *m == b.id).and_then(|i| self.values.blocks.get(i)).copied();
-        match v {
-            Some(v) if (v - idle).abs() > 1.0 / 24.0 && !matches!(b.kind, BlockKind::Meter) => theme::c().led_reduce,
-            _ => theme::c().led_ok,
-        }
-    }
-
-    /// Does one of the block's own knobs follow a macro?
-    fn moved_by_macro(self, b: &BlockSpec) -> bool {
-        b.params.iter().any(|r| self.patch.is_modulated(r.0))
+        led_colour(self.patch, self.values, b)
     }
 
     /// A container's settings for its header: crossovers ("200 Hz · 3 kHz"), mix.
@@ -378,6 +403,28 @@ impl<'a> Cx<'a> {
     fn show(self, r: ParamRef) -> String {
         self.patch.params[r.0].display(self.values.params.get(r.0).copied().unwrap_or(0.0))
     }
+}
+
+/// The block's LED: amber while its meter is away from idle (a compressor reducing), else green.
+pub fn led_colour(patch: &Patch, values: &Values, b: &BlockSpec) -> Color {
+    let Some(idle) = b.kind.idle_meter() else { return theme::c().led_ok };
+    let v = patch.meters.iter().position(|m| *m == b.id).and_then(|i| values.blocks.get(i)).copied();
+    match v {
+        Some(v) if (v - idle).abs() > 1.0 / 24.0 && !matches!(b.kind, BlockKind::Meter) => theme::c().led_reduce,
+        _ => theme::c().led_ok,
+    }
+}
+
+/// What moves the block's own knobs, each source once: macros (by slot), then the modulators in
+/// their tab order.
+pub fn sources(patch: &Patch, b: &BlockSpec) -> Vec<RouteSource> {
+    let mut out: Vec<RouteSource> = b.params.iter().flat_map(|r| patch.routes_to_param(r.0)).map(|(_, s, _)| s).collect();
+    out.sort_by_key(|s| match s {
+        RouteSource::Macro(slot) => *slot,
+        RouteSource::Modulator(id) => 1000 + id.index(),
+    });
+    out.dedup();
+    out
 }
 
 /// A container's slots, top to bottom, with their labels. `None` for plain blocks.
@@ -465,11 +512,6 @@ fn measure(s: &str, size: f32, font: Font) -> f32 {
 
 // ---- pieces ------------------------------------------------------------------------------------
 
-/// Clickable: opens the block's page.
-fn open<'a>(content: impl Into<Element<'a, Event>>, id: &str) -> Element<'a, Event> {
-    mouse_area(content).on_press(Event::Open(id.to_string())).interaction(mouse::Interaction::Pointer).into()
-}
-
 fn node_style(_: &Theme) -> container::Style {
     container::Style {
         background: Some(theme::c().frame_node.into()),
@@ -532,5 +574,181 @@ impl<M> canvas::Program<M> for Dots {
             y += STEP;
         }
         vec![f.into_geometry()]
+    }
+}
+
+// ---- where blocks are, and their buttons ----------------------------------------------------------
+
+/// Where the blocks were last drawn unmoved (`view(.., record: true)`).
+#[derive(Default)]
+struct Registry {
+    /// The chain view's top-left (window coordinates).
+    origin: Point,
+    /// How far the content is scrolled.
+    scrolled: Vector,
+    blocks: HashMap<String, Rectangle>,
+}
+
+thread_local! {
+    static REGISTRY: RefCell<Registry> = RefCell::new(Registry::default());
+}
+
+/// Where block `id` is on screen, relative to the chain view's top-left (a container: its whole
+/// card). `None` until the chain has been drawn with it.
+pub fn rect(id: &str) -> Option<Rectangle> {
+    REGISTRY.with_borrow(|r| {
+        let b = r.blocks.get(id)?;
+        Some(Rectangle { x: b.x - r.scrolled.x - r.origin.x, y: b.y - r.scrolled.y - r.origin.y, ..*b })
+    })
+}
+
+enum MarkKind {
+    /// The whole view: its top-left.
+    Root,
+    /// The scrolled content: how far it's scrolled.
+    Scrolled,
+    /// A block (or a container's card, `header` = the height of its header bar).
+    Block { id: String, header: Option<f32> },
+}
+
+/// Wraps a part of the chain view: records where it is, and for blocks is the button.
+struct Mark<'a> {
+    content: Element<'a, Event>,
+    kind: MarkKind,
+    record: bool,
+}
+
+impl Mark<'_> {
+    /// The button's area: the node, or the card's header bar.
+    fn zone(&self, bounds: Rectangle) -> Option<Rectangle> {
+        match &self.kind {
+            MarkKind::Block { header: None, .. } => Some(bounds),
+            MarkKind::Block { header: Some(h), .. } => {
+                let inset = CARD_PAD + 1.0;
+                Some(Rectangle { x: bounds.x + inset, y: bounds.y + inset, width: bounds.width - 2.0 * inset, height: *h })
+            }
+            _ => None,
+        }
+    }
+}
+
+impl Widget<Event, Theme, Renderer> for Mark<'_> {
+    fn tag(&self) -> adv_widget::tree::Tag {
+        self.content.as_widget().tag()
+    }
+
+    fn state(&self) -> adv_widget::tree::State {
+        self.content.as_widget().state()
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        self.content.as_widget().children()
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        self.content.as_widget().diff(tree);
+    }
+
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+
+    fn size_hint(&self) -> Size<Length> {
+        self.content.as_widget().size_hint()
+    }
+
+    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) -> layout::Node {
+        self.content.as_widget_mut().layout(tree, renderer, limits)
+    }
+
+    fn operate(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &Renderer, operation: &mut dyn adv_widget::Operation) {
+        self.content.as_widget_mut().operate(tree, layout, renderer, operation);
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &IcedEvent,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Event>,
+        viewport: &Rectangle,
+    ) {
+        // Blocks inside a card take their press first.
+        self.content.as_widget_mut().update(tree, event, layout, cursor, renderer, clipboard, shell, viewport);
+        if let IcedEvent::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event
+            && !shell.is_event_captured()
+            && let MarkKind::Block { id, .. } = &self.kind
+            && self.zone(layout.bounds()).is_some_and(|z| cursor.is_over(z))
+        {
+            shell.publish(Event::Open(id.clone()));
+            shell.capture_event();
+        }
+    }
+
+    fn mouse_interaction(&self, tree: &Tree, layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle, renderer: &Renderer) -> mouse::Interaction {
+        let inner = self.content.as_widget().mouse_interaction(tree, layout, cursor, viewport, renderer);
+        if inner == mouse::Interaction::default() && self.zone(layout.bounds()).is_some_and(|z| cursor.is_over(z)) {
+            mouse::Interaction::Pointer
+        } else {
+            inner
+        }
+    }
+
+    fn draw(&self, tree: &Tree, renderer: &mut Renderer, theme: &Theme, style: &renderer::Style, layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle) {
+        let bounds = layout.bounds();
+        if self.record {
+            REGISTRY.with_borrow_mut(|r| match &self.kind {
+                MarkKind::Root => {
+                    r.origin = bounds.position();
+                    r.blocks.clear();
+                }
+                // Inside the scrollable, the viewport is the visible part in content coordinates.
+                MarkKind::Scrolled => r.scrolled = Vector::new(viewport.x - bounds.x, viewport.y - bounds.y).max(Vector::ZERO),
+                MarkKind::Block { id, .. } => {
+                    r.blocks.insert(id.clone(), bounds);
+                }
+            });
+        }
+        // A card's header bar lights up behind its text; a node gets a light veil over it.
+        let zone = self.zone(bounds).filter(|z| cursor.is_over(*z));
+        if let (Some(z), MarkKind::Block { header: Some(_), .. }) = (zone, &self.kind) {
+            self.content.as_widget().draw(tree, renderer, theme, style, layout, cursor, viewport);
+            renderer.fill_quad(
+                renderer::Quad { bounds: z, border: Border { radius: theme::radius(6.0), ..Default::default() }, ..Default::default() },
+                Background::Color(theme::alpha(theme::c().frame_ink, 0.06)),
+            );
+            return;
+        }
+        self.content.as_widget().draw(tree, renderer, theme, style, layout, cursor, viewport);
+        if let Some(z) = zone {
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: z,
+                    border: Border { radius: theme::radius(theme::RADIUS_BUTTON), width: 1.0, color: theme::alpha(theme::c().frame_ink, 0.22) },
+                    ..Default::default()
+                },
+                Background::Color(theme::alpha(theme::c().frame_ink, 0.04)),
+            );
+        }
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'b>,
+        renderer: &Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, Event, Theme, Renderer>> {
+        self.content.as_widget_mut().overlay(tree, layout, renderer, viewport, translation)
+    }
+}
+
+impl<'a> From<Mark<'a>> for Element<'a, Event> {
+    fn from(m: Mark<'a>) -> Self {
+        Element::new(m)
     }
 }

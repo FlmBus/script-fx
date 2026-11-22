@@ -14,14 +14,16 @@ marked `PATCH(scriptfx)`.
 
 ## 2. Post-process pass (`src/postfx.rs`, `src/lib.rs`)
 
-- `iced_wgpu::postfx::set(Some(RadialBlur { center, rect, amount, keep }))` turns on a zoom blur
-  for the coming frames (logical coordinates); `set(None)` turns it off. The shell uses it for the
-  chain ↔ block page transition (150 ms).
+- `iced_wgpu::postfx::set(Some(RadialBlur { center, rect, amount, soft, keep }))` turns on a zoom
+  blur and/or a soft (disc) blur for the coming frames (logical coordinates); `set(None)` turns it
+  off. The shell uses it for the chain ↔ block modal transition (zoom blur while it moves) and
+  behind the open modal (soft blur).
 - While an effect is set, `Renderer::present` draws the frame into an offscreen texture (same
   size and format as the surface, made on first use, remade on resize) and from there through a
-  fullscreen WGSL pass into the surface: inside `rect`, 24 samples towards `center` (clamped into
-  `rect`, so nothing from outside bleeds in); `keep` areas (UI over the zooming content) and
-  everything outside `rect` pass through.
+  fullscreen WGSL pass into the surface: inside `rect`, 24 samples towards `center`, each spread
+  on a golden-angle spiral over a disc of radius `soft` (clamped into `rect`, so nothing from
+  outside bleeds in); up to eight `keep` areas (UI over the blurred content) and everything outside
+  `rect` pass through.
 - Without an effect, `present` is unchanged (no offscreen pass).
 - Why here: iced can't render a widget subtree to a texture, and the baseview shell doesn't
   support window screenshots, so a full-frame pass in the renderer is the only place for it.

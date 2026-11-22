@@ -1,7 +1,8 @@
-//! A widget that draws its content scaled around a point, clipped to its own bounds, in normal
-//! draw order (iced's `Float` only scales up and moves the content into the overlay layer, above
-//! the notch and the sheets). Used by the chain ↔ block page transition; while scaled, the
-//! content gets no input.
+//! A widget that draws its content scaled around a point and then moved (a camera), clipped to
+//! its own bounds, in normal draw order (iced's `Float` only scales up and moves the content into
+//! the overlay layer, above the notch and the sheets). Used by the chain ↔ block modal
+//! transition: the chain zooms into a block, the modal's content grows out of it. While moved or
+//! scaled, the content gets no input.
 
 use nice_plug_iced::iced::{
     Element, Length, Point, Rectangle, Size, Transformation, Vector,
@@ -18,16 +19,24 @@ pub struct Zoom<'a, M, Theme, Renderer> {
     scale: f32,
     /// The fixed point, relative to the widget's top-left.
     origin: Point,
+    /// Where the fixed point moves to, after scaling.
+    offset: Vector,
 }
 
 /// `content` scaled by `scale` around `origin` (relative to the widget).
 pub fn zoom<'a, M, Theme, Renderer>(content: impl Into<Element<'a, M, Theme, Renderer>>, scale: f32, origin: Point) -> Zoom<'a, M, Theme, Renderer> {
-    Zoom { content: content.into(), scale, origin }
+    Zoom { content: content.into(), scale, origin, offset: Vector::ZERO }
 }
 
-impl<M, Theme, Renderer: renderer::Renderer> Zoom<'_, M, Theme, Renderer> {
+impl<'a, M, Theme, Renderer: renderer::Renderer> Zoom<'a, M, Theme, Renderer> {
+    /// Then moved by `offset`: the content point at `origin` lands at `origin + offset`.
+    pub fn offset(mut self, offset: Vector) -> Self {
+        self.offset = offset;
+        self
+    }
+
     fn still(&self) -> bool {
-        (self.scale - 1.0).abs() < 1e-4
+        (self.scale - 1.0).abs() < 1e-4 && self.offset.x.abs() < 1e-3 && self.offset.y.abs() < 1e-3
     }
 }
 
@@ -91,13 +100,15 @@ impl<M, Theme, Renderer: renderer::Renderer> Widget<M, Theme, Renderer> for Zoom
         }
         let bounds = layout.bounds();
         let o = Vector::new(bounds.x + self.origin.x, bounds.y + self.origin.y);
-        let t = Transformation::translate(o.x, o.y) * Transformation::scale(self.scale) * Transformation::translate(-o.x, -o.y);
+        let t = Transformation::translate(o.x + self.offset.x, o.y + self.offset.y)
+            * Transformation::scale(self.scale)
+            * Transformation::translate(-o.x, -o.y);
         // The content as it is laid out, seen through the transformation; the viewport is what
-        // of it lands inside our bounds.
-        let inverse = 1.0 / self.scale;
+        // of it lands inside our bounds (screen = o + offset + (content − o) · scale).
+        let inverse = 1.0 / self.scale.max(1e-4);
         let seen = Rectangle {
-            x: o.x + (bounds.x - o.x) * inverse,
-            y: o.y + (bounds.y - o.y) * inverse,
+            x: o.x + (bounds.x - o.x - self.offset.x) * inverse,
+            y: o.y + (bounds.y - o.y - self.offset.y) * inverse,
             width: bounds.width * inverse,
             height: bounds.height * inverse,
         };

@@ -21,7 +21,8 @@ vendor/baseview      patched baseview (X11 frame pacing, app resize), see vendor
 vendor/iced_wgpu     patched iced_wgpu (frame timing, post-process pass for the zoom blur), see vendor/iced_wgpu/PATCHES.md
 spikes/shell-iced    the shell spike (throwaway, own workspace)
 patches/             factory patches: tape-glow, clean-gain, bass-helper (band split, live block meters),
-                     neon-saturator, junkyard-amp (component UI stress/fire tests)
+                     neon-saturator, junkyard-amp (component UI stress/fire tests), kitchen-sink (every
+                     block, every modulator, 12 macros; no ControlPanel)
 patches/.types       Luau type definitions (scriptfx.d.luau) → type checking + autocomplete; doubles as API spec for an LLM
 ```
 

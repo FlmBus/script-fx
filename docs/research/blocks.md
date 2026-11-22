@@ -39,7 +39,7 @@ plugins:
 | Reverb? Delay? | **Yes.** `Reverb` (8-line FDN: size, decay, damping, predelay, width, freeze), `Shimmer`, `Delay` (time or sync, feedback, ping-pong, `feedback_chain`) | Missing: convolution (impulse responses), algorithm variants (plate, room, hall, spring), reverb modulation and early-reflection control, delay ducking, multi-tap, reverse |
 | Could users model a vari-mu? | **Only roughly** at the time (**built since:** `VariMuCompressor`, a preset of the versatile compressor). `Compressor` with a wide knee (24 dB) gives a ratio that rises with level, `OptoCompressor` has program-dependent release, `Drive` before/after adds tube-ish saturation | A vari-mu's character: ratio that keeps rising with gain reduction (no fixed ratio), feedback topology, slow program-dependent attack *and* release, tube saturation and its asymmetry. Needs the compressor parameters in §4; then a vari-mu is a preset |
 
-## 3. The catalogue (2026-11-21, 50 blocks)
+## 3. The catalogue (2026-11-21, 51 blocks)
 
 | Category | Blocks |
 |---|---|
@@ -47,7 +47,7 @@ plugins:
 | EQ | PeakEq, LowShelf, HighShelf |
 | Filter | LowPass, HighPass (slope 12–48), MorphFilter (SVF LP/BP/HP), LadderFilter, CombFilter, Formant, Resonator, DynamicEq |
 | Distortion | Drive, Waveshaper (custom curve), Wavefolder, Clipper, Rectifier, Bitcrusher, RingMod, Tape |
-| Dynamics | Compressor, FETCompressor, OptoCompressor, Rider, Transient, Limiter, Gate, DeEsser |
+| Dynamics | Compressor, FETCompressor, OptoCompressor, VariMuCompressor (presets of one compressor), Rider, Transient, Limiter, Gate, DeEsser |
 | Modulation | Chorus, Flanger, Phaser, Tremolo, AutoPan |
 | Space | Delay, Reverb, Shimmer |
 | Pitch | PitchShift, Granular |
@@ -55,7 +55,7 @@ plugins:
 | Routing | MidSide, LeftRight, BandSplit, Parallel |
 
 Every block also takes `oversampling` (1, 2, 4, 8). Plus, outside the chain: macros and the
-modulators (Follow, LFO 1–3, Step).
+modulators (Follow, LFO 1–3, Step). `patches/kitchen-sink` uses every block, every modulator.
 
 ## 4. What's missing for professional chains
 
@@ -133,9 +133,62 @@ true; P2 = expected by producers; P3 = nice to have.
 
 - **P2 · Sample delay** (time alignment), **phase rotation**, auto-gain / gain matching (loudness
   in = out), per-band solo in `BandSplit` (for building, not for patches).
-- **P3 · Feedback routing** between chains; crossfades with more than two branches.
+- **P3 · Feedback routing** between chains; crossfades with more than two branches. (Now the
+  `Feedback` container in §5.)
 
-## 5. Consequences for the engine
+## 5. The elementary layer
+
+_Added 2026-11-21 (Flemming asked whether we need more technical, basic blocks)._ §4 is mostly big
+"pro" blocks. Just as important is the layer below: small, generic pieces that let a patch (or the
+LLM) build what we never made a block for. A modular system is only as good as its primitives;
+each of these multiplies what the existing blocks can do.
+
+### Primitives
+
+- **DelayLine:** a short delay (0–50 ms), interpolated, no feedback, no mix. With a modulator on
+  `time` it is vibrato, chorus, flanger or doppler; fixed, it is time alignment (also covers the
+  "sample delay" of §4). `Delay` is an echo; `Chorus`/`Flanger` are sealed. The interpolated
+  delay line exists (`fx::Line`).
+- **AllPass / PhaseRotate:** shifts phase, not level (frequency, order). Phase alignment between
+  tracks or bands, taming asymmetric peaks before a limiter, a building block for phasers and
+  diffusion. The biquad shape exists internally (`EqShape::AllPass`).
+- **Noise:** white or pink at a level, optionally shaped by the input's envelope (gated or
+  breathing): tape hiss, vinyl, transient enhancement, dither.
+- **Oscillator:** sine (and the LFO shapes) at a frequency, optionally tracking the input's pitch:
+  sub-bass reinforcement, test tones, ring-mod carriers that follow the note.
+- **Slew:** limits how fast the signal changes (rise / fall per ms): softens edges, a smoother
+  rectifier or crusher, a simple one-pole smoother on anything.
+
+### Routing containers
+
+- **Feedback { chain, amount, delay }:** feeds a chain's output back into its input (the delay
+  ≥ one block, with an optional limiter in the loop). Today only `Delay` has a feedback loop
+  (`feedback_chain`). Opens resonators, Karplus-style plucks, custom reverbs, feedback
+  distortion.
+- **TransientSplit { attack, sustain }:** splits into transient and sustain parts (the
+  `Transient` block's fast/slow detector), runs each through its own chain, sums them (they
+  reconstruct exactly with the chains empty). Saturate only attacks, reverb only tails. The
+  dynamic counterpart to `BandSplit` / `MidSide`: very strong for mixing.
+- **LevelSplit { loud, quiet }:** the same by level (threshold, knee): upward compression,
+  saturation that only hits loud passages, a gate's "below" branch as its own chain.
+- **Mono / Swap:** sum to mono, swap L/R, take one channel. Small utilities; `LeftRight` with
+  gains does it today, clumsily.
+
+### Escape hatch
+
+- **Convolution** (an impulse response from the patch folder; P2 in §4) belongs here too: any
+  measured filter, cabinet, room or hardware EQ becomes a block, more than any single DSP block
+  covers. The partitioned FFT engine exists (`dsp/src/linear.rs`).
+- **Not planned: an audio script / expression block.** Lua must never run on the audio thread; the
+  `Waveshaper`'s curve (sampled at load) is the safe version of "custom code".
+
+### Order
+
+First **DelayLine**, **TransientSplit**, **Feedback**: they multiply the most and are each small
+on what exists (delay line, transient detector, latency alignment of sub-chains). Then AllPass,
+Noise, Slew; Oscillator with pitch tracking needs a pitch detector (shared with §4's pitch items).
+
+## 6. Consequences for the engine
 
 - **Latency** already sums over the chain and goes to the host; lookahead and linear phase add to
   it. A patch's latency should show in the shell (block page and chain view).

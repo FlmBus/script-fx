@@ -72,8 +72,8 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
    panels to surfaces throughout the API (`ui.Panel`), code and docs (decided, Flemming).
 3. **Block pages:** displays for the remaining blocks; more input types (switches, choices).
 4. **Blocks for professional chains** ([`research/blocks.md`](research/blocks.md) §4): next the
-   sidechain (an internal detector chain on dynamics blocks, then an external key input), then
-   the P2 list. Block pages need groups and choices for the bigger blocks (the compressor has 14
+   sidechain (an internal detector chain on dynamics blocks, then an external key input), the
+   elementary layer (§5: DelayLine, TransientSplit, Feedback first), then the P2 list. Block pages need groups and choices for the bigger blocks (the compressor has 14
    knobs; `phase` and `lookahead` aren't shown on the page yet).
 5. **Hands-on check in Reaper and Carla**: everything above plus knob drag/double-click on all
    panels, chat typing (Enter/Shift+Enter, selection, clipboard, dead keys), Listen, UI scale
@@ -210,7 +210,10 @@ loads only safe data and shows a generic UI. See the research for the threat mod
 - **Serum-matched design mockup** (Flemming, 2026-11-21: todo). Come up with a design that tightly
   matches Serum's, as a mockup first (like the chain-editor mockup artifact): the drawer's
   modulator panels (LFO shape editor with grid and playhead, envelope/step views), source drag
-  handles, meta knobs and range arcs on knobs, the Matrix. Reference:
+  handles, meta knobs and range arcs on knobs, the Matrix. First draft (2026-11-21): claude.ai
+  canvas "ScriptFX Serum-style Modulation Mockup" (https://claude.ai/artifact/P6CjCAgVKgyp1QLbN2DqQA,
+  private): block page + LFO shape editor, drag to assign, Matrix with aux/curve/inspector, knob
+  anatomy, modulator panels. Reference:
   [`research/serum-modulation.md`](research/serum-modulation.md); pairs with the editable LFO
   shape (backlog "DSP / chain").
 - **Chain editor: more input types for block/modulator params** (Flemming, 2026-11-19). The
