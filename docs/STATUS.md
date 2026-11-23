@@ -6,14 +6,22 @@ Concepts, research and measurements: [`research/`](research/)._
 
 ## Current state
 
-The chain editor is on `main`: Surface and Chain views, block pages, the macro rail, the
+The chain editor is on `main`: Surface and Chain views, block modals, the macro rail, the
 modulators (Follow, LFO 1–3, Step) with their drawer panels, Serum-style routes with drag & drop
 onto knobs, and the Matrix (every route, add/remove). See
 [`research/chain-editor.md`](research/chain-editor.md) for the design and remaining deviations.
 Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in a real host.
 
 - **Surface** shows the patch's ControlPanel, or a themed macro surface when it has none.
-  **Chain** shows the block tree; block pages have knob cells and DSP-based previews for some blocks.
+  **Chain** shows the block tree; clicking a block (or a container's header bar, both light up on
+  hover) opens its **modal** (2026-11-23, mockup `research/mockups/block-modal.html`): the camera
+  flies into the block, zooming by the size ratio of block and modal (~8× for a block, ≥ 1.4× for
+  a container; scale runs geometrically, 280 ms ease-in-out, `shell/motion.rs`), the block grows into
+  the fixed 626 × 266 modal and its label into the title; zoom blur while moving, a soft blur
+  (`postfx` `soft`) behind the open modal. ‹ › beside the modal and ← → walk the chain (the camera
+  pans; order = processing order, so a band split's low band comes first). ✕, Escape or a click
+  beside it zoom back out. Knob cells and DSP-based displays for some blocks; the display takes the
+  width the knobs leave, more than eight knobs scroll.
 - **Modulation**: two kinds of route, macro slots (`Patch::modulations`) and modulator
   assignments (`Patch::assignments`), one model for the shell (`patch::routes`: `Route`,
   `RouteSource`, add/remove). Normalized deltas sum onto the knob's base. Drag a macro's grip (the
@@ -29,8 +37,8 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
   plays) with a dot, Step's bars with the playing step lit. Only Follow is a live trace. A trace
   sampled once per UI frame aliases any LFO above a few Hz into noise (2026-11-21).
 - **Layers:** a page press closes the library, sheets, the drawer, the entry and menus; the macro
-  rail stays (drag a macro onto a knob, then turn it). The drawer opens to 180 px and block pages
-  lift their knobs above it. The chain ↔ page zoom blur keeps the notch, the drawer (at its
+  rail stays (drag a macro onto a knob, then turn it). The drawer opens to 180 px and the block
+  modal moves up above it. The chain ↔ modal blur keeps the notch, the drawer (at its
   current height) and the rail sharp (`postfx` has three keep rects).
 - **Rates:** LFO and Step have `Hz | sync` (pills on the Rate knob; `sync = "1/8"` in Luau, a note
   length overriding `rate_hz`). Block rates (`sync` on Chorus, Delay, …) are still patch-only.
@@ -70,7 +78,15 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
    round trip (save project, reopen) of routes and modulator edits.
 2. **Surface naming:** the macro fallback already appears for patches without a panel. Rename
    panels to surfaces throughout the API (`ui.Panel`), code and docs (decided, Flemming).
-3. **Block pages:** displays for the remaining blocks; more input types (switches, choices).
+3. **Block modals:** build the displays designed in
+   [`research/mockups/block-displays.html`](research/mockups/block-displays.html), in the order of
+   [`research/block-displays.md`](research/block-displays.md) (steps 1 and 2 done: the `dsp::preview`
+   ones restyled, every block drawable from its knobs has a display; next live data through
+   subscribed taps: Gain, Width, Granular, Stutter, DC block still show a card); knob groups as pages and choices
+   (same doc, §3). Walking the chain must take rapid clicks on ‹ › (and
+   repeated ← →): today a click is ignored until the running pan has finished; queue it or retarget the
+   pan from where it is. Not yet checked:
+   light mode, UI scale ≠ 100 %, a scrolled chain.
 4. **Blocks for professional chains** ([`research/blocks.md`](research/blocks.md) §4): next the
    sidechain (an internal detector chain on dynamics blocks, then an external key input), the
    elementary layer (§5: DelayLine, TransientSplit, Feedback first), then the P2 list. Block pages need groups and choices for the bigger blocks (the compressor has 14
@@ -112,7 +128,7 @@ patches, informed by an analysis of the actual audio on the track (and the mix).
 | **Surface** | the first view: the ControlPanel, or the macro surface (the macros as knobs) | `shell/surface.rs` |
 | **Component** | one visual part of a ControlPanel; each instance is a cached layer | `Component.define`, `X.new {}` |
 | **Chain / Block** | DSP description / one **building block**: the unit patches build professional effect chains from, so it exposes every parameter it can ([`research/blocks.md`](research/blocks.md)) (`Chain.new`, `Blocks.<Type>.new(id, {...})`) | `patch::chain`, `BlockSpec` |
-| **Chain view / Block page** | the view of the chain's tree / one block's page (display + knobs) | `shell/chain_view.rs`, `shell/block_page.rs` |
+| **Chain view / Block modal** | the view of the chain's tree / one block's modal (display + knobs), zoomed into from its node | `shell/chain_view.rs`, `shell/block_modal.rs`, `shell/motion.rs` |
 | **Graph** | compiled chain running on the audio thread | `dsp::Graph` |
 | **Param** | a block's knob; has a base value (saved with the project) | `ParamSpec` |
 | **Macro** | host-automatable control of a patch, drives 1..n params | `MacroSpec` |

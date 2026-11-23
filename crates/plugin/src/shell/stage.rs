@@ -315,7 +315,8 @@ pub fn view<'a>(panel: &'a Panel, bg: Color) -> Element<'a, Pointer> {
 
 // ---- rounded window corners ---------------------------------------------------------------------
 
-fn corners<'a, M: 'a>() -> Element<'a, M> {
+/// The window's rounded corners: frame-coloured masks over content that doesn't round itself.
+pub(super) fn corners<'a, M: 'a>() -> Element<'a, M> {
     canvas(Corners).width(Fill).height(Fill).into()
 }
 

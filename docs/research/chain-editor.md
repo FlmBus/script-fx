@@ -23,6 +23,11 @@ Related: [`../STATUS.md`](../STATUS.md) ("Open directions", decision "Patch kind
 >   to five, then "+N"); the cursor hides and the pointer stays locked while dragging.
 > - **Matrix:** one row per route (macro slots and assignments), remove per row, an add row
 >   (source → destination pick lists). No filtering yet.
+> - **Block page → block modal (2026-11-23):** a fixed 626 × 266 modal over the blurred chain
+>   instead of a page; the camera zooms into the block by the size ratio, the block grows into the
+>   modal, ‹ › beside it walk the chain. Mockups: [`mockups/block-modal.html`](mockups/block-modal.html)
+>   (the motion), [`mockups/block-displays.html`](mockups/block-displays.html) (a display per block
+>   type). §4's "page" text and E1/E2 below are the older design.
 > - Build order (§10): steps 1–5 done; glow/dots on targets and blocks, Matrix filtering and
 >   step 6 remain open.
 

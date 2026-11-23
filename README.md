@@ -66,7 +66,7 @@ analyses a WAV from the command line.
 | `SCRIPTFX_DEV_PATCH=<folder>` | a fresh instance loads this patch instead of starting empty |
 | `SCRIPTFX_DEV_VIEW=chain` | start in the chain view |
 | `SCRIPTFX_DEV_SHEET=chat\|controls\|settings\|library\|drawer\|entry` | open it at start |
-| `SCRIPTFX_DEV_ZOOM_MS=2000` | slow down the chain → block page zoom to look at it |
+| `SCRIPTFX_DEV_ZOOM_MS=2000` | slow down the chain → block modal zoom (default 280 ms) to look at it |
 | `SCRIPTFX_DEV_RESCALE=1.5` | set the UI scale 1 s after opening |
 | `SCRIPTFX_DEV_AUTOLISTEN=10` | start a 10 s listen when the editor opens |
 | `SCRIPTFX_DEV_STATS=1` | fps, render CPU, GPU time, panel stats |

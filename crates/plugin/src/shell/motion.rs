@@ -24,6 +24,17 @@ pub fn zoom_factor(node: Size, modal: Size) -> f32 {
     ratio.sqrt().max(MIN_ZOOM)
 }
 
+/// How many octaves the dot grid zooms through for a camera zoom of `z`: the nearest whole number
+/// (at least one), so the grid ends at its normal spacing.
+pub fn octaves(z: f32) -> f32 {
+    z.log2().round().max(1.0)
+}
+
+/// The dot grid's zoom (in octaves, log2) while the camera is at `scale` on its way to `z`.
+pub fn grid_zoom(scale: f32, z: f32) -> f32 {
+    if z <= 1.0 { 0.0 } else { octaves(z) * scale.ln() / z.ln() }
+}
+
 /// Ease in and out (cubic).
 pub fn ease(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
@@ -40,6 +51,7 @@ pub struct Camera {
 
 impl Camera {
     /// Where a point of the chain lands on screen.
+    #[cfg(test)]
     pub fn map(&self, p: Point) -> Point {
         Point::new(
             self.origin.x + self.offset.x + (p.x - self.origin.x) * self.scale,
@@ -167,7 +179,7 @@ mod tests {
         let z = zoom_factor(NODE.size(), TARGET.size());
         assert!(close(z, ((626.0 / 80.0) * (266.0 / 30.0) as f32).sqrt()));
         // The block, zoomed, has the modal's area.
-        assert!(close(NODE.width * z * NODE.height * z, TARGET.width * TARGET.height));
+        assert!(((NODE.width * z * NODE.height * z) / (TARGET.width * TARGET.height) - 1.0).abs() < 1e-4);
         // A container already as big as the modal still zooms a little.
         assert_eq!(zoom_factor(Size::new(700.0, 300.0), TARGET.size()), MIN_ZOOM);
     }

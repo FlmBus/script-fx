@@ -18,6 +18,8 @@
 //! shell does that for every page).
 
 use std::cell::RefCell;
+
+use nice_plug_iced::iced::advanced::Renderer as _;
 use std::collections::HashMap;
 
 use patch::chain::{BlockKind, BlockSpec, ParamRef};
@@ -73,17 +75,20 @@ pub enum Event {
     Open(String),
 }
 
+/// `hidden`: blocks not drawn (a block modal stands in for them; they still record where they are).
 /// `record`: note where every block is ([`rect`]); only while the chain is drawn unmoved (no
 /// camera on it), so the rectangles are the ones the user sees and clicks.
-pub fn view<'a>(patch: &'a Patch, values: &'a Values, record: bool) -> Element<'a, Event> {
+/// `ground`: with the editor's ground (off under a block modal, which draws its own).
+pub fn view<'a>(patch: &'a Patch, values: &'a Values, record: bool, hidden: [Option<&'a str>; 2], ground: bool) -> Element<'a, Event> {
     // The rows depend on the width: lay out inside `responsive`.
-    let content = responsive(move |size| snake(Cx { patch, values, record }, size.width));
-    let ground = container(canvas(Dots).width(Fill).height(Fill)).style(|_: &Theme| container::Style {
+    let content = responsive(move |size| snake(Cx { patch, values, record, hidden }, size.width));
+    let ground_layer = container(dots(1.0).height(Fill)).style(|_: &Theme| container::Style {
         background: Some(theme::c().frame_raised.into()),
         border: Border { radius: theme::radius(theme::RADIUS_WINDOW), ..Default::default() },
         ..Default::default()
     });
-    Mark { content: stack![ground, content].width(Fill).height(Fill).into(), kind: MarkKind::Root, record }.into()
+    let layers = if ground { stack![ground_layer, content] } else { stack![content] };
+    Mark { content: layers.width(Fill).height(Fill).into(), kind: MarkKind::Root, record, hidden: false }.into()
 }
 
 // ---- the snake ---------------------------------------------------------------------------------
@@ -153,7 +158,7 @@ fn snake<'a>(cx: Cx<'a>, width: f32) -> Element<'a, Event> {
 
     // Centred while it fits; a card wider than the window scrolls.
     let padded = container(rows).padding(Padding { left: SIDE_PAD, right: SIDE_PAD, top: NOTCH_CLEARANCE, bottom: DRAWER_CLEARANCE });
-    let padded = Mark { content: padded.into(), kind: MarkKind::Scrolled, record: cx.record };
+    let padded = Mark { content: padded.into(), kind: MarkKind::Scrolled, record: cx.record, hidden: false };
     let scroll = scrollable(padded)
         .direction(scrollable::Direction::Both { vertical: thin(), horizontal: thin() })
         .style(theme::frame_hscrollbar);
@@ -264,6 +269,7 @@ struct Cx<'a> {
     patch: &'a Patch,
     values: &'a Values,
     record: bool,
+    hidden: [Option<&'a str>; 2],
 }
 
 impl<'a> Cx<'a> {
@@ -338,7 +344,7 @@ impl<'a> Cx<'a> {
     /// Clickable, lights up under the pointer, records where it is; `header`: only the card's
     /// header bar (this tall) is the button.
     fn mark(self, content: impl Into<Element<'a, Event>>, id: &str, header: Option<f32>) -> Element<'a, Event> {
-        Mark { content: content.into(), kind: MarkKind::Block { id: id.to_string(), header }, record: self.record }.into()
+        Mark { content: content.into(), kind: MarkKind::Block { id: id.to_string(), header }, record: self.record, hidden: self.hidden.contains(&Some(id)) }.into()
     }
 
     /// A dot per source that moves the block (macro yellow, the modulators' colours); with the
@@ -412,6 +418,21 @@ pub fn led_colour(patch: &Patch, values: &Values, b: &BlockSpec) -> Color {
     match v {
         Some(v) if (v - idle).abs() > 1.0 / 24.0 && !matches!(b.kind, BlockKind::Meter) => theme::c().led_reduce,
         _ => theme::c().led_ok,
+    }
+}
+
+/// Containers show as cards (the camera zooms into the whole card).
+pub fn is_container(kind: &BlockKind) -> bool {
+    slots(kind).is_some()
+}
+
+/// Where a block's label (LED, id) starts inside it, for a label `height` tall: in a node, after
+/// its padding; in a card, in the header bar.
+pub fn label_offset(container: bool, height: f32) -> Vector {
+    if container {
+        Vector::new(1.0 + CARD_PAD + 4.0, 1.0 + CARD_PAD + (CARD_HEADER - height) / 2.0)
+    } else {
+        Vector::new(NODE_PAD.0, (NODE_HEIGHT - height) / 2.0)
     }
 }
 
@@ -554,16 +575,75 @@ fn terminal<'a>(label: &'a str) -> Element<'a, Event> {
     .into()
 }
 
-/// The ground: a faint dot grid.
-struct Dots;
+/// The dot grid's spacing; its first dot sits at half of it.
+pub const DOT_STEP: f32 = 18.0;
+
+/// The editor's ground: a faint dot grid (`alpha` 1 = as on the chain view). The block modal
+/// has it too.
+pub fn dots<'a, M: 'a>(alpha: f32) -> canvas::Canvas<Dots, M> {
+    canvas(Dots(alpha)).width(Fill).height(Fill)
+}
+
+pub struct Dots(f32);
+
+/// The ground's dot grid zooming endlessly: `zoom` octaves (log2) with the grid point `(9, 9)` of the
+/// unzoomed view at `anchor`. As the dots spread apart, new ones fade in between them; at a whole
+/// number of octaves it is the normal grid again.
+pub fn zoom_dots<'a, M: 'a>(anchor: Point, zoom: f32) -> canvas::Canvas<ZoomDots, M> {
+    canvas(ZoomDots { anchor, zoom }).width(Fill).height(Fill)
+}
+
+pub struct ZoomDots {
+    anchor: Point,
+    zoom: f32,
+}
+
+impl<M> canvas::Program<M> for ZoomDots {
+    type State = ();
+
+    fn draw(&self, _: &(), renderer: &Renderer, _: &Theme, bounds: Rectangle, _: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let f = self.zoom - self.zoom.floor();
+        let step = DOT_STEP * 2f32.powf(f);
+        let colour = theme::alpha(theme::c().frame_ink, 0.07);
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        // The grid at `step`, plus the one at half of it fading in (where it adds dots).
+        for (st, coarse_too, alpha) in [(step, true, 1.0), (step / 2.0, false, f)] {
+            if alpha <= 0.01 {
+                continue;
+            }
+            let c = theme::alpha(colour, colour.a * alpha);
+            let (i0, j0) = (((0.0 - self.anchor.x) / st).floor() as i64, ((0.0 - self.anchor.y) / st).floor() as i64);
+            let mut j = j0;
+            loop {
+                let y = self.anchor.y + j as f32 * st;
+                if y > bounds.height {
+                    break;
+                }
+                let mut i = i0;
+                loop {
+                    let x = self.anchor.x + i as f32 * st;
+                    if x > bounds.width {
+                        break;
+                    }
+                    if coarse_too || i % 2 != 0 || j % 2 != 0 {
+                        frame.fill_rectangle(Point::new(x, y), Size::new(1.2, 1.2), c);
+                    }
+                    i += 1;
+                }
+                j += 1;
+            }
+        }
+        vec![frame.into_geometry()]
+    }
+}
 
 impl<M> canvas::Program<M> for Dots {
     type State = ();
 
     fn draw(&self, _: &(), renderer: &Renderer, _: &Theme, bounds: Rectangle, _: mouse::Cursor) -> Vec<canvas::Geometry> {
-        const STEP: f32 = 18.0;
+        const STEP: f32 = DOT_STEP;
         let mut f = canvas::Frame::new(renderer, bounds.size());
-        let colour = theme::alpha(theme::c().frame_ink, 0.07);
+        let colour = theme::alpha(theme::c().frame_ink, 0.07 * self.0);
         let mut y = STEP / 2.0;
         while y < bounds.height {
             let mut x = STEP / 2.0;
@@ -616,6 +696,8 @@ struct Mark<'a> {
     content: Element<'a, Event>,
     kind: MarkKind,
     record: bool,
+    /// Not drawn (it still records where it is).
+    hidden: bool,
 }
 
 impl Mark<'_> {
@@ -706,11 +788,14 @@ impl Widget<Event, Theme, Renderer> for Mark<'_> {
                     r.blocks.clear();
                 }
                 // Inside the scrollable, the viewport is the visible part in content coordinates.
-                MarkKind::Scrolled => r.scrolled = Vector::new(viewport.x - bounds.x, viewport.y - bounds.y).max(Vector::ZERO),
+                MarkKind::Scrolled => r.scrolled = Vector::new((viewport.x - bounds.x).max(0.0), (viewport.y - bounds.y).max(0.0)),
                 MarkKind::Block { id, .. } => {
                     r.blocks.insert(id.clone(), bounds);
                 }
             });
+        }
+        if self.hidden {
+            return;
         }
         // A card's header bar lights up behind its text; a node gets a light veil over it.
         let zone = self.zone(bounds).filter(|z| cursor.is_over(*z));

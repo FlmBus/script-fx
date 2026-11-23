@@ -12,7 +12,7 @@
 //! - `chain_view`   the audio tree (notch: Chain), in place of the ControlPanel
 //! - `matrix`       every modulation route as a table, add/remove (notch: Matrix)
 //! - `routing`      how routes look (source names, colours, meta knobs) and the source drag
-//! - `block_page`   a block's page (click a block in the chain; `zoom` + the renderer's blur)
+//! - `block_modal`  a block's modal (click a block in the chain; `motion` + `zoom` + the renderer's blur)
 //! - `chat`         the chat sheet (Listen lives here)
 //! - `controls`     the controls sheet (macros, params, patch settings)
 //! - `settings`     the settings sheet (theme, interface size, passive mode)
@@ -31,7 +31,7 @@
 pub mod theme;
 
 mod block_display;
-mod block_page;
+mod block_modal;
 mod brand;
 mod chain_view;
 mod chat;
@@ -46,6 +46,7 @@ mod library;
 mod macro_rail;
 mod matrix;
 mod meta_menu;
+mod motion;
 mod notch;
 mod pointer_lock;
 mod routing;
@@ -154,12 +155,10 @@ pub struct Shell {
     meta_menu: Option<meta_menu::MetaMenu>,
     /// What the patch window shows (the notch's view switch).
     view: notch::View,
-    /// The open block page (block id) in the chain view.
+    /// The open block modal (block id) in the chain view.
     page: Option<String>,
-    /// The chain ↔ block page transition while it runs.
-    zoom: Option<Zoom>,
-    /// The pointer over the chain view (where a zoom starts).
-    chain_pointer: iced::Point,
+    /// The chain ↔ modal transition (or a walk along the chain) while it runs.
+    motion: Option<motion::Motion>,
     drawer: drawer::Drawer,
     /// The Matrix's add row (the source picked).
     matrix: matrix::Matrix,
@@ -189,7 +188,7 @@ pub enum Message {
     Notch(notch::Message),
     Matrix(matrix::Message),
     Chain(chain_view::Event),
-    Page(block_page::Message),
+    Page(block_modal::Message),
     Drawer(drawer::Message),
     Chat(chat::Message),
     Controls(controls::Message),
@@ -231,8 +230,7 @@ impl Shell {
             dragging: false,
             view: notch::View::Surface,
             page: None,
-            zoom: None,
-            chain_pointer: iced::Point::ORIGIN,
+            motion: None,
             drawer: drawer::Drawer::new(),
             matrix: matrix::Matrix::default(),
             source_drag: None,
@@ -277,6 +275,23 @@ impl Shell {
                 }
                 _ => None,
             }),
+            // ← → walk the chain while a block's modal is open (not while a text field has them).
+            if self.page.is_some() {
+                iced::event::listen_with(|event, status, _| {
+                    use iced::keyboard::{Event::KeyPressed, Key::Named, key::Named::*};
+                    match (event, status) {
+                        (iced::Event::Keyboard(KeyPressed { key: Named(ArrowLeft), .. }), iced::event::Status::Ignored) => {
+                            Some(Message::Page(block_modal::Message::Walk(false)))
+                        }
+                        (iced::Event::Keyboard(KeyPressed { key: Named(ArrowRight), .. }), iced::event::Status::Ignored) => {
+                            Some(Message::Page(block_modal::Message::Walk(true)))
+                        }
+                        _ => None,
+                    }
+                })
+            } else {
+                Subscription::none()
+            },
             // Only while a source is dragged: every pointer move re-renders the chip.
             if self.source_drag.is_some() {
                 iced::event::listen_with(|event, _, _| match event {
@@ -347,7 +362,7 @@ impl Shell {
                 }
                 self.session.tick(ctx, &params, &shared);
                 self.drawer.tick(&self.session.values.modulators, &self.session.values.modulator_phases);
-                self.zoom_tick();
+                self.modal_tick();
                 if let Some(result) = self.listen.poll(&shared) {
                     self.chat.capture_done(result);
                     self.open_sheet(Some(Sheet::Chat));
@@ -455,20 +470,17 @@ impl Shell {
                     }
                 }
             }
-            Message::Chain(chain_view::Event::Pointer(p)) => self.chain_pointer = p,
             Message::Chain(chain_view::Event::Open(id)) => {
-                if self.zoom.is_none() {
+                if self.page.is_none() {
                     self.dismiss();
+                    self.now = Instant::now();
                     self.page = Some(id);
-                    self.start_zoom(true);
+                    self.motion = Some(motion::Motion::new(motion::Kind::Open, self.now));
                 }
             }
-            Message::Page(block_page::Message::Back) => {
-                if self.zoom.is_none() {
-                    self.start_zoom(false);
-                }
-            }
-            Message::Page(block_page::Message::Knob(i, e)) => self.param_knob(i, e, &params, &shared),
+            Message::Page(block_modal::Message::Close) => self.close_modal(),
+            Message::Page(block_modal::Message::Walk(forward)) => self.walk(forward),
+            Message::Page(block_modal::Message::Knob(i, e)) => self.param_knob(i, e, &params, &shared),
             Message::Entry(entry::Message::Edit(text)) => {
                 if let Some(e) = &mut self.entry {
                     e.text = text;
@@ -489,14 +501,14 @@ impl Shell {
             Message::MetaMenu(meta_menu::Message::OpenMatrix) => self.set_view(notch::View::Matrix),
             Message::Escape => {
                 if self.entry.take().is_none() && self.meta_menu.take().is_none() {
-                    // Closes what floats first; with nothing open, leaves a block page.
+                    // Closes what floats first; with nothing open, closes a block's modal.
                     let open = self.library_open || self.macros_open || self.sheet.is_some() || self.drawer.is_open();
                     self.set_library(false);
                     self.set_macros(false);
                     self.open_sheet(None);
                     self.close_drawer();
-                    if !open && self.page.is_some() && self.zoom.is_none() {
-                        self.start_zoom(false);
+                    if !open {
+                        self.close_modal();
                     }
                 }
             }
@@ -510,7 +522,8 @@ impl Shell {
         self.meta_menu = None;
         self.entry = None;
         self.page = None;
-        self.end_zoom();
+        self.motion = None;
+        iced_wgpu::postfx::set(None);
         if view == notch::View::Matrix {
             self.close_drawer();
         }
@@ -609,49 +622,181 @@ impl Shell {
         }
     }
 
-    // ---- block page transition ------------------------------------------------------------
+    // ---- the block modal ----------------------------------------------------------------------
 
-    /// Starts the zoom into the open page (`inward`) or back out to the chain, at the pointer.
-    fn start_zoom(&mut self, inward: bool) {
-        self.now = Instant::now();
-        let origin = self.zoom.as_ref().map_or(self.chain_pointer, |z| z.origin);
-        self.zoom = Some(Zoom { inward, origin, start: self.now });
-    }
-
-    /// Every frame: the renderer's blur follows the transition; at its end the page closes (when
-    /// zooming out) and the blur goes off.
-    fn zoom_tick(&mut self) {
-        let Some(z) = &self.zoom else { return };
-        let t = z.progress(self.now);
-        if t >= 1.0 {
-            if !z.inward {
-                self.page = None;
-            }
-            self.end_zoom();
+    /// Back to the chain: from where an opening is now, or from the open modal.
+    fn close_modal(&mut self) {
+        if self.page.is_none() {
             return;
         }
-        let (w, h) = theme::stage_size();
-        let (x, y) = (theme::SPACE_GUTTER, theme::SIZE_TOP_BAR + theme::SPACE_GUTTER);
-        iced_wgpu::postfx::set(Some(iced_wgpu::postfx::RadialBlur {
-            center: [x + z.origin.x, y + z.origin.y],
-            rect: [x, y, w, h],
-            // strongest mid-way, none at the ends
-            amount: Zoom::BLUR * (std::f32::consts::PI * t).sin(),
-            // What floats over the page stays sharp: the notch (top centre), the drawer at its
-            // current height (bottom centre, it may be sliding), the macro rail (top left).
-            keep: {
-                let (nw, nh) = notch::size();
-                let dw = theme::drawer_width() + 2.0 * theme::RADIUS_WINDOW;
-                let dh = self.drawer.height(self.now);
-                let rail = if self.macros_t() > 0.0 { [x, y, macros_width(), macro_rail::HEIGHT + 2.0 * theme::SPACE_2] } else { [0.0; 4] };
-                [[x + (w - nw) / 2.0, y, nw, nh], [x + (w - dw) / 2.0, y + h - dh, dw, dh], rail]
-            },
-        }));
+        self.now = Instant::now();
+        self.motion = match &self.motion {
+            Some(m) if m.kind == motion::Kind::Close => return,
+            Some(m) if m.kind == motion::Kind::Open => Some(motion::Motion::close_from(m.openness(self.now), self.now)),
+            _ => Some(motion::Motion::new(motion::Kind::Close, self.now)),
+        };
     }
 
-    fn end_zoom(&mut self) {
-        if self.zoom.take().is_some() {
-            iced_wgpu::postfx::set(None);
+    /// ‹ › and ← →: the previous / next block along the chain (into containers, depth-first).
+    fn walk(&mut self, forward: bool) {
+        let (Some(id), None) = (&self.page, &self.motion) else { return };
+        let Some(cur) = &self.session.current else { return };
+        let Some(next) = neighbour(&cur.patch.chain, id, forward) else { return };
+        self.now = Instant::now();
+        self.motion = Some(motion::Motion::new(motion::Kind::Pan { from: id.clone(), forward }, self.now));
+        self.page = Some(next);
+    }
+
+    /// Every frame: ends a finished transition, drops a modal whose block is gone (reload), and
+    /// sets the renderer's zoom blur while the camera moves (none at rest).
+    fn modal_tick(&mut self) {
+        if let Some(m) = &self.motion
+            && m.done(self.now)
+        {
+            if m.kind == motion::Kind::Close {
+                self.page = None;
+            }
+            self.motion = None;
+        }
+        let gone = match (&self.page, &self.session.current) {
+            (Some(id), Some(cur)) => find_block(&cur.patch.chain, id).is_none(),
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if gone || self.view != notch::View::Chain {
+            self.page = None;
+            self.motion = None;
+        }
+        iced_wgpu::postfx::set(self.modal_look().map(|look| self.blur(&look)));
+    }
+
+    /// Where the modal sits: centred in the room the notch and the drawer leave (it moves up as
+    /// the drawer opens).
+    fn modal_target(&self) -> iced::Rectangle {
+        let (w, h) = theme::stage_size();
+        let size = block_modal::SIZE;
+        let top = notch::size().1 + theme::SPACE_2;
+        let bottom = h - self.drawer.height(self.now) - theme::SPACE_2;
+        let y = ((top + bottom - size.height) / 2.0).max(top);
+        iced::Rectangle::new(iced::Point::new((w - size.width) / 2.0, y), size)
+    }
+
+    /// Block `id` in the chain (as last drawn); a small box in the middle until it has been.
+    fn node_rect(&self, id: &str) -> iced::Rectangle {
+        chain_view::rect(id).unwrap_or_else(|| {
+            let c = self.modal_target().center();
+            iced::Rectangle::new(iced::Point::new(c.x - 40.0, c.y - 15.0), iced::Size::new(80.0, 30.0))
+        })
+    }
+
+    /// The modal at this frame; `None` without one.
+    fn modal_look(&self) -> Option<Look> {
+        let id = self.page.as_deref()?;
+        let cur = self.session.current.as_ref()?;
+        let block = find_block(&cur.patch.chain, id)?;
+        let target = self.modal_target();
+        let node = self.node_rect(id);
+        let container = chain_view::is_container(&block.kind);
+        let still = Look {
+            camera: motion::open(node, target, 1.0).camera,
+            rect: target,
+            radius: Look::RADIUS,
+            box_alpha: 1.0,
+            open: 1.0,
+            body: Body { id: id.to_string(), scale: 1.0, at: target.position(), alpha: 1.0, title: true },
+            label: None,
+            velocity: 0.0,
+            grid: motion::octaves(motion::zoom_factor(node.size(), target.size())),
+        };
+        let Some(m) = &self.motion else { return Some(still) };
+        let p = m.progress(self.now);
+        let velocity = (std::f32::consts::PI * p).sin();
+        match &m.kind {
+            motion::Kind::Open | motion::Kind::Close => {
+                let e = motion::ease(m.openness(self.now));
+                let f = motion::open(node, target, e);
+                // The block's label grows into the title (riding along with the box).
+                let small = chain_view::NAME / block_modal::TITLE_SIZE;
+                let from = f.rect.position() + chain_view::label_offset(container, small * block_modal::TITLE_H);
+                let to = f.body_at + iced::Vector::new(block_modal::TITLE_AT.x, block_modal::TITLE_AT.y) * f.body_scale;
+                let label = (iced::Point::new(lerp(from.x, to.x, e), lerp(from.y, to.y, e)), lerp(small, f.body_scale, e));
+                Some(Look {
+                    camera: f.camera,
+                    rect: f.rect,
+                    radius: lerp(if container { 12.0 } else { theme::RADIUS_BUTTON }, Look::RADIUS, e),
+                    // A container's card shows through until the box fills in.
+                    box_alpha: if container { (e / 0.4).clamp(0.0, 1.0) } else { 1.0 },
+                    open: e,
+                    // The content fades in once the box is opaque (a container's box fills in first).
+                    body: Body { id: id.to_string(), scale: f.body_scale, at: f.body_at, alpha: ((e - if container { 0.4 } else { 0.3 }) / 0.5).clamp(0.0, 1.0), title: container },
+                    // A container's card shows its own header until the box covers it: no second
+                    // label flying; its title comes in with the content.
+                    label: (!container).then_some(label),
+                    velocity,
+                    grid: motion::grid_zoom(f.camera.scale, motion::zoom_factor(node.size(), target.size())),
+                })
+            }
+            motion::Kind::Pan { from, forward } => {
+                let e = motion::ease(p);
+                let from_rect = self.node_rect(from);
+                let camera = motion::pan(from_rect, node, target, e);
+                let octaves = |r: iced::Rectangle| motion::octaves(motion::zoom_factor(r.size(), target.size()));
+                let grid = lerp(octaves(from_rect), octaves(node), e);
+                // The old content slides out, the new one in.
+                let dir = if *forward { 1.0 } else { -1.0 };
+                let (shown, alpha, dx) = if p < 0.5 { (from.clone(), 1.0 - 2.0 * p, -dir * 28.0 * 2.0 * p) } else { (id.to_string(), 2.0 * p - 1.0, dir * 28.0 * (2.0 - 2.0 * p)) };
+                Some(Look {
+                    camera,
+                    body: Body { id: shown, scale: 1.0, at: target.position() + iced::Vector::new(dx, 0.0), alpha, title: true },
+                    // The chain has faded out: only the dots slide, nothing to blur.
+                    velocity: 0.0,
+                    grid,
+                    ..still
+                })
+            }
+        }
+    }
+
+    /// The renderer's blur for this frame of the modal.
+    fn blur(&self, look: &Look) -> iced_wgpu::postfx::RadialBlur {
+        let (w, h) = theme::stage_size();
+        let (x, y) = (theme::SPACE_GUTTER, theme::SIZE_TOP_BAR + theme::SPACE_GUTTER);
+        let at = |r: iced::Rectangle| [x + r.x, y + r.y, r.width, r.height];
+        let c = look.rect.center();
+        // The chevrons stay sharp once the camera rests (only their stroke: a larger area would
+        // show the unblurred chain behind them).
+        let chevron = |r: iced::Rectangle| {
+            if look.velocity > 0.0 { return [0.0; 4] }
+            let c = r.center();
+            [x + c.x - 7.0, y + c.y - 12.0, 14.0, 24.0]
+        };
+        let (left, right) = look.arrows();
+        // What floats over the chain stays sharp: the notch (top centre), the drawer at its current
+        // height (bottom centre, it may be sliding), the macro rail (top left), the modal and its
+        // arrows, and whatever floats anywhere (a menu, a value entry, a dragged chip: no soft
+        // blur then, they can sit over the chain).
+        let (nw, nh) = notch::size();
+        let dw = theme::drawer_width() + 2.0 * theme::RADIUS_WINDOW;
+        let dh = self.drawer.height(self.now);
+        let rail = if self.macros_t() > 0.0 { [x, y, macros_width(), macro_rail::HEIGHT + 2.0 * theme::SPACE_2] } else { [0.0; 4] };
+        let library = self.library_t() * library_width();
+        let sheet = self.slide_t() * sheet_width();
+        iced_wgpu::postfx::RadialBlur {
+            center: [x + c.x, y + c.y],
+            rect: [x, y, w, h],
+            // strongest mid-way, none at the ends
+            amount: Look::BLUR * look.velocity,
+            soft: 0.0,
+            keep: [
+                [x + (w - nw + library - sheet) / 2.0, y, nw, nh],
+                [x + (w - dw) / 2.0, y + h - dh, dw, dh],
+                rail,
+                at(look.rect),
+                chevron(left),
+                chevron(right),
+                [x, y, library, h],
+                [x + w - sheet, y, sheet, h],
+            ],
         }
     }
 
@@ -923,43 +1068,110 @@ impl Shell {
             .into()
     }
 
-    /// The chain view, a block page, or the transition between them: the chain zooms into the
-    /// clicked point and fades into the page's colour, then the page grows out of that point
-    /// (the renderer blurs both towards it, see `zoom_tick`). Backwards when leaving the page.
+    /// The chain view, with a block's modal over it: the camera on the chain, a veil, the box, the
+    /// modal's content (scaled to the box, fading in), the block's label growing into the title,
+    /// and the arrows beside the box. See `motion` and `docs/research/mockups/block-modal.html`.
     fn chain_content<'a>(&'a self, cur: &'a session::Loaded) -> Element<'a, Message> {
         let values = &self.session.values;
-        let block = self.page.as_deref().and_then(|id| find_block(&cur.patch.chain, id));
-        let chain = || chain_view::view(&cur.patch, values).map(Message::Chain);
-        let (Some(block), Some(z)) = (block, &self.zoom) else {
-            return match block {
-                Some(b) => self.block_page(cur, b),
-                None => chain(),
-            };
+        let look = self.modal_look();
+        // The modal stands in for its block: the block isn't drawn under it (a container's card
+        // only once the box covers it), nor the one a walk comes from.
+        let page = self.page.as_deref();
+        let is_card = page.and_then(|id| find_block(&cur.patch.chain, id)).is_some_and(|b| chain_view::is_container(&b.kind));
+        let hidden = match (&look, &self.motion) {
+            (None, _) => [None, None],
+            (Some(l), m) => {
+                let from = match m.as_ref().map(|m| &m.kind) {
+                    Some(motion::Kind::Pan { from, .. }) => Some(from.as_str()),
+                    _ => None,
+                };
+                [page.filter(|_| !is_card || l.box_alpha >= 1.0), from]
+            }
         };
-        let page = || self.block_page(cur, block);
-        // p: 0 = the chain, 1 = the page.
-        let t = z.progress(self.now);
-        let p = if z.inward { t } else { 1.0 - t };
-        let veil = |a: f32| {
-            container(column![]).width(Fill).height(Fill).style(move |_: &Theme| container::Style {
-                background: Some(theme::alpha(theme::c().frame_node, a).into()),
+        let chain = chain_view::view(&cur.patch, values, look.is_none(), hidden, look.is_none()).map(Message::Chain);
+        let Some(look) = look else { return chain };
+        let target = self.modal_target();
+        // The box's ground: the block's colour, solid (a container's card starts as the editor's
+        // ground and turns into it).
+        let ground = if is_card { mix(theme::c().frame_raised, theme::c().frame_node, (look.open / 0.5).clamp(0.0, 1.0)) } else { theme::c().frame_node };
+
+        // The editor's ground, the chain under the camera fading out into it, and the ground's dot
+        // grid zooming along (endlessly: it ends at its normal spacing). Open, the modal sits on the
+        // plain editor.
+        let open = look.open;
+        let window = |colour: iced::Color| {
+            move |_: &Theme| container::Style {
+                background: Some(colour.into()),
                 border: Border { radius: theme::radius(theme::RADIUS_WINDOW), ..Default::default() },
                 ..Default::default()
-            })
+            }
         };
-        if p < 0.5 {
-            let q = p / 0.5;
-            stack![zoom::zoom(chain(), 1.0 + 2.5 * q, z.origin), veil(q)].into()
-        } else {
-            let q = (p - 0.5) / 0.5;
-            stack![veil(1.0), zoom::zoom(page(), 0.3 + 0.7 * q, z.origin), veil(1.0 - q)].into()
-        }
-    }
+        let ground_colour = theme::c().frame_raised;
+        let world = zoom::zoom(chain, look.camera.scale, look.camera.origin).offset(look.camera.offset);
+        let fade = ((open - 0.25) / 0.6).clamp(0.0, 1.0);
+        let cam = look.camera;
+        let d = 2f32.powf(look.grid);
+        let first = iced::Point::new(chain_view::DOT_STEP / 2.0, chain_view::DOT_STEP / 2.0);
+        let anchor = iced::Point::new(
+            cam.origin.x + cam.offset.x + (first.x - cam.origin.x) * d,
+            cam.origin.y + cam.offset.y + (first.y - cam.origin.y) * d,
+        );
+        // A click beside the modal closes it.
+        let veil = iced::widget::mouse_area(container(chain_view::zoom_dots(anchor, look.grid)).width(Fill).height(Fill).style(window(theme::alpha(ground_colour, fade))))
+            .on_press(Message::Page(block_modal::Message::Close));
+        let mut layers = stack![container(column![]).width(Fill).height(Fill).style(window(ground_colour)), world, veil, stage::corners()].width(Fill).height(Fill);
 
-    /// A block page, its knobs kept clear of the drawer (and taking a dragged source).
-    fn block_page<'a>(&'a self, cur: &'a session::Loaded, block: &'a patch::BlockSpec) -> Element<'a, Message> {
-        let bottom = self.drawer.height(self.now) + 16.0;
-        block_page::view(&cur.patch, &self.session.values, block, self.source_drag.as_ref(), bottom).map(Message::Page)
+        // The box: the block, grown. `Idle`: clicks on it don't fall through to the veil.
+        let (r, a, radius) = (look.rect, look.box_alpha, look.radius);
+        let card = container(column![]).width(r.width).height(r.height).style(move |_: &Theme| container::Style {
+            background: Some(theme::alpha(ground, a).into()),
+            border: Border { radius: theme::radius(radius), width: 1.0, color: theme::alpha(theme::c().frame_hairline_strong, theme::c().frame_hairline_strong.a * a) },
+            shadow: Shadow { color: theme::shadow(0.5 * open), offset: iced::Vector::new(0.0, 24.0 * open), blur_radius: 60.0 * open },
+            ..Default::default()
+        });
+        layers = layers.push(pin(iced::widget::mouse_area(card).interaction(iced::mouse::Interaction::Idle)).x(r.x).y(r.y));
+
+        // The content, laid out at the modal's place and drawn scaled into the box.
+        if let Some(block) = find_block(&cur.patch.chain, &look.body.id).filter(|_| look.body.alpha > 0.0) {
+            let body = block_modal::view(&cur.patch, values, block, self.source_drag.as_ref(), look.body.title).map(Message::Page);
+            let offset = look.body.at - target.position();
+            let body = container(pin(body).x(target.x).y(target.y)).width(Fill).height(Fill);
+            layers = layers.push(zoom::zoom(body, look.body.scale, target.position()).offset(offset));
+            // It fades in: a veil in the box's colour over it.
+            if look.body.alpha < 1.0 {
+                let veil = 1.0 - look.body.alpha;
+                let cover = container(column![]).width(r.width).height(r.height).style(move |_: &Theme| container::Style {
+                    background: Some(theme::alpha(ground, veil).into()),
+                    border: Border { radius: theme::radius(radius), ..Default::default() },
+                    ..Default::default()
+                });
+                layers = layers.push(pin(cover).x(r.x).y(r.y));
+            }
+        }
+        // The block's label, growing into the title.
+        if let (Some((at, scale)), Some(block)) = (look.label, self.page.as_deref().and_then(|id| find_block(&cur.patch.chain, id))) {
+            let home = target.position() + iced::Vector::new(block_modal::TITLE_AT.x, block_modal::TITLE_AT.y);
+            let title = container(pin(block_modal::title(&cur.patch, values, block, 1.0)).x(home.x).y(home.y)).width(Fill).height(Fill);
+            layers = layers.push(zoom::zoom(title, scale, home).offset(at - home));
+        }
+        // ‹ › beside the box: floating chevrons, faint where the chain ends.
+        let shown = ((look.open - 0.6) / 0.4).clamp(0.0, 1.0);
+        if shown > 0.0 {
+            let id = self.page.as_deref().unwrap_or_default();
+            let (left, right) = look.arrows();
+            for (forward, at) in [(false, left), (true, right)] {
+                let live = neighbour(&cur.patch.chain, id, forward).is_some();
+                let colour = theme::alpha(theme::c().frame_muted, shown * if live { 1.0 } else { 0.25 });
+                let icon = icons::icon_rotated(icons::CHEVRON_RIGHT, 22.0, 2.0, colour, if forward { 0.0 } else { 180.0 });
+                let cursor = if live { iced::mouse::Interaction::Pointer } else { iced::mouse::Interaction::Idle };
+                let mut arrow = iced::widget::mouse_area(container(icon).center(Look::ARROW)).interaction(cursor);
+                if live && look.open >= 1.0 && self.motion.is_none() {
+                    arrow = arrow.on_press(Message::Page(block_modal::Message::Walk(forward)));
+                }
+                layers = layers.push(pin(arrow).x(at.x).y(at.y));
+            }
+        }
+        layers.into()
     }
 
     /// 0 = right sheet hidden, 1 = fully in.
@@ -1112,35 +1324,71 @@ fn apply_theme(mode: user_settings::ThemeMode) {
     });
 }
 
-/// The library sheet plus its margin.
-/// The chain ↔ block page transition.
-struct Zoom {
-    /// Into the page (or back out to the chain).
-    inward: bool,
-    /// Where it pivots: the click, in the patch window's coordinates.
-    origin: iced::Point,
-    start: Instant,
+/// One frame of the block modal: where the camera is, the box, the content, the label.
+struct Look {
+    camera: motion::Camera,
+    rect: iced::Rectangle,
+    radius: f32,
+    /// The box's opacity (a container's card shows through at first).
+    box_alpha: f32,
+    /// 0 = the chain, 1 = the modal open (eased): the chain fading out, the shadow.
+    open: f32,
+    body: Body,
+    /// The block's label growing into the title: where, how big (`None` = the title draws itself).
+    label: Option<(iced::Point, f32)>,
+    /// How fast the camera moves (0..1): the zoom blur.
+    velocity: f32,
+    /// The ground's dot grid: how many octaves it has zoomed (see `chain_view::zoom_dots`).
+    grid: f32,
 }
 
-impl Zoom {
-    /// The blur's strength mid-way: how far a pixel smears towards the pivot.
+/// The modal's content in a frame (a walk shows the previous block's while it slides out).
+struct Body {
+    id: String,
+    scale: f32,
+    at: iced::Point,
+    alpha: f32,
+    title: bool,
+}
+
+impl Look {
+    /// The zoom blur's strength mid-way: how far a pixel smears towards the centre.
     const BLUR: f32 = 0.22;
+    const RADIUS: f32 = 16.0;
+    /// The arrows' hit area, and their gap to the box.
+    const ARROW: f32 = 36.0;
+    const ARROW_GAP: f32 = 14.0;
 
-    /// 150 ms (dev aid: `SCRIPTFX_DEV_ZOOM_MS=2000` slows it down to look at it).
-    fn duration() -> Duration {
-        static D: std::sync::LazyLock<Duration> = std::sync::LazyLock::new(|| {
-            let ms = std::env::var("SCRIPTFX_DEV_ZOOM_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(150);
-            Duration::from_millis(ms)
-        });
-        *D
-    }
-
-    /// 0..1, linear.
-    fn progress(&self, now: Instant) -> f32 {
-        (now.saturating_duration_since(self.start).as_secs_f32() / Self::duration().as_secs_f32()).clamp(0.0, 1.0)
+    /// Where ‹ and › sit: beside the box, centred on it.
+    fn arrows(&self) -> (iced::Rectangle, iced::Rectangle) {
+        let r = self.rect;
+        let y = r.center_y() - Self::ARROW / 2.0;
+        let size = iced::Size::new(Self::ARROW, Self::ARROW);
+        (
+            iced::Rectangle::new(iced::Point::new(r.x - Self::ARROW_GAP - Self::ARROW, y), size),
+            iced::Rectangle::new(iced::Point::new(r.x + r.width + Self::ARROW_GAP, y), size),
+        )
     }
 }
 
+fn mix(a: iced::Color, b: iced::Color, t: f32) -> iced::Color {
+    iced::Color { r: lerp(a.r, b.r, t), g: lerp(a.g, b.g, t), b: lerp(a.b, b.b, t), a: lerp(a.a, b.a, t) }
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+/// The block before / after `id` along the chain (depth-first: a container, then its blocks).
+fn neighbour(chain: &[patch::BlockSpec], id: &str, forward: bool) -> Option<String> {
+    let mut order = Vec::new();
+    patch::chain::walk(chain, &mut |b| order.push(b.id.as_str()));
+    let i = order.iter().position(|b| *b == id)?;
+    let j = if forward { i + 1 } else { i.checked_sub(1)? };
+    order.get(j).map(|s| s.to_string())
+}
+
+/// The library sheet plus its margin.
 /// A block anywhere in the chain (inside containers too), by id.
 fn find_block<'a>(chain: &'a [patch::BlockSpec], id: &str) -> Option<&'a patch::BlockSpec> {
     let mut found = None;
