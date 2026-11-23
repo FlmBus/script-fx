@@ -8,7 +8,7 @@ pub(crate) mod distortion;
 mod dynamics;
 
 pub use dynamics::comp_static;
-mod filter;
+pub(crate) mod filter;
 mod modulation;
 mod pitch;
 mod rhythm;

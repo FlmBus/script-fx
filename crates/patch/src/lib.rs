@@ -509,6 +509,8 @@ pub struct Values {
     /// Where each modulator is in its cycle: LFOs 0–1, Step the step index, Follow 0.
     pub modulator_phases: [f32; 5],
     pub time: f32,
+    /// The host's tempo, BPM (0 until it's known).
+    pub tempo: f32,
 }
 
 impl Values {
@@ -1019,7 +1021,7 @@ mod tests {
         assert_eq!(p.params[0].id, "c1.threshold");
         assert_eq!(p.params[i("s.crossover_1")].name, "Crossover 1");
         assert_eq!(p.params[i("lp.freq")].scale, Scale::Log);
-        assert_eq!(p.params.len(), 14 + 1 + 3 + 2 + 2 + 1 + 3 + 2 + 1); // compressor 14, the low-pass with slope 3
+        assert_eq!(p.params.len(), 14 + 2 + 3 + 2 + 2 + 1 + 3 + 2 + 1); // compressor 14, band split crossover + slope, the low-pass with slope 3
         // A stepped param snaps: the knob between 24 and 36 dB/oct plays one of them.
         let slope = &p.params[i("lp.slope")];
         assert_eq!((slope.default_plain(), slope.step), (12.0, Some(12.0)));
@@ -1060,7 +1062,7 @@ mod tests {
             "c1.threshold", "c1.ratio", "c1.attack", "c1.release", "c1.knee", "c1.makeup", "c1.mix", "c1.detector", "c1.window",
             "c1.feedback", "c1.ratio_curve", "c1.program", "c1.link", "c1.saturation",
         ]);
-        assert_eq!(ids(&p.chain[1]), ["s.crossover_1"]); // the bands' blocks have their own
+        assert_eq!(ids(&p.chain[1]), ["s.crossover_1", "s.slope"]); // the bands' blocks have their own
         let chain::BlockKind::Drive { amount, .. } = &p.chain[1].kind.sub_chains()[1].0[0].kind else { panic!() };
         assert_eq!(p.params[amount.0].id, "d.amount"); // settings point at their param
     }
@@ -1281,7 +1283,7 @@ mod tests {
     #[test]
     fn utility_and_routing_blocks_check_their_options() {
         for (src, msg) in [
-            ("Blocks.Haas.new('h', { delay = 50 })", "delay must be 0..40 ms"),
+            ("Blocks.Haas.new('h', { delay = 50 })", "delay must be -40..40 ms"),
             ("Blocks.Haas.new('h', { delay = 5, channel = 'both' })", r#"'channel' must be "left" or "right""#),
             ("Blocks.Invert.new('i', { channels = 'middle' })", r#"must be "both", "left" or "right""#),
             ("Blocks.MidSide.new('ms', {})", "needs a 'mid' and/or a 'side' chain"),

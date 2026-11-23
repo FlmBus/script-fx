@@ -475,8 +475,9 @@ define("Rider", "rider", { dB("target", -48, 0, -18), dB("range", 0, 24, 6), ms(
 define("Transient", "transient", { dB("attack", -24, 24, 0), dB("sustain", -24, 24, 0), "lookahead:number" }, check_lookahead, true)
 define("Pan", "pan", { num("")("pan", -100, 100, 0, { decimals = 0 }) })
 define("Width", "width", { pct("width", 0, 200, 100) })
-define("MonoBass", "mono_bass", { hz("freq", 20, 500, 120) })
-define("Haas", "haas", { ms("delay", 0, 40, 10), "channel:side" })
+define("MonoBass", "mono_bass", { hz("freq", 20, 500, 120), num("dB/oct")("slope", 24, 48, 24, { step = 24, decimals = 0 }) })
+-- delay > 0 delays `channel` (default right), < 0 the other one
+define("Haas", "haas", { ms("delay", -40, 40, 10), "channel:side" })
 define("Invert", "invert", { "channels:channels" })
 define("DCBlock", "dc_block", {})
 define("Meter", "meter", {}, nil, true)
@@ -552,7 +553,8 @@ end)
 define("LeftRight", "left_right", { "left:chain", "right:chain" }, function(o)
   if not o.left and not o.right then return "needs a 'left' and/or a 'right' chain" end
 end)
-define("BandSplit", "band_split", { hz("crossovers", 20, 20000, 1000, { list = true, required = true }), "bands:chains!", "phase:minimum|linear" }, function(o)
+define("BandSplit", "band_split", { hz("crossovers", 20, 20000, 1000, { list = true, required = true }),
+                                    num("dB/oct")("slope", 24, 48, 24, { step = 24, decimals = 0 }), "bands:chains!", "phase:minimum|linear" }, function(o)
   if #o.bands ~= #o.crossovers + 1 then
     return fmt("%d crossover(s) need %d bands, got %d", #o.crossovers, #o.crossovers + 1, #o.bands)
   end

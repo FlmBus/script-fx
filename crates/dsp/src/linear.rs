@@ -263,11 +263,14 @@ impl LinearEq {
 }
 
 /// `BandSplit` with `phase = "linear"`: each band is its own linear-phase FIR. Band k's magnitude
-/// is the difference of the LR4 low-pass magnitudes at its crossovers, so the bands sum to 1
+/// is the difference of the Linkwitz-Riley low-pass magnitudes at its crossovers, so the bands sum to 1
 /// and their FIRs to an exact delay: the split reconstructs the input perfectly.
 pub(crate) struct LinearSplit {
     pub(crate) freqs: Vec<P>,
+    /// 24 = LR4, 48 = LR8 dB/oct.
+    pub(crate) slope: P,
     pub(crate) last: Vec<f32>,
+    pub(crate) last_slope: f32,
     /// This sub-block's crossovers (preallocated).
     pub(crate) cur: Vec<f32>,
     pub(crate) convs: Vec<Convolver>,
@@ -278,9 +281,10 @@ pub(crate) struct LinearSplit {
     pub(crate) chain_latency: usize,
 }
 
-/// LR4 low-pass magnitude at `f` for crossover `fc` (a squared Butterworth).
-fn lr4_low(f: f32, fc: f32) -> f32 {
-    1.0 / (1.0 + (f / fc).powi(4))
+/// Linkwitz-Riley low-pass magnitude at `f` for crossover `fc` (a squared Butterworth): LR4 for
+/// `slope` 24, LR8 for 48.
+fn lr_low(f: f32, fc: f32, slope: f32) -> f32 {
+    1.0 / (1.0 + (f / fc).powi(if slope >= 36.0 { 8 } else { 4 }))
 }
 
 impl LinearSplit {
@@ -297,11 +301,13 @@ impl LinearSplit {
             *c = f.update(ctx).max(prev);
             prev = *c;
         }
-        if self.cur != self.last && self.convs.iter().all(Convolver::can_design) {
+        let slope = self.slope.update(ctx);
+        if (self.cur != self.last || slope != self.last_slope) && self.convs.iter().all(Convolver::can_design) {
             self.last.copy_from_slice(&self.cur);
+            self.last_slope = slope;
             let xs = &self.cur;
             for (k, conv) in self.convs.iter_mut().enumerate() {
-                let low = |j: usize, f: f32| if j == 0 { 0.0 } else if j > nx { 1.0 } else { lr4_low(f, xs[j - 1]) };
+                let low = |j: usize, f: f32| if j == 0 { 0.0 } else if j > nx { 1.0 } else { lr_low(f, xs[j - 1], slope) };
                 conv.design(|f| low(k + 1, f) - low(k, f));
             }
         }

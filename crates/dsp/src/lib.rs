@@ -197,6 +197,18 @@ impl Biquad {
         ((num.0 * num.0 + num.1 * num.1) / (den.0 * den.0 + den.1 * den.1).max(1e-20)).sqrt()
     }
 
+    /// H(e^jω) at `freq` as (re, im).
+    pub(crate) fn response(&self, freq: f64, sr: f64) -> (f64, f64) {
+        let w = std::f64::consts::TAU * freq / sr;
+        let (c1, s1) = (w.cos(), -w.sin());
+        let (c2, s2) = ((2.0 * w).cos(), -(2.0 * w).sin());
+        let (b0, b1, b2, a1, a2) = (self.b0 as f64, self.b1 as f64, self.b2 as f64, self.a1 as f64, self.a2 as f64);
+        let (nr, ni) = (b0 + b1 * c1 + b2 * c2, b1 * s1 + b2 * s2);
+        let (dr, di) = (1.0 + a1 * c1 + a2 * c2, a1 * s1 + a2 * s2);
+        let d = (dr * dr + di * di).max(1e-30);
+        ((nr * dr + ni * di) / d, (ni * dr - nr * di) / d)
+    }
+
     /// Forgets the signal (a stage that was off and comes back on).
     pub(crate) fn clear(&mut self) {
         self.z1 = [0.0; 2];
@@ -240,20 +252,52 @@ struct Rider {
     meter: usize,
 }
 
-/// LR4 = two cascaded Butterworth (q 0.707) biquads.
-#[derive(Clone, Copy, Default)]
-struct Lr4([Biquad; 2]);
+/// The Butterworth sections of a Linkwitz-Riley crossover: LR4 (24 dB/oct) = a 2nd-order
+/// Butterworth squared, LR8 (48 dB/oct) = a 4th-order one squared. Low and high pass sum to the
+/// allpass of the same Butterworth ([`LrAp`]), so the bands stay phase-aligned and sum flat.
+fn lr_qs(slope: f32) -> &'static [f32] {
+    if slope >= 36.0 { &[0.541_196_1, 1.306_563] } else { &[std::f32::consts::FRAC_1_SQRT_2] }
+}
 
-impl Lr4 {
-    fn set(&mut self, shape: EqShape, freq: f32, sr: f32) {
-        for b in &mut self.0 {
-            b.set(shape, freq, std::f32::consts::FRAC_1_SQRT_2, 0.0, sr);
+/// A Linkwitz-Riley low or high pass (`slope` 24 or 48 dB/oct).
+#[derive(Clone, Copy, Default)]
+struct Lr {
+    bq: [Biquad; 4],
+    n: usize,
+}
+
+impl Lr {
+    fn set(&mut self, shape: EqShape, freq: f32, slope: f32, sr: f32) {
+        let qs = lr_qs(slope);
+        self.n = 2 * qs.len();
+        for (i, b) in self.bq[..self.n].iter_mut().enumerate() {
+            b.set(shape, freq, qs[i % qs.len()], 0.0, sr);
         }
     }
     #[inline]
     fn tick(&mut self, x: f32, ch: usize) -> f32 {
-        let y = self.0[0].tick(x, ch);
-        self.0[1].tick(y, ch)
+        self.bq[..self.n].iter_mut().fold(x, |y, b| b.tick(y, ch))
+    }
+}
+
+/// The allpass a Linkwitz-Riley crossover's bands sum to (aligns the bands that skip it).
+#[derive(Clone, Copy, Default)]
+struct LrAp {
+    bq: [Biquad; 2],
+    n: usize,
+}
+
+impl LrAp {
+    fn set(&mut self, freq: f32, slope: f32, sr: f32) {
+        let qs = lr_qs(slope);
+        self.n = qs.len();
+        for (b, q) in self.bq.iter_mut().zip(qs) {
+            b.set(EqShape::AllPass, freq, *q, 0.0, sr);
+        }
+    }
+    #[inline]
+    fn tick(&mut self, x: f32, ch: usize) -> f32 {
+        self.bq[..self.n].iter_mut().fold(x, |y, b| b.tick(y, ch))
     }
 }
 
@@ -263,11 +307,13 @@ impl Lr4 {
 /// share the same phase and their sum is flat.
 struct BandSplit {
     freqs: Vec<P>,
+    slope: P,
     last: Vec<f32>,
-    lp: Vec<Lr4>,
-    hp: Vec<Lr4>,
+    last_slope: f32,
+    lp: Vec<Lr>,
+    hp: Vec<Lr>,
     /// `ap[i]` = allpasses of band i at crossovers i+1..
-    ap: Vec<Vec<Biquad>>,
+    ap: Vec<Vec<LrAp>>,
     bands: Vec<Vec<Node>>,
     bufs: Vec<Vec<Frame>>,
     /// Latency compensation per band.
@@ -307,12 +353,13 @@ struct Oversampled {
 }
 
 struct Haas {
+    /// > 0 delays the right channel, < 0 the left (after `sign`).
     delay: P,
-    /// Delayed channel.
-    ch: usize,
-    buf: Vec<f32>,
+    /// −1: the patch said `channel = "left"` (flips the sign).
+    sign: f32,
+    bufs: [Vec<f32>; 2],
     pos: usize,
-    /// Current delay, samples.
+    /// Current delay, samples, signed like `delay`.
     cur: f32,
 }
 
@@ -339,7 +386,7 @@ pub(crate) enum Node {
     Width { width: P, w: f32 },
     /// Side → LR4 high-pass; mid → the matching allpass (= LR4 low + high), so
     /// mid and side keep the same phase above the cutoff and the image stays put.
-    MonoBass { freq: P, last: f32, hp: Lr4, ap: Biquad },
+    MonoBass { freq: P, slope: P, last: [f32; 2], hp: Lr, ap: LrAp },
     Haas(Box<Haas>),
     Invert { sign: [f32; 2] },
     DcBlock { x1: [f32; 2], y1: [f32; 2] },
@@ -472,16 +519,16 @@ fn build_kind(kind: &BlockKind, params: &[ParamSpec], sr: f32, max_frames: usize
         })),
         BlockKind::Pan { pan } => Node::Pan { pan: p(pan), gains: [1.0; 2] },
         BlockKind::Width { width } => Node::Width { width: p(width), w: 1.0 },
-        BlockKind::MonoBass { freq } => {
-            Node::MonoBass { freq: p(freq), last: f32::NAN, hp: Lr4::default(), ap: Biquad::default() }
+        BlockKind::MonoBass { freq, slope } => {
+            Node::MonoBass { freq: p(freq), slope: p(slope), last: [f32::NAN; 2], hp: Lr::default(), ap: LrAp::default() }
         }
         BlockKind::Haas { delay, channel } => Node::Haas(Box::new(Haas {
             delay: p(delay),
-            ch: match channel {
-                Side::Left => 0,
-                Side::Right => 1,
+            sign: match channel {
+                Side::Left => -1.0,
+                Side::Right => 1.0,
             },
-            buf: vec![0.0; (HAAS_MAX_MS * 0.001 * sr) as usize + 2],
+            bufs: std::array::from_fn(|_| vec![0.0; (HAAS_MAX_MS * 0.001 * sr) as usize + 2]),
             pos: 0,
             cur: 0.0,
         })),
@@ -507,13 +554,15 @@ fn build_kind(kind: &BlockKind, params: &[ParamSpec], sr: f32, max_frames: usize
                 latency,
             }))
         }
-        BlockKind::BandSplit { crossovers, bands, phase: Phase::Linear } => {
+        BlockKind::BandSplit { crossovers, slope, bands, phase: Phase::Linear } => {
             let n = crossovers.len();
             let bands = chains(&bands.iter().collect::<Vec<_>>(), meter);
             let (align, chain_latency) = align(&bands);
             Node::LinearSplit(Box::new(linear::LinearSplit {
                 freqs: crossovers.iter().map(p).collect(),
+                slope: p(slope),
                 last: vec![f32::NAN; n],
+                last_slope: f32::NAN,
                 cur: vec![0.0; n],
                 convs: (0..=n).map(|_| linear::Convolver::new(sr)).collect(),
                 bufs: (0..=n).map(|_| frame_buf(max_frames)).collect(),
@@ -522,16 +571,18 @@ fn build_kind(kind: &BlockKind, params: &[ParamSpec], sr: f32, max_frames: usize
                 chain_latency,
             }))
         }
-        BlockKind::BandSplit { crossovers, bands, .. } => {
+        BlockKind::BandSplit { crossovers, slope, bands, .. } => {
             let n = crossovers.len();
             let bands = chains(&bands.iter().collect::<Vec<_>>(), meter);
             let (align, latency) = align(&bands);
             Node::BandSplit(Box::new(BandSplit {
                 freqs: crossovers.iter().map(p).collect(),
+                slope: p(slope),
                 last: vec![f32::NAN; n],
-                lp: vec![Lr4::default(); n],
-                hp: vec![Lr4::default(); n],
-                ap: (0..=n).map(|i| vec![Biquad::default(); n.saturating_sub(i + 1)]).collect(),
+                last_slope: f32::NAN,
+                lp: vec![Lr::default(); n],
+                hp: vec![Lr::default(); n],
+                ap: (0..=n).map(|i| vec![LrAp::default(); n.saturating_sub(i + 1)]).collect(),
                 bands,
                 bufs: (0..=n).map(|_| frame_buf(max_frames)).collect(),
                 align,
@@ -609,12 +660,12 @@ impl Node {
                     *f = [m + s, m - s];
                 }
             }
-            Node::MonoBass { freq, last, hp, ap } => {
-                let fr = freq.update(ctx);
-                if fr != *last {
-                    hp.set(EqShape::HighPass, fr, sr);
-                    ap.set(EqShape::AllPass, fr, std::f32::consts::FRAC_1_SQRT_2, 0.0, sr);
-                    *last = fr;
+            Node::MonoBass { freq, slope, last, hp, ap } => {
+                let cur = [freq.update(ctx), slope.update(ctx)];
+                if cur != *last {
+                    hp.set(EqShape::HighPass, cur[0], cur[1], sr);
+                    ap.set(cur[0], cur[1], sr);
+                    *last = cur;
                 }
                 for f in frames {
                     let m = ap.tick(0.5 * (f[0] + f[1]), 0);
@@ -707,20 +758,25 @@ impl Node {
 
 impl Haas {
     fn process(&mut self, frames: &mut [Frame], ctx: &Ctx) {
-        let len = self.buf.len();
+        let len = self.bufs[0].len();
         let max = (len - 2) as f32;
-        let target = (self.delay.update(ctx) * 0.001 * ctx.sr).clamp(0.0, max);
+        let target = (self.sign * self.delay.update(ctx) * 0.001 * ctx.sr).clamp(-max, max);
         let step = (target - self.cur) / frames.len() as f32;
         for f in frames {
             self.cur += step;
-            self.buf[self.pos] = f[self.ch];
-            // Linear interpolation between the two samples around `pos - cur`.
-            let read = self.pos as f32 + len as f32 - self.cur;
+            // Both channels keep their history: a sign change glides through 0 without a jump.
+            for (buf, x) in self.bufs.iter_mut().zip(f.iter()) {
+                buf[self.pos] = *x;
+            }
+            let (ch, d) = if self.cur >= 0.0 { (1, self.cur) } else { (0, -self.cur) };
+            // Linear interpolation between the two samples around `pos - d`.
+            let read = self.pos as f32 + len as f32 - d;
             let i0 = read.floor();
             let frac = read - i0;
             let i0 = i0 as usize % len;
             let i1 = (i0 + 1) % len;
-            f[self.ch] = self.buf[i0] + frac * (self.buf[i1] - self.buf[i0]);
+            let buf = &self.bufs[ch];
+            f[ch] = buf[i0] + frac * (buf[i1] - buf[i0]);
             self.pos = (self.pos + 1) % len;
         }
     }
@@ -758,21 +814,23 @@ impl BandSplit {
         let nx = self.freqs.len();
         // Crossovers driven by params may cross each other: keep them ascending.
         let mut prev = 10.0f32;
-        let mut changed = false;
+        let slope = self.slope.update(ctx);
+        let mut changed = slope != self.last_slope;
+        self.last_slope = slope;
         for k in 0..nx {
             let f = self.freqs[k].update(ctx).max(prev);
             prev = f;
-            if f != self.last[k] {
+            if changed || f != self.last[k] {
                 self.last[k] = f;
-                self.lp[k].set(EqShape::LowPass, f, ctx.sr);
-                self.hp[k].set(EqShape::HighPass, f, ctx.sr);
+                self.lp[k].set(EqShape::LowPass, f, slope, ctx.sr);
+                self.hp[k].set(EqShape::HighPass, f, slope, ctx.sr);
                 changed = true;
             }
         }
         if changed {
             for (i, aps) in self.ap.iter_mut().enumerate() {
                 for (j, ap) in aps.iter_mut().enumerate() {
-                    ap.set(EqShape::AllPass, self.last[i + 1 + j], std::f32::consts::FRAC_1_SQRT_2, 0.0, ctx.sr);
+                    ap.set(self.last[i + 1 + j], slope, ctx.sr);
                 }
             }
         }
@@ -1422,6 +1480,54 @@ mod tests {
         }
     }
 
+    /// The display's curve is what the block really does: measured with a sine at several
+    /// frequencies (static settings, depth 0 for the swept blocks).
+    #[test]
+    fn preview_curves_match_the_audio() {
+        for block in [
+            "Blocks.MorphFilter.new('b', { freq = 1000, morph = 0, resonance = 40 })",
+            "Blocks.MorphFilter.new('b', { freq = 1000, morph = 35, resonance = 40 })",
+            "Blocks.MorphFilter.new('b', { freq = 1000, morph = 80, resonance = 20 })",
+            "Blocks.LadderFilter.new('b', { freq = 1000, resonance = 50, drive = 0 })",
+            "Blocks.CombFilter.new('b', { freq = 220, feedback = 60, mix = 70 })",
+            "Blocks.Formant.new('b', { vowel = 1.5, shift = 2, resonance = 40, mix = 80 })",
+            "Blocks.Resonator.new('b', { notes = { 'C3', 'G3' }, decay = 100, mix = 60 })",
+            "Blocks.Flanger.new('b', { depth = 0, feedback = 62, mix = 50 })",
+            "Blocks.Phaser.new('b', { depth = 0, feedback = 30, freq = 800, stages = 4, mix = 50 })",
+        ] {
+            let d = TempDir::new();
+            std::fs::write(d.0.join("init.luau"), format!("return Patch.new('T', {{ chain = Chain.new {{ {block} }} }})")).unwrap();
+            let p = Patch::load(&d.0).unwrap();
+            let v = |r: &ParamRef| p.params[r.0].default_plain();
+            for hz in [97.0f32, 261.0, 613.0, 1009.0, 2503.0, 7001.0] {
+                let drawn = preview::response_db(&p.chain[0].kind, &v, &[hz]).unwrap()[0];
+                let heard = gain_through(block, hz);
+                // Deep notches are too sensitive to compare in dB.
+                if heard > -24.0 {
+                    // The ladder's input stage saturates a little at the test level; the curve is small-signal.
+                    let tolerance = if block.contains("Ladder") { 1.0 } else { 0.6 };
+                    assert!((drawn - heard).abs() < tolerance, "{block} at {hz} Hz: drawn {drawn} dB, heard {heard} dB");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn steep_band_split_sums_flat_and_separates_more() {
+        let chain = |slope: u32| format!("Blocks.BandSplit.new('s', {{ crossovers = {{ 200, 3000 }}, slope = {slope},
+            bands = {{ Chain.new(), Chain.new(), Chain.new() }} }})");
+        for freq in [40.0, 200.0, 800.0, 3000.0, 9000.0] {
+            let diff = gain_through(&chain(48), freq);
+            assert!(diff.abs() < 0.05, "{freq} Hz: {diff} dB");
+        }
+        // Muting the low band: an octave below its crossover only the high band's leak remains,
+        // far less of it at LR8 (≈ −48 dB) than at LR4 (≈ −25 dB).
+        let muted = |slope: u32| format!("Blocks.BandSplit.new('s', {{ crossovers = {{ 200 }}, slope = {slope},
+            bands = {{ Chain.new {{ Blocks.Gain.new('g', {{ db = -120 }}) }}, Chain.new() }} }})");
+        let (lr4, lr8) = (gain_through(&muted(24), 100.0), gain_through(&muted(48), 100.0));
+        assert!(lr8 < lr4 - 10.0, "LR4 {lr4} dB, LR8 {lr8} dB");
+    }
+
     #[test]
     fn band_split_processes_bands_separately() {
         // Mute the middle band of three: 800 Hz (between 200 and 3000) disappears,
@@ -1555,6 +1661,13 @@ mod tests {
         let leak = gain_to_db(peak(&high[12_000..], 1)) + 6.0;
         assert!(leak < -60.0, "3 kHz leaks into the right channel: {leak} dB");
         assert!((peak(&high[12_000..], 0) - db_to_gain(-6.0)).abs() < 0.01);
+        // 48 dB/oct: an octave below the cutoff much less side remains than at 24.
+        let side = |slope: u32| {
+            let y = through(&format!("Blocks.MonoBass.new('m', {{ freq = 200, slope = {slope} }})"), left_only(100.0));
+            let tail = &y[12_000..];
+            tail.iter().fold(0.0f32, |p, f| p.max((f[0] - f[1]).abs()))
+        };
+        assert!(side(48) < 0.4 * side(24), "24: {} 48: {}", side(24), side(48));
     }
 
     #[test]
@@ -1569,6 +1682,12 @@ mod tests {
         let y = through("Blocks.Haas.new('h', { delay = 1, channel = 'left' })", x);
         assert_eq!(y[0], [0.0, 1.0]);
         assert!((y[48][0] - 1.0).abs() < 1e-6);
+        // A negative delay delays the other channel.
+        let mut x = vec![[0.0f32; 2]; 2000];
+        x[100] = [1.0, 1.0];
+        let y = through("Blocks.Haas.new('h', { delay = -10 })", x);
+        assert_eq!(y[100], [0.0, 1.0]);
+        assert!((y[580][0] - 1.0).abs() < 1e-6, "{:?}", &y[578..583]);
     }
 
     #[test]

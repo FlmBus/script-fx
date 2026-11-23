@@ -170,6 +170,8 @@ pub struct Shared {
     pub meter_in: AtomicF32,
     pub meter_out: AtomicF32,
     sample_rate: AtomicF32,
+    /// The host's tempo, BPM (for the displays' time axes).
+    pub tempo: AtomicF32,
     /// New graphs → audio thread.
     graph_tx: Mutex<rtrb::Producer<Box<Graph>>>,
     /// Replaced graphs ← audio thread (dropped here, never on the audio thread).
@@ -447,6 +449,7 @@ impl Default for ScriptFx {
             ),
             notifier: PollSubNotifier::new(),
             shared: Arc::new(Shared {
+                tempo: AtomicF32::new(120.0),
                 meter_in: AtomicF32::new(0.0),
                 meter_out: AtomicF32::new(0.0),
                 sample_rate: AtomicF32::new(48_000.0),
@@ -590,6 +593,9 @@ impl Plugin for ScriptFx {
         // the beat position while the host plays.
         let transport = context.transport();
         let tempo = transport.tempo.map(|t| t as f32);
+        if let Some(t) = tempo {
+            self.shared.tempo.store(t, Ordering::Relaxed);
+        }
         let beat = if transport.playing { transport.pos_beats() } else { None };
         if let Some(g) = &mut self.graph {
             g.set_transport(tempo, beat);

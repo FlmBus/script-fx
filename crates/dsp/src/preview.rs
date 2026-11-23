@@ -18,6 +18,11 @@ const SR: f32 = 48_000.0;
 
 /// Magnitude (dB) at each of `freqs` (Hz), or `None` if the block isn't a filter/EQ.
 pub fn response_db(kind: &BlockKind, v: &dyn Fn(&ParamRef) -> f32, freqs: &[f32]) -> Option<Vec<f32>> {
+    sweep_db(kind, v, freqs, 0.0)
+}
+
+/// [`response_db`] with a swept block's LFO held at `sweep` (−1..1; flanger, phaser).
+pub fn sweep_db(kind: &BlockKind, v: &dyn Fn(&ParamRef) -> f32, freqs: &[f32], sweep: f32) -> Option<Vec<f32>> {
     let (shape, freq, q, gain) = match kind {
         BlockKind::PeakEq(e) => (EqShape::Peak, v(&e.freq), v(&e.q), v(&e.gain)),
         BlockKind::LowShelf(e) => (EqShape::LowShelf, v(&e.freq), v(&e.q), v(&e.gain)),
@@ -32,7 +37,7 @@ pub fn response_db(kind: &BlockKind, v: &dyn Fn(&ParamRef) -> f32, freqs: &[f32]
             }).collect();
             return Some(freqs.iter().map(|&f| stages.iter().map(|bq| bq.magnitude_db(f, SR)).sum()).collect());
         }
-        _ => return None,
+        _ => return Some(freqs.iter().map(|&f| Some(db_of(linear(kind, v, f as f64, sweep)?))).collect::<Option<Vec<f32>>>()?),
     };
     let mut bq = Biquad::default();
     bq.set(shape, freq, q, gain, SR);
@@ -70,6 +75,128 @@ pub fn dynamics(kind: &BlockKind, v: &dyn Fn(&ParamRef) -> f32, level_db: f32) -
         BlockKind::Limiter { ceiling, .. } => Some((level_db - v(ceiling).min(0.0)).max(0.0)),
         _ => None,
     }
+}
+
+// ---- the other filters' transfer functions (small signal, the structures in `fx`) --------------
+
+#[derive(Clone, Copy)]
+struct C(f64, f64);
+
+impl std::ops::Add for C {
+    type Output = C;
+    fn add(self, o: C) -> C {
+        C(self.0 + o.0, self.1 + o.1)
+    }
+}
+impl std::ops::Mul for C {
+    type Output = C;
+    fn mul(self, o: C) -> C {
+        C(self.0 * o.0 - self.1 * o.1, self.0 * o.1 + self.1 * o.0)
+    }
+}
+impl std::ops::Div for C {
+    type Output = C;
+    fn div(self, o: C) -> C {
+        let d = (o.0 * o.0 + o.1 * o.1).max(1e-30);
+        C((self.0 * o.0 + self.1 * o.1) / d, (self.1 * o.0 - self.0 * o.1) / d)
+    }
+}
+
+fn re(x: f64) -> C {
+    C(x, 0.0)
+}
+
+fn db_of(h: C) -> f32 {
+    (20.0 * h.0.hypot(h.1).max(1e-6).log10()) as f32
+}
+
+/// `n` samples of delay at `f` Hz.
+fn delay(f: f64, n: f64) -> C {
+    let w = std::f64::consts::TAU * f / SR as f64 * n;
+    C(w.cos(), -w.sin())
+}
+
+fn blend(wet: f64, h: C) -> C {
+    re(1.0 - wet) + re(wet) * h
+}
+
+/// H at `f` Hz of the blocks whose response isn't a plain biquad.
+fn linear(kind: &BlockKind, v: &dyn Fn(&ParamRef) -> f32, f: f64, sweep: f32) -> Option<C> {
+    use std::f64::consts::PI;
+    let sr = SR as f64;
+    let pct = |r: &ParamRef| (v(r) as f64 / 100.0).clamp(0.0, 1.0);
+    let signed = |r: &ParamRef| (v(r) as f64 / 100.0).clamp(-0.99, 0.99);
+    // The TPT structures' s at `f` for a cutoff `fc` (bilinear, prewarped at fc).
+    let s_at = |fc: f64| C(0.0, (PI * f / sr).tan() / (PI * fc.clamp(10.0, sr * 0.45) / sr).tan());
+    Some(match kind {
+        BlockKind::MorphFilter { freq, morph, resonance } => {
+            let (m, r) = (pct(morph), pct(resonance));
+            let k = 1.0 / (0.5 + r * r * 24.5);
+            let s = s_at(v(freq) as f64);
+            let den = s * s + re(k) * s + re(1.0);
+            let (wl, wb, wh) = if m < 0.5 { (1.0 - 2.0 * m, 2.0 * m, 0.0) } else { (0.0, 2.0 - 2.0 * m, 2.0 * m - 1.0) };
+            (re(wl) + re(wb * k) * s + re(wh) * s * s) / den
+        }
+        BlockKind::LadderFilter { freq, resonance, drive } => {
+            let k = 4.0 * pct(resonance);
+            let gd = db_to_gain(v(drive)) as f64;
+            let g = re(1.0) / (re(1.0) + s_at(v(freq) as f64));
+            let g4 = g * g * g * g;
+            re(gd * (1.0 + 0.5 * k) / gd.sqrt()) * g4 / (re(1.0) + re(k) * delay(f, 1.0) * g4)
+        }
+        BlockKind::CombFilter { freq, feedback, mix } => {
+            let fb = signed(feedback);
+            let d = (sr / (v(freq) as f64).max(1.0)).max(1.0);
+            blend(pct(mix), re(1.0 - fb.abs()) / (re(1.0) + re(-fb) * delay(f, d)))
+        }
+        BlockKind::Formant { vowel, shift, resonance, mix } => {
+            let vw = v(vowel).clamp(0.0, 4.0);
+            let k = 2f32.powf(v(shift).clamp(-24.0, 24.0) / 12.0);
+            let q = 2.0 + pct(resonance) as f32 * 18.0;
+            let i = (vw.floor() as usize).min(3);
+            let t = vw - i as f32;
+            let (fa, aa) = crate::fx::filter::VOWELS[i];
+            let (fb, ab) = crate::fx::filter::VOWELS[i + 1];
+            let mut sum = re(0.0);
+            for b in 0..3 {
+                let mut bq = Biquad::default();
+                bq.set(EqShape::BandPass, (fa[b] + t * (fb[b] - fa[b])) * k, q, 0.0, SR);
+                let (r, im) = bq.response(f, sr);
+                sum = sum + re((aa[b] + t * (ab[b] - aa[b])) as f64) * C(r, im);
+            }
+            blend(pct(mix), re(((q / 4.0).sqrt()) as f64) * sum)
+        }
+        BlockKind::Resonator { notes, decay, mix } => {
+            let r = (-6.907_755 / (v(decay).clamp(10.0, 30_000.0) as f64 * 0.001 * sr)).exp();
+            let b0 = (1.0 - r * r) / 2.0;
+            let mut sum = re(0.0);
+            for hz in notes {
+                let w = std::f64::consts::TAU * (*hz as f64).clamp(10.0, sr * 0.45) / sr;
+                let den = re(1.0) + re(-2.0 * r * w.cos()) * delay(f, 1.0) + re(r * r) * delay(f, 2.0);
+                sum = sum + re(b0) * (re(1.0) + re(-1.0) * delay(f, 2.0)) / den;
+            }
+            blend(pct(mix), re(1.0 / (notes.len().max(1) as f64).sqrt()) * sum)
+        }
+        BlockKind::Flanger { depth, feedback, mix, .. } => {
+            let lfo = 0.5 + 0.5 * sweep as f64;
+            let d = (0.0003 + pct(depth) * 0.005 * lfo) * sr;
+            let z = delay(f, d);
+            blend(pct(mix), z / (re(1.0) + re(-signed(feedback)) * z * delay(f, 1.0)))
+        }
+        BlockKind::Phaser { depth, feedback, freq, stages, mix, .. } => {
+            let fc = ((v(freq) as f64).clamp(20.0, sr * 0.2) * 2f64.powf(pct(depth) * 2.0 * sweep as f64)).clamp(10.0, sr * 0.45);
+            let t = (PI * fc / sr).tan();
+            let a = (t - 1.0) / (t + 1.0);
+            let z = delay(f, 1.0);
+            let stage = (re(a) + z) / (re(1.0) + re(a) * z);
+            let mut chain = re(1.0);
+            for _ in 0..stages.unwrap_or(4) {
+                chain = chain * stage;
+            }
+            blend(pct(mix), chain / (re(1.0) + re(-signed(feedback)) * z * chain))
+        }
+        _ => return None,
+    })
 }
 
 impl Biquad {

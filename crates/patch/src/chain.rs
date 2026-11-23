@@ -223,11 +223,12 @@ pub enum BlockKind {
         sustain: ParamRef,
         lookahead: Option<f32>,
     },
-    /// Linkwitz-Riley (4th order) split into `crossovers.len() + 1` bands
-    /// (phase-aligned, sums flat); each band is processed, then all are summed.
+    /// Linkwitz-Riley split into `crossovers.len() + 1` bands (`slope` 24 = LR4 or 48 = LR8
+    /// dB/oct; phase-aligned, sums flat); each band is processed, then all are summed.
     BandSplit {
         #[serde(deserialize_with = "crate::list")]
         crossovers: Vec<ParamRef>,
+        slope: ParamRef,
         #[serde(deserialize_with = "crate::list")]
         bands: Vec<Chain>,
         /// Linear: complementary linear-phase bands (no phase shift between them).
@@ -242,11 +243,14 @@ pub enum BlockKind {
     Width {
         width: ParamRef,
     },
-    /// Removes the side signal below `freq` (LR4 high-pass on side): mono bass.
+    /// Removes the side signal below `freq` (Linkwitz-Riley high-pass on side, `slope` 24 or 48
+    /// dB/oct): mono bass.
     MonoBass {
         freq: ParamRef,
+        slope: ParamRef,
     },
-    /// Delays one channel by `delay` ms (0..40): Haas widening.
+    /// Delays one channel by `delay` ms (−40..40): > 0 delays `channel`, < 0 the other one.
+    /// Haas widening.
     Haas {
         delay: ParamRef,
         #[serde(default)]

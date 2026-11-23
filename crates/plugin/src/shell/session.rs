@@ -276,6 +276,7 @@ impl Session {
         self.values.meter_in = level(shared.meter_in.load(std::sync::atomic::Ordering::Relaxed));
         self.values.meter_out = level(shared.meter_out.load(std::sync::atomic::Ordering::Relaxed));
         shared.block_meters(&mut self.values.blocks);
+        self.values.tempo = shared.tempo.load(std::sync::atomic::Ordering::Relaxed);
         self.values.time = self.start.elapsed().as_secs_f32();
     }
 

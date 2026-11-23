@@ -82,7 +82,8 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
    [`research/mockups/block-displays.html`](research/mockups/block-displays.html), in the order of
    [`research/block-displays.md`](research/block-displays.md) (steps 1 and 2 done: the `dsp::preview`
    ones restyled, every block drawable from its knobs has a display; next live data through
-   subscribed taps: Gain, Width, Granular, Stutter, DC block still show a card); knob groups as pages and choices
+   subscribed taps: Gain, Width, DC block still show a card). Band split and MonoBass have a `slope`
+   (24/48 dB/oct, LR4/LR8); Haas takes negative delays (delays the other channel); knob groups as pages and choices
    (same doc, §3). Walking the chain must take rapid clicks on ‹ › (and
    repeated ← →): today a click is ignored until the running pan has finished; queue it or retarget the
    pan from where it is. Not yet checked:

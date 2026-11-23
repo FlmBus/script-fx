@@ -1,13 +1,14 @@
-//! The displays drawn from the knobs alone (`docs/research/block-displays.md` §1, step 2; the
-//! designs are `docs/research/mockups/block-displays.html`).
+//! The displays drawn from the knobs (`docs/research/block-displays.md` §1, step 2; designs:
+//! `docs/research/mockups/block-displays.html`).
 //!
-//! These are **illustrations** of what the settings do, not the DSP's output: the filter curves are
-//! analog prototypes, the reverb's decay per band and the tape's colour are approximations. The
-//! modulation blocks draw their LFO at phase 0 (the live phase comes with the taps, step 3), the
-//! containers their routing without levels.
+//! **Fixed axes:** every display has labelled axes that never move; turning a knob changes only the
+//! content. The filters' curves are the DSP's transfer functions (`dsp::preview`). The rest are
+//! illustrations of what the settings do (reverb bands, tape colour, the shape of a hit). The
+//! modulation blocks show their LFO from phase 0 (the live phase comes with the taps, step 3).
 
 use std::f32::consts::{PI, TAU};
 
+use dsp::preview;
 use patch::chain::{BlockKind, BlockSpec, Chain, Channels, DynamicMode, LfoShape, ParamRef, RectifyMode, Side};
 
 use super::super::theme;
@@ -15,7 +16,7 @@ use super::{Plot, curve, dashed, faint, grid, handle, label, muted, polyline, sh
 use nice_plug_iced::iced::{
     Color, Pixels, Point, Rectangle, Size,
     alignment,
-    widget::canvas::{Frame, Path, Stroke, Text},
+    widget::canvas::{Frame, LineJoin, Path, Stroke, Text},
 };
 
 type V<'a> = &'a dyn Fn(&ParamRef) -> f32;
@@ -52,6 +53,8 @@ pub(super) fn draws(kind: &BlockKind) -> bool {
             | BlockKind::AutoPan { .. }
             | BlockKind::BandSplit { .. }
             | BlockKind::Parallel { .. }
+            | BlockKind::Granular { .. }
+            | BlockKind::Stutter { .. }
             | BlockKind::MidSide { .. }
             | BlockKind::LeftRight { .. }
     )
@@ -94,8 +97,11 @@ pub(super) fn caption(kind: &BlockKind, v: V, show: &dyn Fn(&ParamRef) -> String
             let p = v(pan);
             format!("{} ({})", show(pan), if p < -0.5 { "left" } else if p > 0.5 { "right" } else { "centre" })
         }
-        BlockKind::Haas { delay, channel } => format!("{} +{}", if *channel == Side::Left { "left" } else { "right" }, show(delay)),
-        BlockKind::MonoBass { freq } => format!("mono below {}", show(freq)),
+        BlockKind::Haas { delay, channel } => {
+            let d = haas_signed(v(delay), *channel);
+            format!("{} later by {:.1} ms", if d < 0.0 { "left" } else { "right" }, d.abs())
+        }
+        BlockKind::MonoBass { freq, slope } => format!("mono below {} · {} dB/oct", show(freq), v(slope).round()),
         BlockKind::Invert { channels } => match channels {
             Channels::Both => "both channels inverted".into(),
             Channels::Left => "left channel inverted".into(),
@@ -107,11 +113,19 @@ pub(super) fn caption(kind: &BlockKind, v: V, show: &dyn Fn(&ParamRef) -> String
         BlockKind::Tremolo { rate: r, sync, depth, shape, .. } | BlockKind::AutoPan { rate: r, sync, depth, shape, .. } => {
             format!("{} · depth {} · {}", rate(r, sync), show(depth), shape_name(*shape))
         }
-        BlockKind::BandSplit { crossovers, .. } => format!("LR4 · {}", crossovers.iter().map(show).collect::<Vec<_>>().join(" · ")),
+        BlockKind::BandSplit { crossovers, slope, .. } => format!("{} dB/oct · {}", v(slope).round(), crossovers.iter().map(show).collect::<Vec<_>>().join(" · ")),
         BlockKind::Parallel { branches, mix } => match mix {
             Some(m) => format!("{} branches · mix {}", branches.len(), show(m)),
             None => format!("{} branches, summed", branches.len()),
         },
+        BlockKind::Granular { grain, density, spread, .. } => join(&[("grain ", grain), ("", density), ("spread ", spread)]),
+        BlockKind::Stutter { active, length, sync, .. } => {
+            let on = if v(active) > 0.5 { "repeating" } else { "off" };
+            match sync {
+                Some(beats) => format!("{} beat slice · {on}", trim(*beats)),
+                None => format!("{} slice · {on}", show(length)),
+            }
+        }
         BlockKind::MidSide { .. } => "encode · mid ‖ side · decode".into(),
         BlockKind::LeftRight { .. } => "left ‖ right".into(),
         _ => String::new(),
@@ -119,39 +133,71 @@ pub(super) fn caption(kind: &BlockKind, v: V, show: &dyn Fn(&ParamRef) -> String
 }
 
 /// Draws the block's display into `plot`.
-pub(super) fn draw(f: &mut Frame, plot: Plot, kind: &BlockKind, v: V) {
+pub(super) fn draw(f: &mut Frame, plot: Plot, kind: &BlockKind, v: V, tempo: f32) {
+    let hz = |rate: &ParamRef, sync: &Option<f32>| match sync {
+        Some(beats) => tempo / 60.0 / beats,
+        None => v(rate),
+    };
     match kind {
-        BlockKind::MorphFilter { freq, morph, resonance } => morph_filter(f, plot, v(freq), v(morph) / 100.0, v(resonance) / 100.0),
-        BlockKind::LadderFilter { freq, resonance, .. } => ladder(f, plot, v(freq), v(resonance) / 100.0),
-        BlockKind::CombFilter { freq, feedback, mix } => comb(f, plot, v(freq), v(feedback) / 100.0, v(mix) / 100.0),
-        BlockKind::Formant { vowel, shift, resonance, mix } => formant(f, plot, v(vowel), v(shift), v(resonance) / 100.0, v(mix) / 100.0),
-        BlockKind::Resonator { notes, decay, mix } => resonator(f, plot, notes, v(decay), v(mix) / 100.0),
+        BlockKind::MorphFilter { freq, morph, .. } => {
+            let fr = filter_curve(f, plot, kind, v, -48.0, 24.0, &[v(freq)]);
+            handle(f, fr.on(kind, v, v(freq)));
+            track(f, Point::new(fr.p.x + fr.p.w - 108.0, fr.p.y + 6.0), 100.0, &["LP", "BP", "HP"], v(morph) / 100.0);
+        }
+        BlockKind::LadderFilter { freq, .. } => {
+            let fr = filter_curve(f, plot, kind, v, -48.0, 24.0, &[v(freq)]);
+            handle(f, fr.on(kind, v, v(freq)));
+        }
+        BlockKind::CombFilter { freq, .. } => comb(f, plot, kind, v, v(freq)),
+        BlockKind::Formant { vowel, .. } => {
+            let fr = filter_curve(f, plot, kind, v, -36.0, 24.0, &[]);
+            track(f, Point::new(fr.p.x + fr.p.w - 108.0, fr.p.y + 6.0), 100.0, &["a", "e", "i", "o", "u"], v(vowel) / 4.0);
+        }
+        BlockKind::Resonator { notes, .. } => {
+            let fr = filter_curve(f, plot, kind, v, -48.0, 12.0, notes);
+            // Close notes: their names alternate between two heights.
+            for (i, n) in notes.iter().enumerate() {
+                let at = fr.on(kind, v, *n);
+                let lift = if i % 2 == 0 { 13.0 } else { 24.0 };
+                label(f, &note_name(*n), Point::new(at.x, (at.y - lift).max(fr.p.y)), alignment::Horizontal::Center, muted());
+            }
+        }
         BlockKind::DynamicEq { freq, q, range, mode, .. } => dynamic_eq(f, plot, v(freq), v(q), v(range), *mode),
         BlockKind::Transient { attack, sustain, .. } => transient(f, plot, v(attack), v(sustain)),
         BlockKind::Gate { threshold, ratio, range, .. } => gate(f, plot, v(threshold), v(ratio), v(range)),
         BlockKind::DeEsser { freq, range, .. } => de_esser(f, plot, v(freq), v(range)),
         BlockKind::Rider { target, range, .. } => rider(f, plot, v(target), v(range)),
-        BlockKind::Bitcrusher { bits, rate, mix } => bitcrusher(f, plot, v(bits), rate.as_ref().map_or(48_000.0, v), v(mix) / 100.0),
-        BlockKind::RingMod { freq, mix } => ring_mod(f, plot, v(freq), v(mix) / 100.0),
+        BlockKind::Bitcrusher { bits, rate, .. } => bitcrusher(f, plot, v(bits), rate.as_ref().map_or(48_000.0, v)),
+        BlockKind::RingMod { freq, .. } => ring_mod(f, plot, v(freq)),
         BlockKind::Rectifier { mode, mix } => {
             let (full, mix) = (*mode == RectifyMode::Full, v(mix) / 100.0);
-            let shape = move |x: f32| Some(x + mix * (if full { x.abs() } else { x.max(0.0) } - x));
+            let shape = move |x: f32| Some(x + mix * (if full { x.abs() } else { x.max(0.0) * 2.0 } - x));
             let _ = shaper(f, plot, &shape, None);
         }
         BlockKind::Tape { drive, wow, flutter, .. } => tape(f, plot, v(drive), v(wow) / 100.0, v(flutter) / 100.0),
         BlockKind::Reverb(r) => reverb(f, plot, v(&r.decay), v(&r.damping) / 100.0, v(&r.predelay)),
-        BlockKind::Shimmer(r) => shimmer(f, plot, v(&r.decay), r.pitch.as_ref().map_or(12.0, v), r.amount.as_ref().map_or(50.0, v) / 100.0),
+        BlockKind::Shimmer(r) => shimmer(f, plot, v(&r.decay), v(&r.predelay), r.pitch.as_ref().map_or(12.0, v), r.amount.as_ref().map_or(50.0, v) / 100.0),
         BlockKind::PitchShift { semitones, .. } => pitch_shift(f, plot, v(semitones)),
+        BlockKind::Granular { grain, density, spread, pitch, jitter, reverse, .. } => {
+            granular(f, plot, v(grain), v(density), v(spread), v(pitch), v(jitter), v(reverse) / 100.0)
+        }
+        BlockKind::Stutter { active, length, sync, .. } => {
+            let ms = match sync {
+                Some(beats) => beats * 60_000.0 / tempo,
+                None => v(length),
+            };
+            stutter(f, plot, ms, v(active) > 0.5)
+        }
         BlockKind::Pan { pan } => pan_view(f, plot, v(pan) / 100.0),
-        BlockKind::Haas { delay, channel } => haas(f, plot, v(delay), *channel),
-        BlockKind::MonoBass { freq } => mono_bass(f, plot, v(freq)),
+        BlockKind::Haas { delay, channel } => haas(f, plot, haas_signed(v(delay), *channel)),
+        BlockKind::MonoBass { freq, slope } => mono_bass(f, plot, v(freq), v(slope)),
         BlockKind::Invert { channels } => invert(f, plot, *channels),
-        BlockKind::Chorus { depth, .. } => chorus(f, plot, v(depth) / 100.0),
-        BlockKind::Flanger { depth, feedback, .. } => flanger(f, plot, v(depth) / 100.0, v(feedback) / 100.0),
-        BlockKind::Phaser { freq, stages, mix, .. } => phaser(f, plot, v(freq), stages.unwrap_or(4), v(mix) / 100.0),
-        BlockKind::Tremolo { depth, shape, phase_offset, .. } => tremolo(f, plot, v(depth) / 100.0, *shape, v(phase_offset)),
-        BlockKind::AutoPan { depth, shape, phase_offset, .. } => auto_pan(f, plot, v(depth) / 100.0, *shape, v(phase_offset)),
-        BlockKind::BandSplit { crossovers, .. } => band_split(f, plot, &crossovers.iter().map(v).collect::<Vec<_>>()),
+        BlockKind::Chorus { rate, sync, depth, .. } => chorus(f, plot, hz(rate, sync), v(depth) / 100.0),
+        BlockKind::Flanger { .. } => swept(f, plot, kind, v, None),
+        BlockKind::Phaser { freq, .. } => swept(f, plot, kind, v, Some(v(freq))),
+        BlockKind::Tremolo { rate, sync, depth, shape, phase_offset } => tremolo(f, plot, hz(rate, sync), v(depth) / 100.0, *shape, v(phase_offset)),
+        BlockKind::AutoPan { rate, sync, depth, shape, phase_offset } => auto_pan(f, plot, hz(rate, sync), v(depth) / 100.0, *shape, v(phase_offset)),
+        BlockKind::BandSplit { crossovers, slope, .. } => band_split(f, plot, &crossovers.iter().map(v).collect::<Vec<_>>(), v(slope)),
         BlockKind::Parallel { branches, mix } => {
             let wet = branches.iter().filter(|c| !c.0.is_empty()).count();
             let mut n = 0;
@@ -175,416 +221,462 @@ pub(super) fn draw(f: &mut Frame, plot: Plot, kind: &BlockKind, v: V) {
     }
 }
 
-// ---- a frequency plot ----------------------------------------------------------------------------
+/// > 0 = the right channel later, < 0 the left (`channel = "left"` flips it, as in the DSP).
+fn haas_signed(delay: f32, channel: Side) -> f32 {
+    if channel == Side::Left { -delay } else { delay }
+}
 
-/// Magnitude in dB over `f0`…`f1` Hz (log); the axis labels go below `plot`.
-struct Freq {
+// ---- axes --------------------------------------------------------------------------------------
+
+/// The area inside the axis labels.
+pub(super) fn inner(plot: Plot) -> Plot {
+    Plot { x: plot.x + 28.0, y: plot.y, w: plot.w - 28.0, h: plot.h - 13.0 }
+}
+
+/// A vertical grid line at `t` (0..1) with its label under the plot.
+pub(super) fn xtick(f: &mut Frame, p: Plot, t: f32, s: &str) {
+    let x = p.px(t);
+    f.stroke(&Path::line(Point::new(x, p.y), Point::new(x, p.y + p.h)), grid());
+    if !s.is_empty() {
+        label(f, s, Point::new(x, p.y + p.h + 3.0), alignment::Horizontal::Center, faint());
+    }
+}
+
+/// A horizontal grid line at `t` (0 = bottom) with its label left of the plot.
+pub(super) fn ytick(f: &mut Frame, p: Plot, t: f32, s: &str) {
+    let y = p.py(t);
+    f.stroke(&Path::line(Point::new(p.x, y), Point::new(p.x + p.w, y)), grid());
+    if !s.is_empty() {
+        label(f, s, Point::new(p.x - 4.0, y - 5.0), alignment::Horizontal::Right, faint());
+    }
+}
+
+/// The y axis' unit, above it.
+pub(super) fn unit(f: &mut Frame, p: Plot, s: &str) {
+    label(f, s, Point::new(p.x - 4.0, p.y - 12.0), alignment::Horizontal::Left, faint());
+}
+
+fn time_axis(f: &mut Frame, p: Plot, span: f32, step: f32, suffix: &str) {
+    let n = (span / step).round() as usize;
+    for i in 0..=n {
+        let at = i as f32 * step;
+        xtick(f, p, at / span, &format!("{}{suffix}", trim(at)));
+    }
+}
+
+// ---- a frequency plot --------------------------------------------------------------------------
+
+const F0: f32 = 20.0;
+const F1: f32 = 20000.0;
+
+/// Magnitude in dB over 20 Hz–20 kHz (log), fixed for every block.
+pub(super) struct Freq {
     p: Plot,
-    f0: f32,
-    f1: f32,
     lo: f32,
     hi: f32,
 }
 
 impl Freq {
-    /// Room for the labels at the bottom.
-    fn new(plot: Plot, f0: f32, f1: f32, lo: f32, hi: f32) -> Self {
-        Self { p: Plot { h: plot.h - 12.0, ..plot }, f0, f1, lo, hi }
+    pub(super) fn new(plot: Plot, lo: f32, hi: f32) -> Self {
+        Self { p: inner(plot), lo, hi }
     }
 
     fn x(&self, hz: f32) -> f32 {
-        self.p.px(((hz / self.f0).max(1e-6).ln() / (self.f1 / self.f0).ln()).clamp(-0.01, 1.01))
+        self.p.px(((hz / F0).max(1e-6).ln() / (F1 / F0).ln()).clamp(0.0, 1.0))
     }
 
     fn y(&self, db: f32) -> f32 {
-        self.p.py(((db - self.lo) / (self.hi - self.lo)).clamp(-0.01, 1.01))
+        self.p.py(((db - self.lo) / (self.hi - self.lo)).clamp(0.0, 1.0))
     }
 
-    fn at(&self, hz: f32, db: f32) -> Point {
+    pub(super) fn at(&self, hz: f32, db: f32) -> Point {
         Point::new(self.x(hz), self.y(db))
     }
 
-    fn grid(&self, f: &mut Frame) {
-        for hz in [20.0f32, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0] {
-            if hz > self.f0 * 1.01 && hz < self.f1 * 0.99 {
-                let x = self.x(hz);
-                f.stroke(&Path::line(Point::new(x, self.p.y), Point::new(x, self.p.y + self.p.h)), grid());
-                if [100.0, 1000.0, 10000.0].contains(&hz) || self.f1 / self.f0 < 50.0 {
-                    label(f, &hz_short(hz), Point::new(x, self.p.y + self.p.h + 4.0), alignment::Horizontal::Center, faint());
-                }
-            }
-        }
-        let mut d = (self.lo / 12.0).ceil() * 12.0;
-        while d <= self.hi {
-            f.stroke(&Path::line(Point::new(self.p.x, self.y(d)), Point::new(self.p.x + self.p.w, self.y(d))), if d == 0.0 { zero() } else { grid() });
-            d += 12.0;
-        }
+    /// The point on `kind`'s curve at `hz`.
+    fn on(&self, kind: &BlockKind, v: V, hz: f32) -> Point {
+        self.at(hz, preview::response_db(kind, v, &[hz]).and_then(|d| d.first().copied()).unwrap_or(0.0))
     }
 
-    /// The curve of `db(hz)`, `n` points.
-    fn path(&self, n: usize, db: impl Fn(f32) -> f32) -> Path {
-        Path::new(|p| polyline(p, (0..=n).map(|i| {
-            let hz = self.f0 * (self.f1 / self.f0).powf(i as f32 / n as f32);
-            self.at(hz, db(hz))
-        })))
+    pub(super) fn grid(&self, f: &mut Frame) {
+        for hz in [50.0f32, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0] {
+            let t = (hz / F0).ln() / (F1 / F0).ln();
+            let s = match hz as u32 { 100 => "100", 1000 => "1k", 10000 => "10k", _ => "" };
+            xtick(f, self.p, t, s);
+        }
+        label(f, "Hz", Point::new(self.p.x + self.p.w, self.p.y + self.p.h + 3.0), alignment::Horizontal::Right, faint());
+        let step = if self.hi - self.lo > 48.0 { 24.0 } else if self.hi - self.lo > 24.0 { 12.0 } else { 6.0 };
+        let mut d = (self.lo / step).ceil() * step;
+        while d <= self.hi {
+            let t = (d - self.lo) / (self.hi - self.lo);
+            ytick(f, self.p, t, &format!("{d:+}").replace("+0", "0"));
+            if d == 0.0 {
+                f.stroke(&Path::line(Point::new(self.p.x, self.y(0.0)), Point::new(self.p.x + self.p.w, self.y(0.0))), zero());
+            }
+            d += step;
+        }
+        unit(f, self.p, "dB");
+    }
+
+    /// `n` log-spaced frequencies.
+    pub(super) fn freqs(&self, n: usize) -> Vec<f32> {
+        (0..=n).map(|i| F0 * (F1 / F0).powf(i as f32 / n as f32)).collect()
+    }
+
+    /// The curve; where it falls off the bottom of the scale it isn't drawn.
+    pub(super) fn path(&self, freqs: &[f32], db: &[f32]) -> Path {
+        Path::new(|p| {
+            let mut drawing = false;
+            for i in 0..freqs.len() {
+                let visible = db[i] >= self.lo || db.get(i + 1).is_some_and(|d| *d >= self.lo) || (i > 0 && db[i - 1] >= self.lo);
+                let at = self.at(freqs[i], db[i]);
+                match (visible, drawing) {
+                    (true, true) => p.line_to(at),
+                    (true, false) => p.move_to(at),
+                    _ => {}
+                }
+                drawing = visible;
+            }
+        })
     }
 
     /// The area between the curve and 0 dB.
-    fn fill(&self, f: &mut Frame, n: usize, db: impl Fn(f32) -> f32) {
+    pub(super) fn fill(&self, f: &mut Frame, freqs: &[f32], db: &[f32]) {
         let y0 = self.y(0.0);
         let area = Path::new(|p| {
             p.move_to(Point::new(self.p.x, y0));
-            for i in 0..=n {
-                let hz = self.f0 * (self.f1 / self.f0).powf(i as f32 / n as f32);
-                p.line_to(self.at(hz, db(hz)));
-            }
+            freqs.iter().zip(db).for_each(|(hz, d)| p.line_to(self.at(*hz, *d)));
             p.line_to(Point::new(self.p.x + self.p.w, y0));
             p.close();
         });
         f.fill(&area, ink(0.07));
     }
+
+    fn func(&self, n: usize, g: impl Fn(f32) -> f32) -> Path {
+        let freqs = self.freqs(n);
+        let db: Vec<f32> = freqs.iter().map(|hz| g(*hz)).collect();
+        self.path(&freqs, &db)
+    }
 }
 
-// Analog prototypes: magnitudes of second-order sections at w = f / fc.
-fn m2(a2: f32, a1: f32, a0: f32, w: f32) -> f32 {
-    (a0 - a2 * w * w).hypot(a1 * w)
-}
 fn lp2(f: f32, fc: f32, q: f32) -> f32 {
-    1.0 / m2(1.0, 1.0 / q, 1.0, f / fc)
-}
-fn hp2(f: f32, fc: f32, q: f32) -> f32 {
     let w = f / fc;
-    w * w / m2(1.0, 1.0 / q, 1.0, w)
-}
-fn bp2(f: f32, fc: f32, q: f32) -> f32 {
-    let w = f / fc;
-    (w / q) / m2(1.0, 1.0 / q, 1.0, w)
+    1.0 / (1.0 - w * w).hypot(w / q)
 }
 fn peak(f: f32, fc: f32, q: f32, gain_db: f32) -> f32 {
     let a = 10f32.powf(gain_db / 40.0);
     let w = f / fc;
-    m2(1.0, a / q, 1.0, w) / m2(1.0, 1.0 / (a * q), 1.0, w)
+    (1.0 - w * w).hypot(a / q * w) / (1.0 - w * w).hypot(w / (a * q))
 }
 fn high_shelf(f: f32, fc: f32, q: f32, gain_db: f32) -> f32 {
     let a = 10f32.powf(gain_db / 40.0);
     let s = a.sqrt();
     let w = f / fc;
-    a * m2(a, s / q, 1.0, w) / m2(1.0, s / q, a, w)
+    a * (1.0 - a * w * w).hypot(s / q * w) / (a - w * w).hypot(s / q * w)
 }
 fn db(x: f32) -> f32 {
     20.0 * x.max(1e-6).log10()
 }
 
-// ---- filters ---------------------------------------------------------------------------------------
+// ---- filters -----------------------------------------------------------------------------------
 
-/// LP (0) → BP (0.5) → HP (1), and where the morph is on that track.
-fn morph_filter(f: &mut Frame, plot: Plot, fc: f32, morph: f32, res: f32) {
-    let q = 0.707 + res * 8.0;
-    let mag = |hz: f32| {
-        let (l, b, h) = (lp2(hz, fc, q), bp2(hz, fc, q), hp2(hz, fc, q));
-        db(if morph < 0.5 { lerp(l, b, morph * 2.0) } else { lerp(b, h, morph * 2.0 - 1.0) })
-    };
-    let fr = Freq::new(plot, 20.0, 20000.0, -36.0, 24.0);
+/// The block's real response; `exact`: frequencies that must be on the curve (narrow peaks).
+fn filter_curve(f: &mut Frame, plot: Plot, kind: &BlockKind, v: V, lo: f32, hi: f32, exact: &[f32]) -> Freq {
+    let fr = Freq::new(plot, lo, hi);
     fr.grid(f);
-    f.stroke(&fr.path(240, mag), curve());
-    handle(f, fr.at(fc, mag(fc)));
-    track(f, Point::new(plot.x + plot.w - 112.0, plot.y + 6.0), 100.0, &["LP", "BP", "HP"], morph);
-}
-
-/// The 4-pole ladder's low pass with its resonance peak.
-fn ladder(f: &mut Frame, plot: Plot, fc: f32, res: f32) {
-    let mag = |hz: f32| db(lp2(hz, fc, 0.54) * lp2(hz, fc, 0.54 + res * 6.0));
-    let fr = Freq::new(plot, 20.0, 20000.0, -48.0, 24.0);
-    fr.grid(f);
-    f.stroke(&fr.path(240, mag), curve());
-    handle(f, fr.at(fc, mag(fc)));
-}
-
-/// The comb on a linear axis, so its teeth are evenly spaced (dry and wet mixed).
-fn comb(f: &mut Frame, plot: Plot, f0: f32, g: f32, mix: f32) {
-    let p = Plot { h: plot.h - 12.0, ..plot };
-    let span = (f0 * 16.0).clamp(500.0, 20000.0);
-    let (lo, hi) = (-12.0, 12.0);
-    let x = |hz: f32| p.px(hz / span);
-    let y = |d: f32| p.py(((d - lo) / (hi - lo)).clamp(-0.01, 1.01));
-    let mag = |hz: f32| {
-        let th = TAU * hz / f0;
-        let (re, im) = (1.0 - g * th.cos(), g * th.sin());
-        let n = re * re + im * im;
-        // dry + wet · 1 / (1 − g·e^(−jθ))
-        let (wr, wi) = (re / n, -im / n);
-        db(((1.0 - mix) + mix * wr).hypot(mix * wi))
-    };
-    let step = nice_step(span / 5.0);
-    let mut t = step;
-    while t < span {
-        f.stroke(&Path::line(Point::new(x(t), p.y), Point::new(x(t), p.y + p.h)), grid());
-        label(f, &hz_short(t), Point::new(x(t), p.y + p.h + 4.0), alignment::Horizontal::Center, faint());
-        t += step;
+    let mut freqs = fr.freqs(700);
+    for hz in exact {
+        freqs.extend((-8..=8).map(|k| hz * 2f32.powf(k as f32 / 400.0)));
     }
+    freqs.sort_by(f32::total_cmp);
+    if let Some(d) = preview::response_db(kind, v, &freqs) {
+        f.stroke(&fr.path(&freqs, &d), curve().with_width(1.7));
+    }
+    fr
+}
+
+/// The comb on a fixed, linear 0–5 kHz axis, so its teeth are evenly spaced.
+fn comb(f: &mut Frame, plot: Plot, kind: &BlockKind, v: V, f0: f32) {
+    const SPAN: f32 = 5000.0;
+    const LO: f32 = -36.0;
+    const HI: f32 = 12.0;
+    let p = inner(plot);
+    for k in 0..=5 {
+        xtick(f, p, k as f32 / 5.0, &if k == 0 { "0".to_string() } else { format!("{k}k") });
+    }
+    let mut d = LO;
+    while d <= HI {
+        ytick(f, p, (d - LO) / (HI - LO), &format!("{d:+}").replace("+0", "0"));
+        d += 12.0;
+    }
+    unit(f, p, "dB");
+    let y = |d: f32| p.py(((d - LO) / (HI - LO)).clamp(0.0, 1.0));
     f.stroke(&Path::line(Point::new(p.x, y(0.0)), Point::new(p.x + p.w, y(0.0))), zero());
-    let n = 600;
-    f.stroke(&Path::new(|b| polyline(b, (0..=n).map(|i| { let hz = span * i as f32 / n as f32; Point::new(x(hz), y(mag(hz))) }))), curve().with_width(1.6));
-    handle(f, Point::new(x(f0), y(mag(f0))));
+    let freqs: Vec<f32> = (1..=1600).map(|i| SPAN * i as f32 / 1600.0).collect();
+    let Some(mag) = preview::response_db(kind, v, &freqs) else { return };
+    f.stroke(&Path::new(|b| polyline(b, freqs.iter().zip(&mag).map(|(hz, d)| Point::new(p.px(hz / SPAN), y(*d))))), curve().with_width(1.5));
+    if f0 <= SPAN
+        && let Some(at) = preview::response_db(kind, v, &[f0])
+    {
+        handle(f, Point::new(p.px(f0 / SPAN), y(at[0])));
+    }
 }
 
-/// Formants of the vowels a e i o u (F1–F3, Hz).
-const VOWELS: [[f32; 3]; 5] = [[730.0, 1090.0, 2440.0], [530.0, 1840.0, 2480.0], [270.0, 2290.0, 3010.0], [570.0, 840.0, 2410.0], [300.0, 870.0, 2240.0]];
-
-/// The formant peaks of the current vowel, and the vowel on an a e i o u track.
-fn formant(f: &mut Frame, plot: Plot, vowel: f32, shift: f32, res: f32, mix: f32) {
-    let vw = vowel.clamp(0.0, 4.0);
-    let (i, t) = ((vw.floor() as usize).min(3), vw - vw.floor().min(3.0));
-    let k = 2f32.powf(shift / 12.0);
-    let formants: Vec<f32> = (0..3).map(|j| lerp(VOWELS[i][j], VOWELS[i + 1][j], t) * k).collect();
-    let bw = 220.0 * (1.0 - 0.8 * res) + 30.0;
-    let gains = [1.0, 0.55, 0.3];
-    let mag = |hz: f32| db((1.0 - mix) + mix * 2.0 * formants.iter().zip(gains).map(|(fc, g)| g * bp2(hz, *fc, fc / bw)).sum::<f32>());
-    let fr = Freq::new(plot, 80.0, 8000.0, -36.0, 18.0);
+/// Flanger, phaser: the response at the sweep's middle (ink) and at its two ends (faint).
+fn swept(f: &mut Frame, plot: Plot, kind: &BlockKind, v: V, centre: Option<f32>) {
+    let fr = Freq::new(plot, -48.0, 24.0);
     fr.grid(f);
-    fr.fill(f, 240, mag);
-    f.stroke(&fr.path(240, mag), curve());
-    for (j, fc) in formants.iter().enumerate() {
-        label(f, &format!("F{}", j + 1), Point::new(fr.x(*fc), fr.p.y + fr.p.h - 12.0), alignment::Horizontal::Center, faint());
+    let mut freqs = fr.freqs(1800);
+    freqs.dedup();
+    for (sweep, stroke) in [(-1.0, Stroke::default().with_color(ink(0.18)).with_width(1.0)), (1.0, Stroke::default().with_color(ink(0.18)).with_width(1.0)), (0.0, curve().with_width(1.4))] {
+        if let Some(d) = preview::sweep_db(kind, v, &freqs, sweep) {
+            f.stroke(&fr.path(&freqs, &d), stroke);
+        }
     }
-    track(f, Point::new(plot.x + plot.w - 112.0, plot.y + 6.0), 100.0, &["a", "e", "i", "o", "u"], vw / 4.0);
-}
-
-/// The tuned notes as sharp peaks, labelled.
-fn resonator(f: &mut Frame, plot: Plot, notes: &[f32], decay_ms: f32, mix: f32) {
-    if notes.is_empty() {
-        return;
-    }
-    let (min, max) = notes.iter().fold((f32::MAX, 0f32), |(a, b), n| (a.min(*n), b.max(*n)));
-    let (mut f0, mut f1) = ((min / 1.6).max(20.0), (max * 1.6).min(20000.0));
-    if f1 / f0 < 6.0 {
-        let c = (f0 * f1).sqrt();
-        (f0, f1) = (c / 6f32.sqrt(), c * 6f32.sqrt());
-    }
-    // Rings for `decay` (to −60 dB): bandwidth 6.9 / (π · decay).
-    let bw = 6.9 / (PI * (decay_ms / 1000.0).max(0.01));
-    let mag = |hz: f32| db((1.0 - mix) * 0.05 + mix * notes.iter().map(|n| bp2(hz, *n, (n / bw).min(800.0))).sum::<f32>());
-    let fr = Freq::new(plot, f0, f1, -42.0, 12.0);
-    fr.grid(f);
-    f.stroke(&fr.path(800, mag), curve().with_width(1.6));
-    for n in notes {
-        label(f, &note_name(*n), Point::new(fr.x(*n), (fr.y(mag(*n)) - 13.0).max(plot.y)), alignment::Horizontal::Center, muted());
+    if let Some(hz) = centre {
+        handle(f, fr.on(kind, v, hz));
     }
 }
 
-/// The band at full range (dashed) around the current curve (flat until the band gets loud;
-/// what it does right now comes with the live data).
+/// The band at full range (dashed) around 0 dB (what it does right now comes with the live data).
 fn dynamic_eq(f: &mut Frame, plot: Plot, fc: f32, q: f32, range: f32, mode: DynamicMode) {
     let full = if mode == DynamicMode::Cut { -range } else { range };
-    let fr = Freq::new(plot, 20.0, 20000.0, -24.0, 24.0);
+    let fr = Freq::new(plot, -24.0, 24.0);
     fr.grid(f);
-    f.stroke(&fr.path(240, |hz| db(peak(hz, fc, q.max(0.1), full))), dashed(muted()).with_width(1.3));
-    f.stroke(&Path::line(Point::new(fr.p.x, fr.y(0.0)), Point::new(fr.p.x + fr.p.w, fr.y(0.0))), curve());
+    f.stroke(&fr.func(320, |hz| db(peak(hz, fc, q.max(0.1), full))), dashed(muted()).with_width(1.3));
+    f.stroke(&Path::line(fr.at(F0, 0.0), fr.at(F1, 0.0)), curve());
     handle(f, fr.at(fc, 0.0));
 }
 
-// ---- dynamics --------------------------------------------------------------------------------------
+// ---- dynamics ----------------------------------------------------------------------------------
 
-/// One hit before (grey) and after (ink): the attack lifted or softened, the tail longer or shorter.
+/// One hit before (grey) and after (ink) in dB over 200 ms: the attack lifted or softened, the
+/// sustain raised or lowered. An illustration.
 fn transient(f: &mut Frame, plot: Plot, attack_db: f32, sustain_db: f32) {
-    const N: usize = 200;
-    let (boost, sus) = (10f32.powf(attack_db / 20.0), sustain_db / 24.0);
-    let env = |u: f32| if u < 0.05 { u / 0.05 } else { (-(u - 0.05) * 5.0).exp() };
-    let shaped = |u: f32| {
-        let a = if u < 0.05 { lerp(1.0, boost, u / 0.05) } else if u < 0.15 { lerp(boost, 1.0, (u - 0.05) / 0.1) } else { 1.0 };
-        let s = if u > 0.15 { (sus * (u - 0.15) * 6.0).exp() } else { 1.0 };
-        env(u) * a * s
+    const SPAN: f32 = 200.0;
+    const LO: f32 = -48.0;
+    const HI: f32 = 24.0;
+    let p = inner(plot);
+    time_axis(f, p, SPAN, 50.0, "");
+    label(f, "ms", Point::new(p.x + p.w, p.y + p.h - 11.0), alignment::Horizontal::Right, faint());
+    let mut d = LO;
+    while d <= HI {
+        ytick(f, p, (d - LO) / (HI - LO), &format!("{d:+}").replace("+0", "0"));
+        d += 24.0;
+    }
+    unit(f, p, "dB");
+    let y = |d: f32| p.py(((d - LO) / (HI - LO)).clamp(0.0, 1.0));
+    // Input: 5 ms rise, then −0.2 dB per ms.
+    let input = |ms: f32| if ms < 5.0 { LO + (0.0 - LO) * ms / 5.0 } else { -(ms - 5.0) * 0.2 };
+    let output = |ms: f32| {
+        let a = if ms < 5.0 { attack_db * ms / 5.0 } else if ms < 25.0 { attack_db * (1.0 - (ms - 5.0) / 20.0) } else { 0.0 };
+        let s = sustain_db * ((ms - 10.0) / 30.0).clamp(0.0, 1.0);
+        input(ms) + a + s
     };
-    let scale = 0.62 / boost.max(1.0);
-    let at = |u: f32, y: f32| Point::new(plot.px(u), plot.py((y * scale).clamp(0.0, 1.0)));
-    let area = Path::new(|p| {
-        p.move_to(Point::new(plot.x, plot.y + plot.h));
-        (0..=N).for_each(|i| { let u = i as f32 / N as f32; p.line_to(at(u, env(u))) });
-        p.line_to(Point::new(plot.x + plot.w, plot.y + plot.h));
-        p.close();
+    let at = |ms: f32, g: &dyn Fn(f32) -> f32| Point::new(p.px(ms / SPAN), y(g(ms)));
+    let area = Path::new(|b| {
+        b.move_to(Point::new(p.x, p.y + p.h));
+        (0..=200).for_each(|i| b.line_to(at(i as f32, &input)));
+        b.line_to(Point::new(p.x + p.w, p.y + p.h));
+        b.close();
     });
     f.fill(&area, ink(0.1));
-    f.stroke(&Path::new(|p| polyline(p, (0..=N).map(|i| { let u = i as f32 / N as f32; at(u, shaped(u)) }))), curve());
-    label(f, "in ▒   out ━", Point::new(plot.x + plot.w, plot.y), alignment::Horizontal::Right, faint());
+    f.stroke(&Path::new(|b| polyline(b, (0..=400).map(|i| at(i as f32 / 2.0, &output)))), curve());
+    label(f, "in ▒   out ━", Point::new(p.x + p.w, p.y), alignment::Horizontal::Right, faint());
 }
 
-/// Input level → output level (−80…0 dB): below the threshold it falls away by the ratio, at most
-/// by the range.
+/// Input → output level, exactly the DSP's static curve: below the threshold the level falls by
+/// (ratio − 1) dB per dB, at most by the range; from there it runs parallel to the identity.
 fn gate(f: &mut Frame, plot: Plot, thr: f32, ratio: f32, range: f32) {
-    const FLOOR: f32 = -80.0;
-    let side = plot.h;
-    let sq = Plot { x: plot.x + (plot.w - side) / 2.0, y: plot.y, w: side, h: side };
-    let to = |i: f32, o: f32| Point::new(sq.px(i / -FLOOR + 1.0), sq.py((o / -FLOOR + 1.0).clamp(0.0, 1.0)));
-    let out = |i: f32| if i >= thr { i } else { (thr + (i - thr) * ratio).max(i - range) };
-    for k in 0..=4 {
-        let d = FLOOR + k as f32 * 20.0;
-        f.stroke(&Path::line(to(d, FLOOR), to(d, 0.0)), grid());
-        f.stroke(&Path::line(to(FLOOR, d), to(0.0, d)), grid());
+    const FLOOR: f32 = -90.0;
+    let a = inner(plot);
+    let sq = Plot { x: a.x + (a.w - a.h) / 2.0, y: a.y, w: a.h, h: a.h };
+    let to = |i: f32, o: f32| Point::new(sq.px(i / -FLOOR + 1.0), sq.py(o / -FLOOR + 1.0));
+    let out = |i: f32| if i >= thr { i } else { i - ((thr - i) * (ratio - 1.0)).min(range) };
+    for k in 0..=3 {
+        let d = FLOOR + k as f32 * 30.0;
+        let t = k as f32 / 3.0;
+        xtick(f, sq, t, &format!("{d}"));
+        ytick(f, sq, t, &format!("{d}"));
     }
+    unit(f, sq, "out dB");
+    label(f, "in dB", Point::new(sq.x + sq.w + 18.0, sq.y + sq.h + 3.0), alignment::Horizontal::Left, faint());
     f.stroke(&Path::line(to(FLOOR, FLOOR), to(0.0, 0.0)), dashed(faint()));
     f.stroke(&Path::line(to(thr, FLOOR), to(thr, 0.0)), dashed(muted()));
-    f.stroke(&Path::new(|p| polyline(p, (0..=200).map(|k| { let i = FLOOR * (1.0 - k as f32 / 200.0); to(i, out(i)) }))), curve());
+    // The curve only rises: find where it enters the plot, then its corners.
+    let (mut lo, mut hi) = (FLOOR, thr);
+    for _ in 0..32 {
+        let m = (lo + hi) / 2.0;
+        if out(m) < FLOOR { lo = m } else { hi = m }
+    }
+    let start = hi;
+    let knee = if ratio > 1.0 { thr - range / (ratio - 1.0) } else { thr };
+    let mut xs = vec![start];
+    if knee > start {
+        xs.push(knee);
+    }
+    // The drop at the threshold is continuous, so these corners are the whole curve.
+    xs.extend([thr, 0.0]);
+    f.stroke(&Path::new(|p| polyline(p, xs.iter().map(|i| to(*i, out(*i).max(FLOOR))))), curve());
     handle(f, to(thr, thr));
-    label(f, "threshold", Point::new(to(thr, 0.0).x + 4.0, sq.y), alignment::Horizontal::Left, muted());
-    label(f, "in →", Point::new(sq.x + sq.w, sq.y + sq.h + 2.0), alignment::Horizontal::Right, faint());
 }
 
 /// The band it watches (shaded) and the most it takes off there (dashed).
 fn de_esser(f: &mut Frame, plot: Plot, fc: f32, range: f32) {
-    let fr = Freq::new(plot, 200.0, 20000.0, -24.0, 12.0);
+    let fr = Freq::new(plot, -24.0, 12.0);
     fr.grid(f);
     let x = fr.x(fc);
     f.fill(&Path::rectangle(Point::new(x, fr.p.y), Size::new(fr.p.x + fr.p.w - x, fr.p.h)), ink(0.035));
     f.stroke(&Path::line(Point::new(x, fr.p.y), Point::new(x, fr.p.y + fr.p.h)), dashed(muted()));
-    f.stroke(&fr.path(200, |hz| db(high_shelf(hz, fc, 0.8, -range))), dashed(muted()).with_width(1.3));
-    f.stroke(&Path::line(Point::new(fr.p.x, fr.y(0.0)), Point::new(fr.p.x + fr.p.w, fr.y(0.0))), curve());
+    f.stroke(&fr.func(240, |hz| db(high_shelf(hz, fc, 0.707, -range))), dashed(muted()).with_width(1.3));
+    f.stroke(&Path::line(fr.at(F0, 0.0), fr.at(F1, 0.0)), curve());
     handle(f, fr.at(fc, 0.0));
-    label(f, &format!("up to −{range:.0} dB"), Point::new(fr.p.x + fr.p.w, fr.y(-range) + 4.0), alignment::Horizontal::Right, muted());
 }
 
 /// The target level (dashed) and the window it rides the level in (±range).
 fn rider(f: &mut Frame, plot: Plot, target: f32, range: f32) {
-    const FLOOR: f32 = -48.0;
-    let y = |d: f32| plot.py(((d - FLOOR) / -FLOOR).clamp(0.0, 1.0));
-    for d in [-48.0f32, -36.0, -24.0, -12.0, 0.0] {
-        f.stroke(&Path::line(Point::new(plot.x + 30.0, y(d)), Point::new(plot.x + plot.w, y(d))), if d == 0.0 { zero() } else { grid() });
-        label(f, &format!("{d}"), Point::new(plot.x + 24.0, y(d) - 5.0), alignment::Horizontal::Right, faint());
+    const FLOOR: f32 = -72.0;
+    let p = Plot { h: plot.h, ..inner(plot) };
+    let y = |d: f32| p.py(((d - FLOOR) / -FLOOR).clamp(0.0, 1.0));
+    for d in [-72.0f32, -48.0, -24.0, 0.0] {
+        ytick(f, p, (d - FLOOR) / -FLOOR, &format!("{d}"));
     }
+    unit(f, p, "dB");
     let (top, bottom) = (y(target + range), y(target - range));
-    f.fill(&Path::rectangle(Point::new(plot.x + 30.0, top), Size::new(plot.w - 30.0, bottom - top)), ink(0.06));
-    f.stroke(&Path::line(Point::new(plot.x + 30.0, y(target)), Point::new(plot.x + plot.w, y(target))), dashed(theme::c().frame_ink));
-    label(f, "target", Point::new(plot.x + plot.w, y(target) - 13.0), alignment::Horizontal::Right, muted());
-    label(f, &format!("±{range:.0} dB"), Point::new(plot.x + plot.w, bottom + 3.0), alignment::Horizontal::Right, faint());
+    f.fill(&Path::rectangle(Point::new(p.x, top), Size::new(p.w, bottom - top)), ink(0.06));
+    f.stroke(&Path::line(Point::new(p.x, y(target)), Point::new(p.x + p.w, y(target))), dashed(theme::c().frame_ink));
+    label(f, "target", Point::new(p.x + p.w, y(target) - 13.0), alignment::Horizontal::Right, muted());
+    label(f, &format!("±{range:.0} dB"), Point::new(p.x + p.w, bottom + 3.0), alignment::Horizontal::Right, faint());
 }
 
-// ---- distortion ------------------------------------------------------------------------------------
+// ---- distortion --------------------------------------------------------------------------------
 
-/// A smooth sine (grey) and what's left of it (ink): steps as high as the bits allow, as wide as the
-/// sample rate. Two periods of 660 Hz (3 ms).
-fn bitcrusher(f: &mut Frame, plot: Plot, bits: f32, rate: f32, mix: f32) {
-    let mid = plot.y + plot.h / 2.0;
-    let amp = plot.h / 2.0 * 0.9;
-    let levels = (2f32.powf(bits.round().clamp(1.0, 24.0)) - 1.0).max(1.0);
-    let span = 0.003;
+/// 5 ms of a 400 Hz sine (grey) and what the crusher makes of it (ink), the DSP's own quantizer and
+/// sample-and-hold; the wet signal, whatever the mix.
+fn bitcrusher(f: &mut Frame, plot: Plot, bits: f32, rate: f32) {
+    const SPAN: f32 = 0.005;
+    let p = inner(plot);
+    time_axis(f, p, 5.0, 1.0, "");
+    label(f, "ms", Point::new(p.x + p.w, p.y + p.h - 11.0), alignment::Horizontal::Right, faint());
+    for (t, s) in [(0.0, "-1"), (0.5, "0"), (1.0, "1")] {
+        ytick(f, p, t, s);
+    }
+    let mid = p.y + p.h / 2.0;
+    let amp = p.h / 2.0;
+    let levels = 2f32.powf(bits.clamp(1.0, 24.0) - 1.0);
     let sine = |u: f32| (u * 2.0 * TAU).sin() * 0.9;
-    if levels <= 31.0 {
-        for k in 0..=levels as usize {
-            let yv = -1.0 + 2.0 * k as f32 / levels;
-            f.stroke(&Path::line(Point::new(plot.x, mid - yv * amp), Point::new(plot.x + plot.w, mid - yv * amp)), grid());
+    if levels <= 16.0 {
+        for k in -(levels as i32)..=levels as i32 {
+            let yv = k as f32 / levels;
+            f.stroke(&Path::line(Point::new(p.x, mid - yv * amp), Point::new(p.x + p.w, mid - yv * amp)), grid());
         }
     }
-    f.stroke(&Path::line(Point::new(plot.x, mid), Point::new(plot.x + plot.w, mid)), zero());
-    f.stroke(&Path::new(|p| polyline(p, (0..=200).map(|i| { let u = i as f32 / 200.0; Point::new(plot.px(u), mid - sine(u) * amp) }))), Stroke::default().with_color(muted()).with_width(1.3));
-    let steps = (rate * span).clamp(2.0, 400.0) as usize;
-    let quant = |y: f32| ((y + 1.0) / 2.0 * levels).round() / levels * 2.0 - 1.0;
-    let path = Path::new(|p| {
+    f.stroke(&Path::new(|b| polyline(b, (0..=200).map(|i| { let u = i as f32 / 200.0; Point::new(p.px(u), mid - sine(u) * amp) }))), Stroke::default().with_color(muted()).with_width(1.2));
+    let steps = (rate * SPAN).clamp(2.0, 480.0) as usize;
+    let path = Path::new(|b| {
         for k in 0..steps {
             let (u0, u1) = (k as f32 / steps as f32, (k + 1) as f32 / steps as f32);
-            let x = sine(u0);
-            let yv = x + mix * (quant(x) - x);
-            let pt = Point::new(plot.px(u0), mid - yv * amp);
-            if k == 0 { p.move_to(pt) } else { p.line_to(pt) }
-            p.line_to(Point::new(plot.px(u1), mid - yv * amp));
+            let q = (sine(u0) * levels).round() / levels;
+            let pt = Point::new(p.px(u0), mid - q * amp);
+            if k == 0 { b.move_to(pt) } else { b.line_to(pt) }
+            b.line_to(Point::new(p.px(u1), mid - q * amp));
         }
     });
-    f.stroke(&path, curve().with_line_join(nice_plug_iced::iced::widget::canvas::LineJoin::Miter).with_width(1.8));
+    f.stroke(&path, curve().with_line_join(LineJoin::Miter).with_width(1.7));
 }
 
-/// The input (grey), the carrier (dashed) and their product (ink), over 20 ms.
-fn ring_mod(f: &mut Frame, plot: Plot, carrier: f32, mix: f32) {
-    let mid = plot.y + plot.h / 2.0;
-    let amp = plot.h / 2.0 * 0.9;
-    let span = 0.02;
-    // An input that isn't a common carrier, so the product reads as one.
-    let input = |u: f32| (u * span * 65.0 * TAU).sin() * 0.8;
-    let car = |u: f32| (u * span * carrier * TAU).sin();
-    let n = 900;
-    let line = |g: &dyn Fn(f32) -> f32| Path::new(|p| polyline(p, (0..=n).map(|i| { let u = i as f32 / n as f32; Point::new(plot.px(u), mid - g(u) * amp) })));
-    f.stroke(&Path::line(Point::new(plot.x, mid), Point::new(plot.x + plot.w, mid)), zero());
+/// 20 ms: a 65 Hz input (grey), the carrier (dashed) and their product (ink, the wet signal).
+fn ring_mod(f: &mut Frame, plot: Plot, carrier: f32) {
+    const SPAN: f32 = 0.02;
+    let p = inner(plot);
+    time_axis(f, p, 20.0, 5.0, "");
+    label(f, "ms", Point::new(p.x + p.w, p.y + p.h - 11.0), alignment::Horizontal::Right, faint());
+    for (t, s) in [(0.0, "-1"), (0.5, "0"), (1.0, "1")] {
+        ytick(f, p, t, s);
+    }
+    let mid = p.y + p.h / 2.0;
+    let amp = p.h / 2.0 * 0.95;
+    let input = |u: f32| (u * SPAN * 65.0 * TAU).sin() * 0.8;
+    let car = |u: f32| (u * SPAN * carrier * TAU).sin();
+    let n = 1200;
+    let line = |g: &dyn Fn(f32) -> f32| Path::new(|b| polyline(b, (0..=n).map(|i| { let u = i as f32 / n as f32; Point::new(p.px(u), mid - g(u) * amp) })));
     f.stroke(&line(&|u| car(u) * 0.35), dashed(faint()));
-    f.stroke(&line(&input), Stroke::default().with_color(muted()).with_width(1.3));
-    f.stroke(&line(&|u| input(u) * ((1.0 - mix) + mix * car(u))), curve().with_width(1.6));
+    f.stroke(&line(&input), Stroke::default().with_color(muted()).with_width(1.2));
+    f.stroke(&line(&|u| input(u) * car(u)), curve().with_width(1.5));
 }
 
 /// The tape's colour (head bump, top-end loss; drive deepens both) and wow & flutter as pitch
-/// drifting over two seconds.
+/// drifting over two seconds. An illustration.
 fn tape(f: &mut Frame, plot: Plot, drive: f32, wow: f32, flutter: f32) {
-    let top = Plot { h: plot.h - 54.0, ..plot };
-    let fr = Freq::new(top, 20.0, 20000.0, -12.0, 6.0);
+    let top = Plot { h: plot.h - 46.0, ..plot };
+    let fr = Freq::new(top, -12.0, 6.0);
     fr.grid(f);
     let mag = |hz: f32| db(peak(hz, 70.0, 1.1, 1.5 + drive * 0.15) * lp2(hz, 18000.0 - drive * 300.0, 0.6));
-    f.stroke(&fr.path(200, mag), curve());
-    let (y0, y1) = (plot.y + plot.h - 38.0, plot.y + plot.h);
-    let m = (y0 + y1) / 2.0;
-    f.stroke(&Path::line(Point::new(plot.x, y0), Point::new(plot.x + plot.w, y0)), zero());
-    f.stroke(&Path::line(Point::new(plot.x, m), Point::new(plot.x + plot.w, m)), dashed(faint()));
-    label(f, "pitch", Point::new(plot.x, y0 + 3.0), alignment::Horizontal::Left, faint());
-    if wow + flutter < 0.005 {
-        return;
-    }
+    f.stroke(&fr.func(240, mag), curve());
+    let lane = Plot { x: fr.p.x, y: plot.y + plot.h - 34.0, w: fr.p.w, h: 34.0 };
+    let m = lane.y + lane.h / 2.0;
+    f.stroke(&Path::line(Point::new(lane.x, lane.y), Point::new(lane.x + lane.w, lane.y)), zero());
+    f.stroke(&Path::line(Point::new(lane.x, m), Point::new(lane.x + lane.w, m)), dashed(faint()));
+    label(f, "pitch", Point::new(lane.x - 4.0, m - 5.0), alignment::Horizontal::Right, faint());
     let dev = |u: f32| {
         let s = u * 2.0;
         wow * (s * TAU * 0.6).sin() * 0.8 + flutter * ((s * TAU * 9.0).sin() * 0.25 + (s * TAU * 16.0 + 1.0).sin() * 0.12)
     };
-    f.stroke(&Path::new(|p| polyline(p, (0..=300).map(|i| { let u = i as f32 / 300.0; Point::new(plot.px(u), m - dev(u).clamp(-1.0, 1.0) * (y1 - y0) / 2.0) }))), curve().with_width(1.4));
+    f.stroke(&Path::new(|b| polyline(b, (0..=300).map(|i| { let u = i as f32 / 300.0; Point::new(lane.px(u), m - dev(u).clamp(-1.0, 1.0) * lane.h / 2.0) }))), curve().with_width(1.4));
 }
 
-// ---- space -----------------------------------------------------------------------------------------
+// ---- space -------------------------------------------------------------------------------------
 
-/// The decay per band in dB over time: damping makes the highs die before the mids, the lows ring a
-/// little longer. The gap at the start is the predelay; −60 dB marks RT60.
+/// The fixed time axis of the reverbs, seconds.
+const REVERB_SPAN: f32 = 10.0;
+
+/// The decay per band in dB on a fixed 0–10 s axis: damping makes the highs die before the mids, the
+/// lows ring a little longer. The gap at the start is the predelay; −60 dB marks RT60.
 fn reverb(f: &mut Frame, plot: Plot, decay_s: f32, damping: f32, predelay_ms: f32) {
-    let p = Plot { h: plot.h - 12.0, ..plot };
-    let span = (decay_s * 1.6).clamp(1.0, 20.0);
-    let x = |s: f32| p.px((s / span).clamp(0.0, 1.0));
-    let y = |d: f32| p.py(((d + 66.0) / 66.0).clamp(0.0, 1.0));
-    let mut d = 0.0;
-    while d >= -60.0 {
-        f.stroke(&Path::line(Point::new(p.x, y(d)), Point::new(p.x + p.w, y(d))), if d == 0.0 { zero() } else { grid() });
-        d -= 12.0;
+    let p = inner(plot);
+    time_axis(f, p, REVERB_SPAN, 2.0, " s");
+    let x = |s: f32| p.px((s / REVERB_SPAN).clamp(0.0, 1.0));
+    let y = |d: f32| p.py(((d + 72.0) / 72.0).clamp(0.0, 1.0));
+    for d in [0.0f32, -24.0, -48.0, -60.0, -72.0] {
+        ytick(f, p, (d + 72.0) / 72.0, &format!("{d}"));
     }
-    let step = nice_step(span / 4.0);
-    let mut t = step;
-    while t < span {
-        label(f, &format!("{} s", trim(t)), Point::new(x(t), p.y + p.h + 4.0), alignment::Horizontal::Center, faint());
-        t += step;
-    }
+    unit(f, p, "dB");
     f.stroke(&Path::line(Point::new(p.x, y(-60.0)), Point::new(p.x + p.w, y(-60.0))), dashed(faint()));
-    label(f, "−60", Point::new(p.x + p.w, y(-60.0) - 12.0), alignment::Horizontal::Right, faint());
     let pd = predelay_ms / 1000.0;
+    // A straight line in dB: −60 dB after `rt`; cut where it leaves the plot.
     let band = |rt: f32| Path::new(|b| {
-        b.move_to(Point::new(x(0.0), y(-66.0)));
-        b.line_to(Point::new(x(pd), y(-66.0)));
-        b.line_to(Point::new(x(pd), y(-3.0)));
-        b.line_to(Point::new(x(pd + rt * 57.0 / 60.0), y(-60.0)));
+        let end = (pd + rt * 72.0 / 60.0).min(REVERB_SPAN);
+        b.move_to(Point::new(x(0.0), y(-72.0)));
+        b.line_to(Point::new(x(pd), y(-72.0)));
+        b.line_to(Point::new(x(pd), y(0.0)));
+        b.line_to(Point::new(x(end), y(-(end - pd) * 60.0 / rt)));
     });
     let (high, low) = (decay_s * (1.0 - 0.7 * damping), decay_s * 1.3);
     f.stroke(&band(low), dashed(faint()).with_width(1.3));
     f.stroke(&band(high), Stroke::default().with_color(muted()).with_width(1.5));
     f.stroke(&band(decay_s), curve());
-    for k in 0..6 {
-        let xx = x(pd + 0.006 + k as f32 * 0.01 * decay_s.min(3.0));
-        f.stroke(&Path::line(Point::new(xx, y(-4.0 - k as f32 * 3.0)), Point::new(xx, y(-14.0 - k as f32 * 3.0))), Stroke::default().with_color(theme::c().frame_ink).with_width(1.0));
-    }
-    label(f, "high", Point::new(x(pd + high), y(-60.0) + 3.0), alignment::Horizontal::Center, muted());
-    label(f, "mid", Point::new(x(pd + decay_s), y(-60.0) + 3.0), alignment::Horizontal::Center, theme::c().frame_ink);
+    label(f, "low ┄  high ─  mid ━", Point::new(p.x + p.w, p.y), alignment::Horizontal::Right, faint());
 }
 
-/// The decay (ink) and the pitched layers it feeds (grey), blooming later and fading.
-fn shimmer(f: &mut Frame, plot: Plot, decay_s: f32, pitch: f32, amount: f32) {
-    let p = Plot { h: plot.h - 12.0, ..plot };
-    let span = (decay_s * 1.5).clamp(1.0, 20.0);
-    let at = |s: f32, a: f32| Point::new(p.px(s / span), p.py(a.clamp(0.0, 1.0)));
+/// The decay (ink) and the pitched layers it feeds (grey), after the predelay, on the reverb's axis.
+fn shimmer(f: &mut Frame, plot: Plot, decay_s: f32, predelay_ms: f32, pitch: f32, amount: f32) {
+    let p = inner(plot);
+    time_axis(f, p, REVERB_SPAN, 2.0, " s");
+    for (t, s) in [(0.0, "0"), (0.5, "50"), (1.0, "100")] {
+        ytick(f, p, t, s);
+    }
+    unit(f, p, "%");
+    let pd = predelay_ms / 1000.0;
+    let at = |s: f32, a: f32| Point::new(p.px((s / REVERB_SPAN).clamp(0.0, 1.0)), p.py(a.clamp(0.0, 1.0)));
     let tau = decay_s / 6.9;
-    let env = |delay: f32, rise: f32, g: f32| move |s: f32| { let x = s - delay; if x < 0.0 { 0.0 } else { g * (1.0 - (-x / rise).exp()) * (-x / tau).exp() } };
-    let line = |e: &dyn Fn(f32) -> f32| Path::new(|b| polyline(b, (0..=200).map(|i| { let s = span * i as f32 / 200.0; at(s, e(s)) })));
-    f.stroke(&Path::line(Point::new(p.x, p.y + p.h), Point::new(p.x + p.w, p.y + p.h)), zero());
-    let main = env(0.0, 0.02, 0.95);
-    let first = env(span * 0.04, span * 0.12, 0.75 * amount);
-    let second = env(span * 0.12, span * 0.18, 0.45 * amount * amount);
+    let env = |delay: f32, rise: f32, g: f32| move |s: f32| { let x = s - pd - delay; if x < 0.0 { 0.0 } else { g * (1.0 - (-x / rise).exp()) * (-x / tau).exp() } };
+    let line = |e: &dyn Fn(f32) -> f32| Path::new(|b| polyline(b, (0..=500).map(|i| { let s = REVERB_SPAN * i as f32 / 500.0; at(s, e(s)) })));
+    let main = env(0.0, 0.01, 0.95);
+    let first = env(decay_s * 0.06, decay_s * 0.18, 0.75 * amount);
+    let second = env(decay_s * 0.18, decay_s * 0.27, 0.45 * amount * amount);
     let area = Path::new(|b| {
         b.move_to(Point::new(p.x, p.y + p.h));
-        (0..=200).for_each(|i| { let s = span * i as f32 / 200.0; b.line_to(at(s, main(s))) });
+        (0..=500).for_each(|i| { let s = REVERB_SPAN * i as f32 / 500.0; b.line_to(at(s, main(s))) });
         b.line_to(Point::new(p.x + p.w, p.y + p.h));
         b.close();
     });
@@ -592,50 +684,122 @@ fn shimmer(f: &mut Frame, plot: Plot, decay_s: f32, pitch: f32, amount: f32) {
     f.stroke(&line(&main), curve());
     f.stroke(&line(&first), Stroke::default().with_color(muted()).with_width(1.5));
     f.stroke(&line(&second), dashed(muted()).with_width(1.2));
-    let peak_of = |e: &dyn Fn(f32) -> f32| (0..=200).map(|i| span * i as f32 / 200.0).fold((0.0, 0.0), |(bs, bv), s| if e(s) > bv { (s, e(s)) } else { (bs, bv) });
-    let (s1, v1) = peak_of(&first);
-    let (s2, v2) = peak_of(&second);
-    if amount > 0.05 {
-        label(f, &format!("{:+}", pitch.round()), Point::new(at(s1, v1).x, at(s1, v1).y - 13.0), alignment::Horizontal::Center, muted());
-        label(f, &format!("{:+}", (2.0 * pitch).round()), Point::new(at(s2, v2).x, at(s2, v2).y - 13.0), alignment::Horizontal::Center, faint());
-    }
-    let step = nice_step(span / 4.0);
-    let mut t = step;
-    while t < span {
-        label(f, &format!("{} s", trim(t)), Point::new(p.px(t / span), p.y + p.h + 4.0), alignment::Horizontal::Center, faint());
-        t += step;
-    }
+    label(f, &format!("{:+} st ─  {:+} st ┄", pitch.round(), (2.0 * pitch).round()), Point::new(p.x + p.w, p.y), alignment::Horizontal::Right, faint());
 }
 
-// ---- pitch -----------------------------------------------------------------------------------------
+// ---- pitch & rhythm ----------------------------------------------------------------------------
 
-/// The shift on a semitone ruler (octaves marked), and a stretch of a sine before (grey) and
-/// after (ink).
+/// The shift on a semitone ruler (octaves marked), and 10 ms of a sine before (grey) and after (ink).
 fn pitch_shift(f: &mut Frame, plot: Plot, st: f32) {
-    let ry = plot.y + 14.0;
-    let x = |s: f32| plot.px((s + 24.0) / 48.0);
-    f.stroke(&Path::line(Point::new(plot.x, ry), Point::new(plot.x + plot.w, ry)), zero());
+    let a = inner(plot);
+    let ry = plot.y + 4.0;
+    let x = |s: f32| a.px((s + 24.0) / 48.0);
+    f.stroke(&Path::line(Point::new(a.x, ry), Point::new(a.x + a.w, ry)), zero());
     for s in -24..=24 {
         let octave = s % 12 == 0;
         let h = if octave { 6.0 } else { 3.0 };
         f.stroke(&Path::line(Point::new(x(s as f32), ry - h), Point::new(x(s as f32), ry + h)), Stroke::default().with_color(if octave { muted() } else { ink(0.16) }).with_width(1.0));
         if octave {
-            label(f, &format!("{s:+}").replace("+0", "0"), Point::new(x(s as f32), ry + 9.0), alignment::Horizontal::Center, faint());
+            label(f, &format!("{s:+}").replace("+0", "0"), Point::new(x(s as f32), ry + 8.0), alignment::Horizontal::Center, faint());
         }
     }
+    label(f, "st", Point::new(a.x - 4.0, ry - 5.0), alignment::Horizontal::Right, faint());
     f.stroke(&Path::line(Point::new(x(0.0), ry), Point::new(x(st), ry)), curve().with_width(3.0));
     f.fill(&Path::circle(Point::new(x(st), ry), 4.5), theme::c().frame_ink);
-    let (y0, y1) = (ry + 26.0, plot.y + plot.h);
-    let m = (y0 + y1) / 2.0;
-    let amp = (y1 - y0) / 2.0 * 0.85;
+    let p = Plot { x: a.x, y: ry + 24.0, w: a.w, h: a.y + a.h - ry - 24.0 };
+    time_axis(f, p, 10.0, 2.0, "");
+    label(f, "ms", Point::new(p.x + p.w, p.y + p.h - 11.0), alignment::Horizontal::Right, faint());
+    for (t, s) in [(0.0, "-1"), (0.5, "0"), (1.0, "1")] {
+        ytick(f, p, t, s);
+    }
+    let m = p.y + p.h / 2.0;
+    let amp = p.h / 2.0 * 0.92;
     let r = 2f32.powf(st / 12.0);
-    let sine = |k: f32| Path::new(|b| polyline(b, (0..=300).map(|i| { let u = i as f32 / 300.0; Point::new(plot.px(u), m - (u * PI * 8.0 * k).sin() * amp) })));
-    f.stroke(&Path::line(Point::new(plot.x, m), Point::new(plot.x + plot.w, m)), zero());
-    f.stroke(&sine(1.0), Stroke::default().with_color(muted()).with_width(1.3));
+    let sine = |k: f32| Path::new(|b| polyline(b, (0..=300).map(|i| { let u = i as f32 / 300.0; Point::new(p.px(u), m - (u * 4.0 * TAU * k).sin() * amp) })));
+    f.stroke(&sine(1.0), Stroke::default().with_color(muted()).with_width(1.2));
     f.stroke(&sine(r), curve());
 }
 
-// ---- stereo & utility ------------------------------------------------------------------------------
+fn hash(n: u32) -> f32 {
+    let s = (n as f32 * 12.9898 + 4.1414).sin() * 43758.547;
+    s - s.floor()
+}
+
+/// One second of grains: x = how far back in the buffer it reads (the spread, shaded), width = its
+/// length, y = its pitch (with the jitter); hollow = reversed. The positions are an example of the
+/// random ones the DSP picks.
+#[allow(clippy::too_many_arguments)]
+fn granular(f: &mut Frame, plot: Plot, grain_ms: f32, density: f32, spread_ms: f32, pitch: f32, jitter_ct: f32, reverse: f32) {
+    const SPAN: f32 = 2000.0;
+    let p = inner(plot);
+    time_axis(f, p, 2.0, 0.5, " s");
+    for st in [-24.0f32, -12.0, 0.0, 12.0, 24.0] {
+        ytick(f, p, (st + 24.0) / 48.0, &format!("{st:+}").replace("+0", "0"));
+    }
+    unit(f, p, "st");
+    label(f, "ago", Point::new(p.x + p.w, p.y + p.h - 11.0), alignment::Horizontal::Right, faint());
+    let x = |ms: f32| p.px((ms / SPAN).clamp(0.0, 1.0));
+    f.fill(&Path::rectangle(Point::new(p.x, p.y), Size::new(x(spread_ms) - p.x, p.h)), ink(0.04));
+    let n = density.round().clamp(1.0, 100.0) as u32;
+    for k in 0..n {
+        let at = hash(k * 3 + 1) * spread_ms;
+        let st = pitch + jitter_ct / 100.0 * (2.0 * hash(k * 5 + 2) - 1.0);
+        // Grains at the same pitch stack a little so each stays visible.
+        let lane = (hash(k * 7 + 3) - 0.5) * 16.0;
+        let y = p.py(((st + 24.0) / 48.0).clamp(0.0, 1.0)) + lane;
+        let w = (x(at + grain_ms) - x(at)).max(2.0);
+        let r = Path::rounded_rectangle(Point::new(x(at), y - 2.0), Size::new(w, 4.0), 2.0.into());
+        if hash(k * 11 + 4) < reverse {
+            f.stroke(&r, Stroke::default().with_color(ink(0.75)).with_width(1.0));
+        } else {
+            f.fill(&r, ink(0.75));
+        }
+    }
+}
+
+/// A rhythm of hits over 2 s; at 0.8 s the last `ms` is captured (outlined) and repeats. Off: the
+/// repeats it would play, faint.
+fn stutter(f: &mut Frame, plot: Plot, ms: f32, active: bool) {
+    const SPAN: f32 = 2000.0;
+    const TRIGGER: f32 = 800.0;
+    let p = inner(plot);
+    time_axis(f, p, 2.0, 0.5, " s");
+    for (t, s) in [(0.0, "-1"), (0.5, "0"), (1.0, "1")] {
+        ytick(f, p, t, s);
+    }
+    let slice = ms.clamp(5.0, TRIGGER);
+    let mid = p.y + p.h / 2.0;
+    let amp = p.h / 2.0 * 0.92;
+    // A hit every 125 ms, each a little different.
+    let level = |t: f32| {
+        let i = (t / 125.0).floor();
+        (-(t - i * 125.0) / 32.0).exp() * (0.55 + 0.45 * hash(i as u32 + 9))
+    };
+    let mut px = p.x;
+    while px < p.x + p.w {
+        let t = (px - p.x) / p.w * SPAN;
+        let (src, colour) = if t < TRIGGER {
+            (t, ink(0.4))
+        } else {
+            (TRIGGER - slice + (t - TRIGGER) % slice, if active { ink(0.9) } else { ink(0.2) })
+        };
+        let a = level(src) * amp;
+        f.fill(&Path::rectangle(Point::new(px, mid - a), Size::new(1.5, 2.0 * a)), colour);
+        px += 2.5;
+    }
+    let (x0, x1) = (p.px((TRIGGER - slice) / SPAN), p.px(TRIGGER / SPAN));
+    f.stroke(&Path::rounded_rectangle(Point::new(x0, p.y), Size::new(x1 - x0, p.h), 3.0.into()), Stroke::default().with_color(theme::c().frame_ink).with_width(1.3));
+    let step = (x1 - x0).max(1.0);
+    if step >= 6.0 {
+        let mut x = x1 + step;
+        while x < p.x + p.w {
+            f.stroke(&Path::line(Point::new(x, p.y), Point::new(x, p.y + p.h)), dashed(faint()));
+            x += step;
+        }
+    }
+}
+
+// ---- stereo & utility --------------------------------------------------------------------------
 
 /// Where the sound sits on a half circle, and the gain each side gets (the other side is
 /// turned down).
@@ -672,71 +836,77 @@ fn pan_view(f: &mut Frame, plot: Plot, pan: f32) {
     gain(f, plot.x + plot.w - bw, gr, "R", true);
 }
 
-/// The same hit on both channels; the delayed one starts later by the set time (0–40 ms).
-fn haas(f: &mut Frame, plot: Plot, delay_ms: f32, side: Side) {
-    let p = Plot { h: plot.h - 12.0, ..plot };
-    let x = |ms: f32| p.px(ms / 40.0);
-    for ms in [0.0f32, 10.0, 20.0, 30.0, 40.0] {
-        f.stroke(&Path::line(Point::new(x(ms), p.y), Point::new(x(ms), p.y + p.h)), grid());
-        label(f, &format!("{ms} ms"), Point::new(x(ms).clamp(p.x + 14.0, p.x + p.w - 14.0), p.y + p.h + 4.0), alignment::Horizontal::Center, faint());
-    }
+/// The same hit on both channels on a fixed 0–40 ms axis; `delay` > 0 = the right one later, < 0
+/// the left.
+fn haas(f: &mut Frame, plot: Plot, delay: f32) {
+    let p = inner(plot);
+    time_axis(f, p, 40.0, 10.0, "");
+    label(f, "ms", Point::new(p.x + p.w, p.y + p.h - 11.0), alignment::Horizontal::Right, faint());
+    let x = |ms: f32| p.px((ms / 40.0).clamp(0.0, 1.0));
     let lane = p.h / 2.0;
     let mids = [p.y + lane / 2.0, p.y + lane * 1.5];
-    let delayed = if side == Side::Left { 0 } else { 1 };
+    let later = if delay < 0.0 { 0 } else { 1 };
+    let d = delay.abs();
     for (i, m) in mids.iter().enumerate() {
-        let off = if i == delayed { delay_ms } else { 0.0 };
-        let colour = if i == delayed { theme::c().frame_ink } else { muted() };
+        let off = if i == later { d } else { 0.0 };
+        let colour = if i == later && d > 0.0 { theme::c().frame_ink } else { muted() };
         f.stroke(&Path::line(Point::new(p.x, *m), Point::new(p.x + p.w, *m)), zero());
-        let hit = Path::new(|b| polyline(b, (0..=200).map(|k| {
-            let u = k as f32 / 200.0;
-            let ms = off + u * 24.0;
-            Point::new(x(ms.min(40.0)), m - (u * 24.0 * TAU / 2.2).sin() * (-u * 5.0).exp() * lane * 0.4)
+        let hit = Path::new(|b| polyline(b, (0..=240).filter_map(|k| {
+            let ms = k as f32 / 240.0 * 24.0;
+            (off + ms <= 40.0).then(|| Point::new(x(off + ms), m - (ms * TAU / 2.2).sin() * (-ms / 4.8).exp() * lane * 0.42))
         })));
-        f.stroke(&hit, Stroke::default().with_color(colour).with_width(if i == delayed { 1.8 } else { 1.4 }));
-        label(f, if i == 0 { "L" } else { "R" }, Point::new(p.x + 2.0, m - lane / 2.0 + 2.0), alignment::Horizontal::Left, colour);
+        f.stroke(&hit, Stroke::default().with_color(colour).with_width(if i == later { 1.8 } else { 1.4 }));
+        label(f, if i == 0 { "L" } else { "R" }, Point::new(p.x - 8.0, m - 5.0), alignment::Horizontal::Right, colour);
     }
     let my = (mids[0] + mids[1]) / 2.0;
-    f.stroke(&Path::line(Point::new(x(0.0), my), Point::new(x(delay_ms), my)), curve().with_width(1.2));
-    label(f, &format!("{delay_ms:.1} ms"), Point::new(x(delay_ms / 2.0).max(p.x + 22.0), my - 13.0), alignment::Horizontal::Center, theme::c().frame_ink);
+    f.stroke(&Path::line(Point::new(x(0.0), my), Point::new(x(d), my)), curve().with_width(1.2));
 }
 
-/// What happens to the side signal (ink, a 4th-order high pass) while the mid stays (dashed);
-/// the mono zone hatched.
-fn mono_bass(f: &mut Frame, plot: Plot, fc: f32) {
-    let fr = Freq::new(plot, 20.0, 20000.0, -36.0, 6.0);
+/// What happens to the side signal (ink, a Linkwitz-Riley high pass of the set slope) while the mid
+/// stays (dashed); the mono zone hatched.
+fn mono_bass(f: &mut Frame, plot: Plot, fc: f32, slope: f32) {
+    let fr = Freq::new(plot, -48.0, 6.0);
     fr.grid(f);
     let x1 = fr.x(fc);
     let mut x = fr.p.x - fr.p.h;
     while x < x1 {
-        let (a, b) = (Point::new(x.max(fr.p.x), fr.p.y + fr.p.h - (x.max(fr.p.x) - x)), Point::new((x + fr.p.h).min(x1), fr.p.y + fr.p.h - ((x + fr.p.h).min(x1) - x)));
-        f.stroke(&Path::line(a, b), Stroke::default().with_color(ink(0.07)).with_width(1.0));
+        let (x_a, x_b) = (x.max(fr.p.x), (x + fr.p.h).min(x1));
+        let bottom = fr.p.y + fr.p.h;
+        f.stroke(&Path::line(Point::new(x_a, bottom - (x_a - x)), Point::new(x_b, bottom - (x_b - x))), Stroke::default().with_color(ink(0.07)).with_width(1.0));
         x += 7.0;
     }
-    f.stroke(&Path::line(Point::new(fr.p.x, fr.y(0.0)), Point::new(fr.p.x + fr.p.w, fr.y(0.0))), dashed(muted()));
-    let side = |hz: f32| db(hp2(hz, fc, 0.707).powi(2));
-    f.stroke(&fr.path(240, side), curve());
+    f.stroke(&Path::line(fr.at(F0, 0.0), fr.at(F1, 0.0)), dashed(muted()));
+    let power = if slope >= 36.0 { 8 } else { 4 };
+    let side = |hz: f32| { let w = (hz / fc).powi(power); db(w / (1.0 + w)) };
+    f.stroke(&fr.func(320, side), curve());
     handle(f, fr.at(fc, side(fc)));
-    label(f, "mono", Point::new(x1 - 6.0, fr.y(-30.0)), alignment::Horizontal::Right, muted());
+    label(f, "mono", Point::new(x1 - 6.0, fr.y(-40.0)), alignment::Horizontal::Right, muted());
     label(f, "mid", Point::new(fr.p.x + fr.p.w, fr.y(0.0) - 13.0), alignment::Horizontal::Right, muted());
     label(f, "side", Point::new(fr.p.x + fr.p.w, fr.y(0.0) + 3.0), alignment::Horizontal::Right, theme::c().frame_ink);
 }
 
 /// One stretch per channel; the inverted ones in ink, flipped.
 fn invert(f: &mut Frame, plot: Plot, channels: Channels) {
-    let lane = plot.h / 2.0;
+    let p = inner(plot);
+    time_axis(f, p, 3.0, 1.0, "");
+    label(f, "cycles", Point::new(p.x + p.w, p.y + p.h - 11.0), alignment::Horizontal::Right, faint());
+    let lane = p.h / 2.0;
     for (i, name) in ["L", "R"].iter().enumerate() {
         let flipped = matches!((channels, i), (Channels::Both, _) | (Channels::Left, 0) | (Channels::Right, 1));
-        let m = plot.y + lane * (i as f32 + 0.5);
+        let m = p.y + lane * (i as f32 + 0.5);
         let colour = if flipped { theme::c().frame_ink } else { muted() };
         let sign = if flipped { -1.0 } else { 1.0 };
-        let x0 = plot.x + 36.0;
-        f.stroke(&Path::line(Point::new(x0, m), Point::new(plot.x + plot.w, m)), zero());
-        f.stroke(&Path::new(|b| polyline(b, (0..=200).map(|k| { let u = k as f32 / 200.0; Point::new(x0 + u * (plot.x + plot.w - x0), m - sign * (u * 3.0 * TAU).sin() * lane * 0.38) }))), Stroke::default().with_color(colour).with_width(if flipped { 2.0 } else { 1.4 }));
-        label(f, &if flipped { format!("{name} Ø") } else { name.to_string() }, Point::new(plot.x, m - 5.0), alignment::Horizontal::Left, colour);
+        f.stroke(&Path::line(Point::new(p.x, m), Point::new(p.x + p.w, m)), zero());
+        f.stroke(&Path::new(|b| polyline(b, (0..=200).map(|k| { let u = k as f32 / 200.0; Point::new(p.px(u), m - sign * (u * 3.0 * TAU).sin() * lane * 0.4) }))), Stroke::default().with_color(colour).with_width(if flipped { 2.0 } else { 1.4 }));
+        label(f, &if flipped { format!("{name} Ø") } else { name.to_string() }, Point::new(p.x - 4.0, m - 5.0), alignment::Horizontal::Right, colour);
     }
 }
 
-// ---- modulation (LFO at phase 0 until the live phase comes) ------------------------------------------
+// ---- modulation (the LFO from phase 0 until the live phase comes) ------------------------------
+
+/// The time axis of the modulation blocks, seconds.
+const LFO_SPAN: f32 = 2.0;
+const LFO_POINTS: usize = 1000;
 
 fn lfo(shape: LfoShape, phase: f32) -> f32 {
     let p = phase.rem_euclid(1.0);
@@ -747,103 +917,67 @@ fn lfo(shape: LfoShape, phase: f32) -> f32 {
     }
 }
 
-/// The delay time of each voice over two cycles (one ink, one grey, opposite), the depth as the
-/// dashed band.
-fn chorus(f: &mut Frame, plot: Plot, depth: f32) {
-    let m = plot.y + plot.h / 2.0;
-    let d = plot.h / 2.0 * 0.85 * depth.max(0.02);
-    let full = plot.h / 2.0 * 0.85;
-    f.stroke(&Path::line(Point::new(plot.x, m - full), Point::new(plot.x + plot.w, m - full)), dashed(faint()));
-    f.stroke(&Path::line(Point::new(plot.x, m + full), Point::new(plot.x + plot.w, m + full)), dashed(faint()));
-    f.stroke(&Path::line(Point::new(plot.x, m), Point::new(plot.x + plot.w, m)), zero());
-    let voice = |off: f32| Path::new(|b| polyline(b, (0..=200).map(|k| { let u = k as f32 / 200.0; Point::new(plot.px(u), m - (u * 2.2 * TAU + off).sin() * d) })));
-    f.stroke(&voice(PI), Stroke::default().with_color(muted()).with_width(1.5));
-    f.stroke(&voice(0.0), curve());
-    label(f, "delay", Point::new(plot.x, m - full - 13.0), alignment::Horizontal::Left, faint());
-}
-
-/// The comb at the middle of the sweep, the sweep's reach as the shaded band.
-fn flanger(f: &mut Frame, plot: Plot, depth: f32, g: f32) {
-    let fr = Freq::new(plot, 20.0, 20000.0, -30.0, 12.0);
-    fr.grid(f);
-    let (dmin, dmax) = (0.0002, 0.0002 + 0.004 * depth.max(0.01));
-    let dmid = (dmin + dmax) / 2.0;
-    let mag = |hz: f32| {
-        let th = TAU * hz * dmid;
-        let (re, im) = (1.0 - g * th.cos(), g * th.sin());
-        // dry + delayed with feedback
-        let n = re * re + im * im;
-        let (wr, wi) = ((th.cos() * re - th.sin() * im) / n, (-th.sin() * re - th.cos() * im) / n);
-        db((1.0 + wr).hypot(wi) / 2.0 * (1.0 - g.abs() * 0.5))
-    };
-    // the first notch moves between these
-    let (n0, n1) = (0.5 / dmax, 0.5 / dmin);
-    f.fill(&Path::rectangle(Point::new(fr.x(n0), fr.p.y), Size::new(fr.x(n1.min(20000.0)) - fr.x(n0), fr.p.h)), ink(0.035));
-    f.stroke(&fr.path(2400, mag), curve().with_width(1.3));
-    label(f, "sweep", Point::new(fr.x(n0) + 4.0, fr.p.y), alignment::Horizontal::Left, faint());
-}
-
-/// The notches (stages ÷ 2) around the centre frequency.
-fn phaser(f: &mut Frame, plot: Plot, fc: f32, stages: u32, mix: f32) {
-    let fr = Freq::new(plot, 20.0, 20000.0, -36.0, 12.0);
-    fr.grid(f);
-    let n = stages.max(2) as f32;
-    let mag = |hz: f32| {
-        let ph = -2.0 * n * (hz / fc).atan();
-        db(((1.0 - mix) + mix * ph.cos()).hypot(mix * ph.sin()))
-    };
-    fr.fill(f, 400, mag);
-    f.stroke(&fr.path(400, mag), curve());
-    handle(f, fr.at(fc, mag(fc)));
-}
-
-/// The gain over 2.5 cycles (the line on top) and a steady signal it shapes (bars).
-fn tremolo(f: &mut Frame, plot: Plot, depth: f32, shape: LfoShape, offset_deg: f32) {
-    let gain = |u: f32| 1.0 - depth * (0.5 + 0.5 * lfo(shape, u * 2.5 + offset_deg / 360.0));
-    let top = plot.y + 14.0;
-    let (y0, y1) = (top + 14.0, plot.y + plot.h);
-    let m = (y0 + y1) / 2.0;
-    let amp = (y1 - y0) / 2.0 * 0.92;
-    let n = (plot.w / 3.0) as usize;
-    for k in 0..n {
-        let u = k as f32 / n as f32;
-        let x = plot.px(u);
-        let a = amp * (0.82 + 0.18 * ((k * 37 % 11) as f32 / 11.0));
-        f.fill(&Path::rectangle(Point::new(x, m - a), Size::new(1.7, 2.0 * a)), ink(0.12));
-        let g = a * gain(u);
-        f.fill(&Path::rectangle(Point::new(x, m - g), Size::new(1.7, 2.0 * g)), ink(0.8));
+/// The delay time of the two voices over 2 s, around the DSP's 12 ms (±4 ms × depth).
+fn chorus(f: &mut Frame, plot: Plot, hz: f32, depth: f32) {
+    let p = inner(plot);
+    time_axis(f, p, LFO_SPAN, 0.5, " s");
+    for (ms, t) in [(8, 0.0), (10, 0.25), (12, 0.5), (14, 0.75), (16, 1.0)] {
+        ytick(f, p, t, &ms.to_string());
     }
-    f.stroke(&Path::new(|b| polyline(b, (0..=200).map(|k| { let u = k as f32 / 200.0; Point::new(plot.px(u), top + (1.0 - gain(u)) * 12.0) }))), curve().with_width(1.5));
+    unit(f, p, "ms");
+    let voice = |off: f32| Path::new(|b| polyline(b, (0..=LFO_POINTS).map(|k| {
+        let u = k as f32 / LFO_POINTS as f32;
+        Point::new(p.px(u), p.py(0.5 + 0.5 * depth * (u * LFO_SPAN * hz * TAU + off).sin()))
+    })));
+    f.stroke(&voice(PI), Stroke::default().with_color(muted()).with_width(1.4));
+    f.stroke(&voice(0.0), curve().with_width(1.7));
 }
 
-/// The left (ink) and right (grey) gain over 2.5 cycles, and where the sound sits now on L–R.
-fn auto_pan(f: &mut Frame, plot: Plot, depth: f32, shape: LfoShape, offset_deg: f32) {
-    let p = Plot { h: plot.h - 30.0, ..plot };
-    let pos = |u: f32| lfo(shape, u * 2.5 + offset_deg / 360.0) * depth;
-    f.stroke(&Path::line(Point::new(p.x, p.y), Point::new(p.x + p.w, p.y)), zero());
-    f.stroke(&Path::line(Point::new(p.x, p.y + p.h), Point::new(p.x + p.w, p.y + p.h)), zero());
-    let line = |sign: f32| Path::new(|b| polyline(b, (0..=200).map(|k| { let u = k as f32 / 200.0; Point::new(p.px(u), p.py(0.5 + sign * 0.5 * -pos(u))) })));
-    f.stroke(&line(-1.0), Stroke::default().with_color(muted()).with_width(1.5));
-    f.stroke(&line(1.0), curve());
-    label(f, "R", Point::new(p.x + p.w, p.y - 13.0), alignment::Horizontal::Right, muted());
-    label(f, "L", Point::new(p.x + p.w - 14.0, p.y - 13.0), alignment::Horizontal::Right, theme::c().frame_ink);
-    let by = plot.y + plot.h - 8.0;
-    let (cx, half) = (plot.x + plot.w / 2.0, 90f32.min(plot.w / 2.0 - 30.0));
-    f.stroke(&Path::line(Point::new(cx - half, by), Point::new(cx + half, by)), zero());
-    f.stroke(&Path::line(Point::new(cx, by - 4.0), Point::new(cx, by + 4.0)), zero());
-    label(f, "L", Point::new(cx - half - 8.0, by - 5.0), alignment::Horizontal::Right, faint());
-    label(f, "R", Point::new(cx + half + 8.0, by - 5.0), alignment::Horizontal::Left, faint());
-    f.fill(&Path::circle(Point::new(cx + half * pos(0.0), by), 4.0), theme::c().frame_ink);
+/// The gain over 2 s, the area under it filled.
+fn tremolo(f: &mut Frame, plot: Plot, hz: f32, depth: f32, shape: LfoShape, offset_deg: f32) {
+    let p = inner(plot);
+    time_axis(f, p, LFO_SPAN, 0.5, " s");
+    for (t, s) in [(0.0, "0"), (0.5, "50"), (1.0, "100")] {
+        ytick(f, p, t, s);
+    }
+    unit(f, p, "%");
+    let at = |k: usize| {
+        let u = k as f32 / LFO_POINTS as f32;
+        Point::new(p.px(u), p.py(1.0 - depth * (0.5 + 0.5 * lfo(shape, u * LFO_SPAN * hz + offset_deg / 360.0))))
+    };
+    let area = Path::new(|b| {
+        b.move_to(Point::new(p.x, p.y + p.h));
+        (0..=LFO_POINTS).for_each(|k| b.line_to(at(k)));
+        b.line_to(Point::new(p.x + p.w, p.y + p.h));
+        b.close();
+    });
+    f.fill(&area, ink(0.08));
+    f.stroke(&Path::new(|b| polyline(b, (0..=LFO_POINTS).map(at))), curve().with_width(1.7));
 }
 
-// ---- containers ------------------------------------------------------------------------------------
+/// Where the sound sits over 2 s, from left (top) to right (bottom).
+fn auto_pan(f: &mut Frame, plot: Plot, hz: f32, depth: f32, shape: LfoShape, offset_deg: f32) {
+    let p = inner(plot);
+    time_axis(f, p, LFO_SPAN, 0.5, " s");
+    for (t, s) in [(1.0, "L"), (0.5, "C"), (0.0, "R")] {
+        ytick(f, p, t, s);
+    }
+    f.stroke(&Path::line(Point::new(p.x, p.py(0.5)), Point::new(p.x + p.w, p.py(0.5))), zero());
+    f.stroke(&Path::new(|b| polyline(b, (0..=LFO_POINTS).map(|k| {
+        let u = k as f32 / LFO_POINTS as f32;
+        Point::new(p.px(u), p.py(0.5 - 0.5 * depth * lfo(shape, u * LFO_SPAN * hz + offset_deg / 360.0)))
+    }))), curve().with_width(1.7));
+}
 
-/// The bands' responses meeting at the crossovers (Linkwitz-Riley, 4th order), a handle at each.
-fn band_split(f: &mut Frame, plot: Plot, crossovers: &[f32]) {
-    let fr = Freq::new(plot, 20.0, 20000.0, -36.0, 6.0);
+// ---- containers --------------------------------------------------------------------------------
+
+/// The bands' responses meeting at the crossovers (Linkwitz-Riley of the set slope), a handle at each.
+fn band_split(f: &mut Frame, plot: Plot, crossovers: &[f32], slope: f32) {
+    let fr = Freq::new(plot, -48.0, 6.0);
     fr.grid(f);
-    let lp = |hz: f32, c: f32| 1.0 / (1.0 + (hz / c).powi(4));
-    let hp = |hz: f32, c: f32| (hz / c).powi(4) / (1.0 + (hz / c).powi(4));
+    let power = if slope >= 36.0 { 8 } else { 4 };
+    let lp = |hz: f32, c: f32| 1.0 / (1.0 + (hz / c).powi(power));
+    let hp = |hz: f32, c: f32| (hz / c).powi(power) / (1.0 + (hz / c).powi(power));
     let n = crossovers.len() + 1;
     let names: Vec<String> = match n {
         2 => vec!["low".into(), "high".into()],
@@ -858,9 +992,9 @@ fn band_split(f: &mut Frame, plot: Plot, crossovers: &[f32]) {
             db(g)
         };
         let colour = if b % 2 == 1 { theme::c().frame_ink } else { muted() };
-        f.stroke(&fr.path(240, band), Stroke::default().with_color(colour).with_width(if b % 2 == 1 { 2.0 } else { 1.6 }));
-        let lo = if b == 0 { 20.0 } else { crossovers[b - 1] };
-        let hi = if b == n - 1 { 20000.0 } else { crossovers[b] };
+        f.stroke(&fr.func(320, band), Stroke::default().with_color(colour).with_width(if b % 2 == 1 { 2.0 } else { 1.6 }));
+        let lo = if b == 0 { F0 } else { crossovers[b - 1] };
+        let hi = if b == n - 1 { F1 } else { crossovers[b] };
         label(f, &names[b], Point::new(fr.x((lo * hi).sqrt()), fr.p.y + 2.0), alignment::Horizontal::Center, muted());
     }
     for c in crossovers {
@@ -940,7 +1074,7 @@ fn chip(f: &mut Frame, r: Rectangle, s: &str) {
     });
 }
 
-// ---- small helpers -----------------------------------------------------------------------------------
+// ---- small helpers -----------------------------------------------------------------------------
 
 fn ink(a: f32) -> Color {
     theme::alpha(theme::c().frame_ink, a)
@@ -959,16 +1093,6 @@ fn track(f: &mut Frame, at: Point, width: f32, labels: &[&str], t: f32) {
         label(f, l, Point::new(at.x + width * i as f32 / n, at.y + 6.0), alignment::Horizontal::Center, if i == nearest { muted() } else { faint() });
     }
     f.fill(&Path::circle(Point::new(at.x + width * t.clamp(0.0, 1.0), at.y), 3.2), theme::c().frame_ink);
-}
-
-/// 1, 2, 5 × 10^n just above `x`.
-fn nice_step(x: f32) -> f32 {
-    let e = 10f32.powf(x.max(1e-6).log10().floor());
-    [1.0, 2.0, 5.0, 10.0].iter().map(|m| m * e).find(|s| *s >= x).unwrap_or(10.0 * e)
-}
-
-fn hz_short(hz: f32) -> String {
-    if hz >= 1000.0 { format!("{}k", trim(hz / 1000.0)) } else { trim(hz) }
 }
 
 fn trim(v: f32) -> String {
@@ -1002,13 +1126,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn names_and_steps() {
+    fn names() {
         assert_eq!(note_name(440.0), "A4");
         assert_eq!(note_name(261.63), "C4");
         assert_eq!(vowel_name(0.0), "a");
         assert_eq!(vowel_name(1.5), "e → i");
-        assert_eq!(nice_step(380.0), 500.0);
-        assert_eq!(nice_step(0.4), 0.5);
-        assert_eq!(hz_short(2000.0), "2k");
     }
 }

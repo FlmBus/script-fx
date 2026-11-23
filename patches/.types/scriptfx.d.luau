@@ -55,7 +55,7 @@ declare extern type WidthBlock extends Block with
   params: { width: Param }
 end
 declare extern type MonoBassBlock extends Block with
-  params: { freq: Param }
+  params: { freq: Param, slope: Param }
 end
 declare extern type HaasBlock extends Block with
   params: { delay: Param }
@@ -197,7 +197,7 @@ declare extern type LeftRightBlock extends Block with
   params: {}
 end
 declare extern type BandSplitBlock extends Block with
-  params: { crossovers: { Param } }
+  params: { crossovers: { Param }, slope: Param }
 end
 declare extern type ParallelBlock extends Block with
   params: { mix: Param }
@@ -270,9 +270,9 @@ declare Blocks: {
   Pan: { new: (id: string, o: { pan: Setting?, oversampling: number? }) -> PanBlock },
   --- Utility · stereo width via mid/side, %: 0 = mono, 100 = unchanged, 200 = twice the side signal
   Width: { new: (id: string, o: { width: Setting?, oversampling: number? }) -> WidthBlock },
-  --- Utility · mono below `freq` Hz (side signal high-passed, 24 dB/oct, phase-aligned)
-  MonoBass: { new: (id: string, o: { freq: Setting?, oversampling: number? }) -> MonoBassBlock },
-  --- Utility · delays one channel by `delay` ms (0..40, default channel "right"): Haas widening
+  --- Utility · mono below `freq` Hz (side signal high-passed, `slope` 24 or 48 dB/oct, phase-aligned)
+  MonoBass: { new: (id: string, o: { freq: Setting?, slope: Setting?, oversampling: number? }) -> MonoBassBlock },
+  --- Utility · delays one channel by `delay` ms (-40..40): > 0 delays `channel` (default "right"), < 0 the other: Haas widening
   Haas: { new: (id: string, o: { delay: Setting?, channel: ("left" | "right")?, oversampling: number? }) -> HaasBlock },
   --- Utility · polarity inversion (default "both")
   Invert: { new: (id: string, o: { channels: ("both" | "left" | "right")?, oversampling: number? }?) -> InvertBlock },
@@ -405,10 +405,10 @@ declare Blocks: {
   MidSide: { new: (id: string, o: { mid: Chain?, side: Chain?, oversampling: number? }) -> MidSideBlock },
   --- Routing · runs `left` and `right` on their own channel (each as mono)
   LeftRight: { new: (id: string, o: { left: Chain?, right: Chain?, oversampling: number? }) -> LeftRightBlock },
-  --- Routing · Linkwitz-Riley split into #crossovers+1 bands (ascending Hz, phase-aligned, sums flat);
+  --- Routing · Linkwitz-Riley split (`slope` 24 = LR4 or 48 = LR8 dB/oct) into #crossovers+1 bands (ascending Hz, phase-aligned, sums flat);
   --- each band is processed by its Chain, then all are summed. phase "linear": complementary linear-phase
   --- bands (no phase shift between them, reconstructs exactly; ~90 ms latency)
-  BandSplit: { new: (id: string, o: { crossovers: { Setting }, bands: { Chain }, phase: Phase?, oversampling: number? }) -> BandSplitBlock },
+  BandSplit: { new: (id: string, o: { crossovers: { Setting }, slope: Setting?, bands: { Chain }, phase: Phase?, oversampling: number? }) -> BandSplitBlock },
   --- Routing · every branch gets the full signal, outputs summed; with mix (exactly 2 branches) a
   --- crossfade instead: 0 % = first, 100 % = second. Chain.new() = a dry branch
   Parallel: { new: (id: string, o: { branches: { Chain }, mix: Setting?, oversampling: number? }) -> ParallelBlock },

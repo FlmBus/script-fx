@@ -12,7 +12,7 @@
 //! - **Level** (meter): the level of the last seconds, from the block's meter.
 //! - **From the knobs** (`params`): every other block that can be drawn from its settings alone
 //!   (filters, distortion, space, stereo, the modulation blocks at LFO phase 0, containers).
-//! - The rest (Gain, Width, Granular, Stutter, DC block) say what they do until their live
+//! - The rest (Gain, Width, DC block) say what they do until their live
 //!   displays come (`docs/research/block-displays.md` §1, step 3).
 //!
 //! The curves come from `dsp::preview`, i.e. the DSP's own formulas. A caption at the top left says
@@ -165,22 +165,24 @@ impl<M> canvas::Program<M> for Display<'_> {
     fn draw(&self, history: &History, renderer: &Renderer, _: &Theme, bounds: Rectangle, _: mouse::Cursor) -> Vec<canvas::Geometry> {
         let mut f = Frame::new(renderer, bounds.size());
         let v = |r: &ParamRef| self.value(r);
-        let (w, h) = (bounds.width, bounds.height);
+        // The caption on top, then the plot; each picture keeps its own axes static.
+        let plot = Plot { x: 12.0, y: 36.0, w: bounds.width - 24.0, h: bounds.height - 42.0 };
+        let tempo = if self.values.tempo > 0.0 { self.values.tempo } else { 120.0 };
         match self.picture {
-            Picture::Response => response(&mut f, Plot { x: 16.0, y: 30.0, w: w - 32.0, h: h - 54.0 }, &self.block.kind, &v),
-            Picture::Transfer => transfer(&mut f, Plot { x: 16.0, y: 28.0, w: w - 32.0, h: h - 42.0 }, &self.block.kind, &v),
+            Picture::Response => response(&mut f, plot, &self.block.kind, &v),
+            Picture::Transfer => transfer(&mut f, plot, &self.block.kind, &v),
             Picture::Dynamics => {
                 let gr = self.meter().map(|m| m.clamp(0.0, 1.0) * GR_RANGE);
                 let past = history.push(gr.unwrap_or(0.0));
-                dynamics(&mut f, Plot { x: 16.0, y: 28.0, w: w - 32.0, h: h - 42.0 }, &self.block.kind, &v, gr.map(|g| (g, past)));
+                dynamics(&mut f, plot, &self.block.kind, &v, gr.map(|g| (g, past)));
             }
-            Picture::Taps => taps(&mut f, Plot { x: 16.0, y: 30.0, w: w - 32.0, h: h - 46.0 }, &self.block.kind, &v),
+            Picture::Taps => taps(&mut f, plot, &self.block.kind, &v, tempo),
             Picture::Level => {
                 let level = self.meter().unwrap_or(0.0);
                 let past = history.push(level);
-                level_history(&mut f, Plot { x: 16.0, y: 30.0, w: w - 32.0, h: h - 46.0 }, level, &past);
+                level_history(&mut f, Plot { x: 16.0, y: 30.0, w: bounds.width - 32.0, h: bounds.height - 46.0 }, level, &past);
             }
-            Picture::Params => params::draw(&mut f, Plot { x: 16.0, y: 30.0, w: w - 32.0, h: h - 46.0 }, &self.block.kind, &v),
+            Picture::Params => params::draw(&mut f, plot, &self.block.kind, &v, tempo),
         }
         caption(&mut f, &self.caption());
         vec![f.into_geometry()]
@@ -189,50 +191,18 @@ impl<M> canvas::Program<M> for Display<'_> {
 
 // ---- pictures ----------------------------------------------------------------------------------
 
-/// 20 Hz–20 kHz (log) at `t` 0..1.
-fn freq_at(t: f32) -> f32 {
-    20.0 * 1000f32.powf(t)
-}
-
-fn freq_t(hz: f32) -> f32 {
-    (hz / 20.0).max(1e-6).log10() / 3.0
-}
-
-/// Magnitude over 20 Hz–20 kHz (log) with a handle on the curve. EQs: ±18 dB, the area between the
-/// curve and 0 dB filled; filters: −48…+12 dB.
+/// Magnitude over 20 Hz–20 kHz (log) on fixed axes, with a handle on the curve. EQs: ±24 dB, the
+/// area between the curve and 0 dB filled; filters: −48…+24 dB.
 fn response(f: &mut Frame, plot: Plot, kind: &BlockKind, v: &dyn Fn(&ParamRef) -> f32) {
-    const N: usize = 240;
     let is_filter = matches!(kind, BlockKind::LowPass(_) | BlockKind::HighPass(_));
-    let (lo, hi) = if is_filter { (-48.0, 12.0) } else { (-18.0, 18.0) };
-    let y = |db: f32| plot.py(((db - lo) / (hi - lo)).clamp(-0.01, 1.01));
-    let freqs: Vec<f32> = (0..=N).map(|i| freq_at(i as f32 / N as f32)).collect();
+    let fr = if is_filter { params::Freq::new(plot, -48.0, 24.0) } else { params::Freq::new(plot, -24.0, 24.0) };
+    fr.grid(f);
+    let freqs = fr.freqs(320);
     let Some(db) = preview::response_db(kind, v, &freqs) else { return };
-
-    for hz in [50.0f32, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0] {
-        let x = plot.px(freq_t(hz));
-        f.stroke(&Path::line(Point::new(x, plot.y), Point::new(x, plot.y + plot.h)), grid());
-    }
-    let mut d = (lo / 12.0).ceil() * 12.0;
-    while d <= hi {
-        f.stroke(&Path::line(Point::new(plot.x, y(d)), Point::new(plot.x + plot.w, y(d))), if d == 0.0 { zero() } else { grid() });
-        d += 12.0;
-    }
-    for (hz, name) in [(100.0f32, "100"), (1000.0, "1k"), (10000.0, "10k")] {
-        label(f, name, Point::new(plot.px(freq_t(hz)), plot.y + plot.h + 5.0), alignment::Horizontal::Center, faint());
-    }
-
-    let point = |i: usize| Point::new(plot.px(i as f32 / N as f32), y(db[i]));
     if !is_filter {
-        let area = Path::new(|p| {
-            p.move_to(Point::new(plot.x, y(0.0)));
-            (0..=N).for_each(|i| p.line_to(point(i)));
-            p.line_to(Point::new(plot.x + plot.w, y(0.0)));
-            p.close();
-        });
-        f.fill(&area, theme::alpha(theme::c().frame_ink, 0.07));
+        fr.fill(f, &freqs, &db);
     }
-    f.stroke(&Path::new(|p| polyline(p, (0..=N).map(point))), curve());
-
+    f.stroke(&fr.path(&freqs, &db), curve());
     // The handle: at the frequency, on the curve (peak: at its gain; shelves: half-way).
     let (hz, at_db) = match kind {
         BlockKind::PeakEq(e) => (v(&e.freq), v(&e.gain)),
@@ -243,7 +213,7 @@ fn response(f: &mut Frame, plot: Plot, kind: &BlockKind, v: &dyn Fn(&ParamRef) -
         }
         _ => return,
     };
-    handle(f, Point::new(plot.px(freq_t(hz).clamp(0.0, 1.0)), y(at_db)));
+    handle(f, fr.at(hz, at_db));
 }
 
 /// Input → output over ±1 in a square on the left (the identity dashed), and a test sine through it
@@ -273,15 +243,16 @@ fn transfer(f: &mut Frame, plot: Plot, kind: &BlockKind, v: &dyn Fn(&ParamRef) -
 /// it. Returns the square's mapping (x, y) → point.
 fn shaper(f: &mut Frame, plot: Plot, shape: &dyn Fn(f32) -> Option<f32>, ceiling: Option<f32>) -> impl Fn(f32, f32) -> Point + use<> {
     const N: usize = 200;
-    let side = plot.h;
-    let sq = Plot { x: plot.x, y: plot.y, w: side, h: side };
+    let a = params::inner(plot);
+    let sq = Plot { x: a.x, y: a.y, w: a.h, h: a.h };
     let to = move |x: f32, y: f32| Point::new(sq.px((x + 1.0) / 2.0), sq.py(((y + 1.0) / 2.0).clamp(-0.03, 1.03)));
 
-    for i in 0..=4 {
-        let t = i as f32 / 4.0;
-        f.stroke(&Path::line(Point::new(sq.px(t), sq.y), Point::new(sq.px(t), sq.y + sq.h)), grid());
-        f.stroke(&Path::line(Point::new(sq.x, sq.py(t)), Point::new(sq.x + sq.w, sq.py(t))), grid());
+    for (t, s) in [(0.0, "-1"), (0.25, ""), (0.5, "0"), (0.75, ""), (1.0, "1")] {
+        params::xtick(f, sq, t, s);
+        params::ytick(f, sq, t, s);
     }
+    params::unit(f, sq, "out");
+    label(f, "in", Point::new(sq.x + sq.w + 5.0, sq.y + sq.h + 3.0), alignment::Horizontal::Left, faint());
     f.stroke(&Path::line(to(-1.0, -1.0), to(1.0, 1.0)), dashed(faint()));
     if let Some(c) = ceiling {
         for y in [c, -c] {
@@ -297,6 +268,7 @@ fn shaper(f: &mut Frame, plot: Plot, shape: &dyn Fn(f32) -> Option<f32>, ceiling
     let x0 = sq.x + sq.w + 20.0;
     let (x1, mid, amp) = (plot.x + plot.w, sq.y + sq.h / 2.0, sq.h / 2.0 * 0.92);
     if x1 - x0 >= 40.0 {
+        label(f, "test sine", Point::new(x1, sq.y + sq.h + 3.0), alignment::Horizontal::Right, faint());
         let sine = |u: f32| (u * 2.0 * std::f32::consts::TAU).sin() * 0.8;
         let at = |u: f32, y: f32| Point::new(x0 + u * (x1 - x0), mid - y.clamp(-1.1, 1.1) * amp);
         f.stroke(&Path::line(Point::new(x0, mid), Point::new(x1, mid)), zero());
@@ -317,16 +289,20 @@ const GR_RANGE: f32 = 24.0;
 fn dynamics(f: &mut Frame, plot: Plot, kind: &BlockKind, v: &dyn Fn(&ParamRef) -> f32, live: Option<(f32, Vec<f32>)>) {
     const FLOOR: f32 = -60.0;
     const N: usize = 160;
-    let side = plot.h;
-    let sq = Plot { x: plot.x, y: plot.y, w: side, h: side };
+    let a = params::inner(plot);
+    let sq = Plot { x: a.x, y: a.y, w: a.h, h: a.h };
     let to = |input: f32, output: f32| Point::new(sq.px(input / -FLOOR + 1.0), sq.py((output / -FLOOR + 1.0).clamp(-0.02, 1.0)));
     let gr_at = |level: f32| preview::dynamics(kind, v, level).unwrap_or(0.0);
 
     for i in 0..=5 {
         let d = FLOOR + i as f32 * 12.0;
-        f.stroke(&Path::line(to(d, FLOOR), to(d, 0.0)), grid());
-        f.stroke(&Path::line(to(FLOOR, d), to(0.0, d)), grid());
+        let t = i as f32 / 5.0;
+        let s = if i % 2 == 1 { format!("{d}") } else { String::new() };
+        params::xtick(f, sq, t, &s);
+        params::ytick(f, sq, t, &s);
     }
+    params::unit(f, sq, "out dB");
+    label(f, "in", Point::new(sq.x + sq.w + 5.0, sq.y + sq.h + 3.0), alignment::Horizontal::Left, faint());
     f.stroke(&Path::line(to(FLOOR, FLOOR), to(0.0, 0.0)), dashed(faint()));
     f.stroke(&Path::new(|p| polyline(p, (0..=N).map(|i| {
         let input = FLOOR * (1.0 - i as f32 / N as f32);
@@ -349,16 +325,21 @@ fn dynamics(f: &mut Frame, plot: Plot, kind: &BlockKind, v: &dyn Fn(&ParamRef) -
     }
 
     // The last seconds of gain reduction.
-    let x0 = sq.x + sq.w + 18.0;
+    let x0 = sq.x + sq.w + 44.0;
     let x1 = plot.x + plot.w;
     if x1 - x0 < 40.0 {
         return;
     }
     let gy = |db: f32| sq.y + (db / GR_RANGE).clamp(0.0, 1.0) * sq.h;
-    f.stroke(&Path::line(Point::new(x0, sq.y), Point::new(x1, sq.y)), zero());
-    f.stroke(&Path::line(Point::new(x0, gy(12.0)), Point::new(x1, gy(12.0))), dashed(faint()));
-    label(f, "−12 dB", Point::new(x1, gy(12.0) + 3.0), alignment::Horizontal::Right, faint());
-    label(f, "GR", Point::new(x1, sq.y + sq.h - 11.0), alignment::Horizontal::Right, muted());
+    let panel = Plot { x: x0, y: sq.y, w: x1 - x0, h: sq.h };
+    for db in [0.0f32, 6.0, 12.0, 18.0, 24.0] {
+        params::ytick(f, panel, 1.0 - db / GR_RANGE, &if db == 0.0 { "0".to_string() } else { format!("-{db}") });
+    }
+    params::unit(f, panel, "GR dB");
+    // ~2.4 s of history (`HISTORY` frames).
+    params::xtick(f, panel, 1.0 - 2.0 / 2.4, "-2 s");
+    params::xtick(f, panel, 1.0 - 1.0 / 2.4, "-1 s");
+    label(f, "now", Point::new(x1, sq.y + sq.h + 3.0), alignment::Horizontal::Right, faint());
     if past.len() > 1 {
         let step = (x1 - x0) / (HISTORY - 1) as f32;
         let start = x1 - (past.len() - 1) as f32 * step;
@@ -374,33 +355,50 @@ fn dynamics(f: &mut Frame, plot: Plot, kind: &BlockKind, v: &dyn Fn(&ParamRef) -
     }
 }
 
-/// The dry hit (grey) and the repeats, each as high as it's loud; ping-pong alternates them above
-/// (left) and below (right) the line.
-fn taps(f: &mut Frame, plot: Plot, kind: &BlockKind, v: &dyn Fn(&ParamRef) -> f32) {
-    const REPEATS: usize = 8;
-    let BlockKind::Delay { feedback, mix, pingpong, .. } = kind else { return };
+/// How long the time axis of the delay is: the longest delay time.
+const TAPS_SECONDS: f32 = 4.0;
+
+/// The dry hit (grey) and the repeats on a fixed 0–4 s axis, each as high as it's loud; ping-pong
+/// alternates them above (left) and below (right) the line.
+fn taps(f: &mut Frame, plot: Plot, kind: &BlockKind, v: &dyn Fn(&ParamRef) -> f32, tempo: f32) {
+    let BlockKind::Delay { time, sync, feedback, mix, pingpong, .. } = kind else { return };
+    let a = params::inner(plot);
     let (fb, wet) = ((v(feedback) / 100.0).clamp(0.0, 1.0), (v(mix) / 100.0).clamp(0.0, 1.0));
-    let x = |k: usize| plot.px(0.03 + k as f32 / REPEATS as f32 * 0.94);
-    // Ping-pong: around the middle, L up and R down; else from the bottom.
-    let (base, reach) = if *pingpong { (plot.y + plot.h / 2.0, plot.h / 2.0) } else { (plot.y + plot.h, plot.h) };
-    f.stroke(&Path::line(Point::new(plot.x, base), Point::new(plot.x + plot.w, base)), zero());
-    if *pingpong {
-        label(f, "L", Point::new(plot.x, plot.y), alignment::Horizontal::Left, faint());
-        label(f, "R", Point::new(plot.x, plot.y + plot.h - 11.0), alignment::Horizontal::Left, faint());
+    let seconds = match sync {
+        Some(beats) => beats * 60.0 / tempo,
+        None => v(time) / 1000.0,
     }
+    .max(0.001);
+    for s in 0..=TAPS_SECONDS as usize {
+        params::xtick(f, a, s as f32 / TAPS_SECONDS, &format!("{s} s"));
+    }
+    if *pingpong {
+        for (t, l) in [(1.0, "L"), (0.5, "0"), (0.0, "R")] {
+            params::ytick(f, a, t, l);
+        }
+    } else {
+        for (t, l) in [(0.0, "0"), (0.5, "50"), (1.0, "100")] {
+            params::ytick(f, a, t, l);
+        }
+        params::unit(f, a, "%");
+    }
+    let (base, reach) = if *pingpong { (a.y + a.h / 2.0, a.h / 2.0) } else { (a.y + a.h, a.h) };
     let mut stem = |k: usize, level: f32, colour: Color| {
+        let x = a.px(k as f32 * seconds / TAPS_SECONDS);
         let down = *pingpong && k % 2 == 0 && k > 0;
         let len = reach * level.clamp(0.0, 1.0);
-        let top = Point::new(x(k), if down { base + len } else { base - len });
-        f.stroke(&Path::line(Point::new(x(k), base), top), Stroke::default().with_color(colour).with_width(3.0).with_line_cap(canvas::LineCap::Round));
+        let top = Point::new(x, if down { base + len } else { base - len });
+        f.stroke(&Path::line(Point::new(x, base), top), Stroke::default().with_color(colour).with_width(2.0).with_line_cap(canvas::LineCap::Round));
     };
     stem(0, 1.0 - wet, muted());
-    for k in 1..=REPEATS {
+    let mut k = 1;
+    while k as f32 * seconds <= TAPS_SECONDS && k <= 400 {
         let level = wet * fb.powi(k as i32 - 1);
         if level < 0.004 {
             break;
         }
         stem(k, level, theme::c().frame_ink);
+        k += 1;
     }
 }
 

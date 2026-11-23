@@ -33,6 +33,12 @@ high and as wide as the knob column leaves: 8 knobs → 300 px, 3 → 370, none 
    Stutter), the analyser behind the EQs (optional in the mockup, comes here), the vectorscope
    (Width), LFO phases (Chorus, Flanger, Phaser, AutoPan), lane levels in containers.
 
+**Axes (2026-11-23):** every display has labelled axes that never move; knobs change only the
+content (delay 0–4 s, reverbs 0–10 s, LFOs 0–2 s, Haas 0–40 ms, frequency always 20 Hz–20 kHz).
+Morph, Ladder, Comb, Formant, Resonator, Flanger and Phaser draw the DSP's real transfer functions
+(`dsp::preview`, checked against audio by `preview_curves_match_the_audio`). Bitcrusher and RingMod
+show the wet signal whatever the mix. Synced times use the host tempo (`Shared::tempo`).
+
 ## 2. Live data from the audio thread
 
 The audio thread processes the chain in blocks (the host decides the size and the rate), the UI
