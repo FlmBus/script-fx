@@ -498,3 +498,24 @@ mod tests {
         assert!(matches!(out.as_slice(), [Change::OpenEntry { target: Target::Macro(0), .. }]));
     }
 }
+
+#[cfg(test)]
+mod advanced_tab {
+    use super::*;
+
+    /// Neon's ADVANCED tab shows a spectrum `series` that has no data yet: the component must get
+    /// an empty list, not the series' name (it failed in `ipairs`).
+    #[test]
+    fn neon_advanced_tab_renders() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../patches/neon-saturator");
+        let patch = Patch::load(&dir).unwrap();
+        let mut panel = Panel::load(&dir).unwrap();
+        let values = Values { params: vec![0.0; patch.params.len()], ..Default::default() };
+        panel.update(&patch, &values, 1.0);
+        let at = Point::new(470.0, 304.0);
+        panel.pointer(Pointer::Pressed(at), &patch, &values);
+        panel.pointer(Pointer::Released, &patch, &values);
+        panel.update(&patch, &values, 1.0);
+        assert_eq!(panel.ui.errors(), Vec::<String>::new());
+    }
+}

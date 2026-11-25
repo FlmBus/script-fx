@@ -6,9 +6,10 @@ Concepts, research and measurements: [`research/`](research/)._
 
 ## Current state
 
-The chain editor is on `main`: Surface and Chain views, block modals, the macro rail, the
-modulators (Follow, LFO 1–3, Step) with their drawer panels, Serum-style routes with drag & drop
-onto knobs, and the Matrix (every route, add/remove). See
+The chain editor is on `main`: Surface and Chain views, block modals, the modulators (Follow,
+LFO 1–3, Step), Serum-style routes with drag & drop onto knobs, and the Matrix (every route,
+add/remove). Branch `mod-dock` (2026-11-25): the **mod dock** replaces the macro rail and the
+drawer ([`research/shell-layout.md`](research/shell-layout.md)). See
 [`research/chain-editor.md`](research/chain-editor.md) for the design and remaining deviations.
 Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in a real host.
 
@@ -25,8 +26,8 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
 - **Modulation**: two kinds of route, macro slots (`Patch::modulations`) and modulator
   assignments (`Patch::assignments`), one model for the shell (`patch::routes`: `Route`,
   `RouteSource`, add/remove). Normalized deltas sum onto the knob's base. Drag a macro's grip (the
-  "M3" tag in the rail) or a modulator tab's grip (drawer) onto a block modal's knob, or a modulator
-  onto a macro in the rail; each route is a meta knob in its source's colour (up to 5, then "+N");
+  title bar in the dock) or a modulator's title bar onto a block knob, or a modulator onto a
+  macro in the dock; each route is a meta knob in its source's colour (up to 5, then "+N");
   right-click = menu with Remove. Changing routes or modulator settings rebuilds the graph once
   per frame and the new graph **adopts** the playing one's state (tails, LFO phases:
   `Graph::adopt`), so it doesn't click. Saved with the project: slot settings (`mod-slots`) and
@@ -36,10 +37,24 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
   position (`Graph::modulator_phases`), like Serum: one LFO cycle (`dsp::modulators::morph`, what
   plays) with a dot, Step's bars with the playing step lit. Only Follow is a live trace. A trace
   sampled once per UI frame aliases any LFO above a few Hz into noise (2026-11-21).
-- **Layers:** a page press closes the library, sheets, the drawer, the entry and menus; the macro
-  rail stays (drag a macro onto a knob, then turn it). The drawer opens to 180 px and the block
-  modal moves up above it. The chain ↔ modal blur keeps the notch, the drawer (at its
-  current height) and the rail sharp (`postfx` has three keep rects).
+- **Mod dock** (branch `mod-dock`, `shell/dock.rs`): always below the stage, never over it.
+  Macros 1–8 / 9–16 and the five modulators (live mini displays), each with a title bar in its
+  colour = the drag handle. Click = focus (the hint counts its routes, the others fade), again =
+  its editor: a panel rising from the dock over the stage's lower part (decided 2026-11-25 over
+  scaling the stage, a modal, or growing the window: the stage stays usable, a block modal moves
+  up above it). It stays open while the stage is used and steps aside while a source is dragged.
+  Escape closes the editor, then the focus. Macros (dock and Surface) take modulators and show a
+  meta knob per route. Window 836 × 714 (stage still 816 × 544). Not yet: the knobs' focus rule,
+  collapsing, the mockup's drag tag.
+- **Blur** (branch `mod-dock`): the zoom blur applies to the chain under the camera only, drawn
+  as the renderer's backdrop (`shell/backdrop.rs`); everything drawn after it stays sharp.
+- **Notch** (branch `mod-dock`): one row, reload | snapshots | **bypass** (the host's bypass
+  parameter, `FxParams::bypass`: the input passes through delayed by the chain's latency, 10 ms
+  crossfade; the graph keeps running). The view switch is three icons in the stage's top-right
+  corner (name on hover).
+- **Layers:** a page press closes the library, sheets, the entry and menus; the dock stays. The
+  chain ↔ modal blur keeps the notch, the sheets and the modal sharp (through the stage's
+  scale).
 - **Rates:** LFO and Step have `Hz | sync` (pills on the Rate knob; `sync = "1/8"` in Luau, a note
   length overriding `rate_hz`). Block rates (`sync` on Chorus, Delay, …) are still patch-only.
 - **Blocks (2026-11-21):** one versatile compressor (detector, topology, ratio curve, program,
@@ -48,8 +63,8 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
   ([`research/blocks.md`](research/blocks.md) §4).
 - **Filters:** LowPass/HighPass have a `slope` param (12/24/36/48 dB/oct, cascaded biquads with
   Butterworth stage Q's; `q` = resonance on the steepest stage). Params can be stepped
-  (`ParamSpec::step`: values snap). The Matrix shows each route's source level and the
-  destination's live value.
+  (`ParamSpec::step`: values snap). The Matrix shows each route's source level (a bar) and
+  its curve as a small graph (drag up/down to bend it, as in Serum).
 - **Captures and passive mode (2026-11-25).** Listen writes one folder per capture with a
   subfolder per track (`captures.rs`: `capture.json`, `index.json`, `analysis.json` + the two
   WAVs per track; the last `KEEP` = 20 are kept, and the settings sheet shows the folder's size
@@ -58,7 +73,7 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
   `captures::read(id, track, stream, section)` serves single sections — the query the planned
   `get_analysis` tool will call, tested already. Derived loudness values (crest, PLR, K-system)
   left the JSON and became methods. **Passive mode** works: the switch in the settings sheet
-  (and the card's own button) unloads the patch, disables the library/macros/controls openers
+  (and the card's own button) unloads the patch, disables the library and controls openers (the dock is hidden)
   and fills the window with the passive card; it is saved with the project (`FxParams::passive`).
   The host's track name arrives through `IcedNiceContext::new_track_info()` — no nice-plug patch
   needed — and titles the card.
@@ -79,12 +94,15 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
   Ctrl+C in the standalone only sets a flag the GUI checks per frame; close the window instead.
 - **Open details:** macro value text and typed values use the target's default base and only that
   macro's contribution, not the edited base or other macros; beyond five routes a knob shows "+N"
-  (edit those in the Matrix); the block modal's display slides under the notch while the drawer is
-  open; test save/restore in a host and pointer warping under XWayland
+  (edit those in the Matrix); test save/restore in a host and pointer warping under XWayland
   on Hyprland.
 
 ## Next steps (prioritised)
 
+0. **Mod dock, rest** ([`research/shell-layout.md`](research/shell-layout.md) "Open"): the
+   knobs show only the focused source's rings and meta knobs (route dots otherwise), collapsing
+   the dock (window resize), the drag tag. Then decide on the rest of the shell layout (960×540
+   stage, one-row notch, docked columns).
 1. **Modulation, step 4 (polish):** Matrix filtering (by source/destination) and sorting; the
    open modulator's targets glow and chain blocks show dots in their modulators' colours (concept
    §§ drawer/chain); `Hz | sync` pills on block knobs (rates, delay times); a
@@ -163,7 +181,7 @@ patches, informed by an analysis of the actual audio on the track (and the mix).
 
 | Term | Meaning | Code |
 |---|---|---|
-| **Shell** | the plugin itself and its own UI (top bar, notch, views, sheets, drawer) | `crates/plugin/src/shell/` |
+| **Shell** | the plugin itself and its own UI (top bar, notch, views, sheets, dock) | `crates/plugin/src/shell/` |
 | **Patch** | a Luau script describing a chain, its macros, theme and ControlPanel (`return Patch.new(...)`) | crate `patch`, `patches/<name>/init.luau` |
 | **Snapshot** | saved values of a patch (macros + params). Not implemented yet | — |
 | **ControlPanel** | a patch's own UI: reactive Luau components, fixed 840×560; the `panel` of `Patch.new`. To be renamed "surface" | `ui_components::Ui`, `shell/stage.rs` |
@@ -177,8 +195,9 @@ patches, informed by an analysis of the actual audio on the track (and the mix).
 | **Host slot** | one of the 16 fixed host parameters macros are mapped onto | `MACRO_SLOTS` |
 | **Modulation slot / route** | one source → param (or modulator → macro) link: amount (range size, sign = direction), uni/bi, curve, bypass | `patch::Modulation`, `ModAssignment`, `patch::Route`, `ModSettings` |
 | **Meta knob / range arc / live dot** | a slot's mini knob on its target / the slot's range on the knob / the value after modulation | `shell/knob.rs` |
-| **Modulator** | Follow, LFO 1–3, Step: sources that live outside the chain | `dsp::modulators`, `shell/drawer.rs` |
-| **Drawer / Macro rail / Notch / Sheet** | modulator tabs at the bottom / the macros' card on the left / view switch + snapshots at the top / side panels (library, controls, chat, settings) | `shell/drawer.rs`, `macro_rail.rs`, `notch.rs`, `sheet.rs` |
+| **Modulator** | Follow, LFO 1–3, Step: sources that live outside the chain | `dsp::modulators`, `shell/dock.rs` |
+| **Dock / Notch / Sheet** | macros and modulators below the stage (focus, a modulator's editor; replaced the drawer and the macro rail) / view switch + snapshots at the top / side panels (library, controls, chat, settings) | `shell/dock.rs`, `notch.rs`, `sheet.rs` |
+| **Stage** | the patch window above the dock: Surface, Chain or Matrix | `stage.rs` |
 | **Matrix** | every route as a table (live values, add/remove) | `shell/matrix.rs` |
 | **Bind / Source** | what a component reads: `bind` = a Macro/Param object (value, draggable), `source` = a metered block or `Meters.IN/OUT` | `__ref`, `patch::Source` |
 | **Theme** | a patch's design tokens (colours, fonts, images); used by its ControlPanel, library card and macro surface, never by the rest of the shell | `Theme` |

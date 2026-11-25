@@ -1,8 +1,9 @@
 //! The Matrix (notch: Matrix): every modulation route of the patch as a table, macro slots and
 //! modulator assignments alike, each in its source's colour. A row: on/off, source,
-//! destination, now (the source's live level as a bar, the destination's live value after all
-//! modulation), amount (its sign is the direction), curve, polarity, reset, remove. Below the rows: add a route
-//! (pick a source, then a destination).
+//! destination, now (the source's live level as a bar), amount (its sign is the direction),
+//! curve (a small graph of the response, as in Serum: drag up/down to bend it, double-click =
+//! linear), polarity, reset, remove. Below the rows: add a route (pick a source, then a
+//! destination).
 //!
 //! Edits go through the session like the meta knob's (`Session::set_route`, `add_route`,
 //! `remove_route`), so they apply live and are saved with the project.
@@ -84,8 +85,6 @@ struct SlotRow<'a> {
     settings: ModSettings,
     /// The source's level now (0..1).
     level: f32,
-    /// The destination's value now, after all modulation ("5.4 dB", "64%").
-    value: String,
 }
 
 /// The source's live level: a macro's value, a modulator's output.
@@ -93,14 +92,6 @@ fn level(values: &Values, source: RouteSource) -> f32 {
     match source {
         RouteSource::Macro(slot) => values.macros[slot],
         RouteSource::Modulator(id) => values.modulators[id.index()],
-    }
-}
-
-/// The destination's live value in its unit (a macro destination: its value in percent).
-fn live_value(patch: &Patch, values: &Values, d: &ModDestination) -> String {
-    match d {
-        ModDestination::Param(id) => patch.param_index(id).map_or_else(String::new, |i| patch.params[i].display(values.params.get(i).copied().unwrap_or(0.0))),
-        ModDestination::Macro(id) => patch.macro_index(id).map_or_else(String::new, |m| format!("{:.0}%", values.macros[m] * 100.0)),
     }
 }
 
@@ -132,7 +123,6 @@ fn rows<'a>(patch: &'a Patch, values: &Values) -> Vec<SlotRow<'a>> {
                 destination_detail,
                 settings: patch.route_settings(route)?,
                 level: level(values, source),
-                value: live_value(patch, values, &destination),
                 slot: Slot { dir: patch.dir.clone(), route, source, destination },
             })
         })
@@ -230,7 +220,7 @@ impl Matrix {
             space::vertical().height(5),
             scrollable(list).height(Fill).direction(theme::thin_scrollbar()).style(theme::paper_scrollbar),
         ]
-        .padding(Padding { top: PAD, right: PAD, bottom: DRAWER_CLEARANCE, left: PAD });
+        .padding(Padding { top: PAD, right: PAD, bottom: BOTTOM_CLEARANCE, left: PAD });
 
         container(body)
             .width(Fill)
@@ -291,8 +281,9 @@ impl Matrix {
 
 // Leave room for the notch and the collapsed drawer, which hang over the view.
 const PAD: f32 = 18.0;
-const NOTCH_CLEARANCE: f32 = 84.0;
-const DRAWER_CLEARANCE: f32 = theme::SIZE_DRAWER_BAR + 12.0;
+const NOTCH_CLEARANCE: f32 = 56.0;
+/// A margin below the list (the dock is outside the stage).
+const BOTTOM_CLEARANCE: f32 = PAD;
 const ON: f32 = 36.0;
 const SOURCE: f32 = 104.0;
 const TARGET: f32 = 132.0;
@@ -337,19 +328,22 @@ fn slot_row(item: SlotRow<'_>) -> Element<'_, Message> {
     .spacing(2))
     .width(TARGET)
     .clip(true);
-    let now = column![
-        text(item.value).size(10.5).font(theme::font::MONO).color(theme::c().frame_ink_2),
-        canvas(Level { value: item.level, colour }).width(Fill).height(4),
-    ]
-    .spacing(4)
-    .width(NOW);
+    let now = container(canvas(Level { value: item.level, colour }).width(Fill).height(4)).width(NOW).center_y(25);
     let amount_slot = item.slot.clone();
     let amount = signed_slider(s.amount, format!("{:+.0}%", s.amount * 100.0).replace('-', "−"), AMOUNT, colour, move |v| {
         Message::Edit(amount_slot.clone(), Edit::Amount(v))
     });
     let curve_slot = item.slot.clone();
     let curve_text = if s.curve == 0.0 { "lin".into() } else { format!("{:+.2}", s.curve).replace('-', "−") };
-    let curve = signed_slider(s.curve, curve_text, CURVE, colour, move |v| Message::Edit(curve_slot.clone(), Edit::Curve(v)));
+    let curve = row![
+        canvas(CurveGraph { curve: s.curve, colour, on_change: move |v| Message::Edit(curve_slot.clone(), Edit::Curve(v)) })
+            .width(Fill)
+            .height(25),
+        text(curve_text).size(10.5).font(theme::font::MONO).color(theme::c().frame_ink_2).width(40),
+    ]
+    .spacing(6)
+    .align_y(Center)
+    .width(CURVE);
     let mode = control(if s.bipolar { "Bi" } else { "Uni" }, s.bipolar, POLARITY, message(Edit::TogglePolarity));
     let reset = control("Reset", false, RESET, message(Edit::Reset));
     let remove = control("×", false, REMOVE, message(Edit::Remove));
@@ -398,6 +392,92 @@ fn slider_style(_: &Theme, status: slider::Status) -> slider::Style {
             border_width: 0.0,
             border_color: Color::TRANSPARENT,
         },
+    }
+}
+
+/// The curve column: what the route does to the source (x = the source, y = what reaches the
+/// knob, `patch::tension`), drawn in the source's colour over a faint linear diagonal, as in
+/// Serum's matrix. Drag up/down to bend it the way the pointer goes (up = the curve bows up, a
+/// fast start), double-click = linear, the wheel steps the same way.
+struct CurveGraph<F> {
+    curve: f32,
+    colour: Color,
+    on_change: F,
+}
+
+#[derive(Default)]
+struct CurveState {
+    /// A drag: where it started (y) and the curve then.
+    drag: Option<(f32, f32)>,
+    last_press: Option<std::time::Instant>,
+    hover: bool,
+}
+
+/// Pixels of vertical drag for the whole −1…+1 range.
+const CURVE_DRAG: f32 = 120.0;
+
+impl<F: Fn(f32) -> Message> canvas::Program<Message> for CurveGraph<F> {
+    type State = CurveState;
+
+    fn update(&self, state: &mut CurveState, event: &canvas::Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<canvas::Action<Message>> {
+        use canvas::Event::Mouse;
+        match event {
+            Mouse(mouse::Event::CursorMoved { position }) => {
+                state.hover = cursor.is_over(bounds);
+                let (y0, c0) = state.drag?;
+                let c = (c0 + (position.y - y0) * 2.0 / CURVE_DRAG).clamp(-1.0, 1.0);
+                Some(canvas::Action::publish((self.on_change)(c)).and_capture())
+            }
+            Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                let p = cursor.position_over(bounds)?;
+                let double = state.last_press.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(350));
+                state.last_press = Some(std::time::Instant::now());
+                if double {
+                    state.drag = None;
+                    return Some(canvas::Action::publish((self.on_change)(0.0)).and_capture());
+                }
+                state.drag = Some((p.y, self.curve));
+                Some(canvas::Action::capture())
+            }
+            Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => state.drag.take().map(|_| canvas::Action::capture()),
+            Mouse(mouse::Event::WheelScrolled { delta }) => {
+                cursor.position_over(bounds)?;
+                let notches = match *delta {
+                    mouse::ScrollDelta::Lines { y, .. } => y,
+                    mouse::ScrollDelta::Pixels { y, .. } => y / 40.0,
+                };
+                Some(canvas::Action::publish((self.on_change)((self.curve - notches * 0.05).clamp(-1.0, 1.0))).and_capture())
+            }
+            _ => None,
+        }
+    }
+
+    fn draw(&self, state: &CurveState, renderer: &Renderer, _: &Theme, bounds: Rectangle, _: mouse::Cursor) -> Vec<canvas::Geometry> {
+        let c = theme::c();
+        let mut f = canvas::Frame::new(renderer, bounds.size());
+        let (w, h) = (bounds.width, bounds.height);
+        let live = state.hover || state.drag.is_some();
+        f.fill(&canvas::Path::rounded_rectangle(Point::ORIGIN, bounds.size(), 4.0.into()), theme::alpha(c.frame_ink, if live { 0.08 } else { 0.05 }));
+        let pad = 3.0;
+        let at = |x: f32, y: f32| Point::new(pad + x * (w - 2.0 * pad), h - pad - y * (h - 2.0 * pad));
+        // As the audio thread applies it (`ModSettings::delta`): the whole 0..1 range of the source
+        // is bent, bipolar routes then centre it.
+        let shape = |x: f32| patch::tension(x, self.curve);
+        f.stroke(&canvas::Path::line(at(0.0, 0.0), at(1.0, 1.0)), canvas::Stroke::default().with_color(theme::alpha(c.frame_ink, 0.12)).with_width(1.0));
+        const N: usize = 40;
+        let line = canvas::Path::new(|b| {
+            b.move_to(at(0.0, shape(0.0)));
+            for k in 1..=N {
+                let x = k as f32 / N as f32;
+                b.line_to(at(x, shape(x)));
+            }
+        });
+        f.stroke(&line, canvas::Stroke::default().with_color(self.colour).with_width(1.6));
+        vec![f.into_geometry()]
+    }
+
+    fn mouse_interaction(&self, state: &CurveState, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
+        if state.drag.is_some() || cursor.is_over(bounds) { mouse::Interaction::ResizingVertically } else { mouse::Interaction::None }
     }
 }
 

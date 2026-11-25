@@ -25,5 +25,11 @@ marked `PATCH(scriptfx)`.
   outside bleeds in); up to eight `keep` areas (UI over the blurred content) and everything outside
   `rect` pass through.
 - Without an effect, `present` is unchanged (no offscreen pass).
+- **Backdrop** (2026-11-25): an app marks a layer as the backdrop (`postfx::mark_backdrop_start`
+  right before `with_layer`, `mark_backdrop_end` right before it ends; `start_layer`/`end_layer`
+  record the layer range, `reset` clears it). With a backdrop, `render` switches targets after its
+  last layer: everything so far is blurred into the frame, the remaining layers are drawn on top
+  (sharp, any shape). Layers aren't merged in such a frame (a merge could move content across the
+  split). Without one, the whole frame goes through the blur and `keep` as before.
 - Why here: iced can't render a widget subtree to a texture, and the baseview shell doesn't
   support window screenshots, so a full-frame pass in the renderer is the only place for it.

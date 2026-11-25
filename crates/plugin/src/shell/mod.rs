@@ -1,13 +1,13 @@
 //! The shell: the plugin's own UI (iced), in the "ScriptFX Shell" design system.
-//! Top bar over the patch window (ControlPanel + notch at the top, drawer at the bottom, sheets
-//! floating over it on both sides).
+//! Top bar over the stage (the patch window: ControlPanel, chain or Matrix, the notch hanging
+//! into it, sheets floating over it on both sides), the mod dock below it.
 //!
 //! One module per section, each with its own state, `Message`, `update` and `view`:
 //! - `top_bar`      the wordmark, sheet openers (library left; controls, chat, settings right)
 //! - `library`      the patch library (sheet, left)
 //! - `notch`        view switch (Panel | Chain | Matrix); reload / snapshot selector, save, load
-//! - `drawer`       rises from the window's bottom edge: modulator tabs and the open modulator
-//! - `macro_rail`   the patch's macros, a card on the left under the top bar
+//! - `dock`         below the stage: macros, modulators (live mini displays), focus, and a
+//!                  modulator's editor (a panel rising over the stage's lower part)
 //! - `stage`        the patch window: the ControlPanel and its pointer input
 //! - `chain_view`   the audio tree (notch: Chain), in place of the ControlPanel
 //! - `matrix`       every modulation route as a table, add/remove (notch: Matrix)
@@ -19,9 +19,10 @@
 //! - `empty`        the window when no patch is loaded
 //! - `entry`        typing a value (right-click a knob)
 //!
-//! Drag & drop: pressing a macro's grip (rail) or a modulator tab's grip (drawer) starts a
-//! `SourceDrag`; a chip follows the pointer, knobs that can take it outline themselves, and a
-//! release over one adds the route (`Session::add_route`).
+//! Drag & drop: pressing a source's title bar in the dock (a macro or a modulator) starts a
+//! `SourceDrag`; once the pointer moves a chip follows it, knobs that can take it outline
+//! themselves, and a release over one adds the route (`Session::add_route`). Released without
+//! moving, it was a click: the dock focuses the source.
 //!
 //! `session` holds the non-UI state (library scan, loaded patch, hot reload, values).
 //! This file owns what several sections share (which sheet is open, the frame clock), routes
@@ -31,19 +32,19 @@
 pub mod theme;
 
 mod block_display;
+mod backdrop;
 mod block_modal;
 mod brand;
 mod chain_view;
 mod chat;
 mod controls;
-mod drawer;
+mod dock;
 mod knob;
 mod empty;
 mod entry;
 mod hide_cursor;
 mod icons;
 mod library;
-mod macro_rail;
 mod matrix;
 mod meta_menu;
 mod motion;
@@ -133,10 +134,6 @@ pub struct Shell {
     /// The library sheet (left slot) and its slide.
     library_open: bool,
     library_slide: Animation<bool>,
-    /// The macro rail (left, under the top bar) and its slide.
-    macros_open: bool,
-    macros_slide: Animation<bool>,
-    macro_rail: macro_rail::Rail,
     /// The open right-hand sheet; `shown` keeps the last one drawn while it slides out.
     sheet: Option<Sheet>,
     shown: Sheet,
@@ -170,7 +167,7 @@ pub struct Shell {
     page: Option<String>,
     /// The chain ↔ modal transition (or a walk along the chain) while it runs.
     motion: Option<motion::Motion>,
-    drawer: drawer::Drawer,
+    dock: dock::Dock,
     /// The Matrix's add row (the source picked).
     matrix: matrix::Matrix,
     /// A macro or modulator being dragged onto a knob.
@@ -187,7 +184,6 @@ pub enum Message {
     Frame(Instant),
     TopBar(top_bar::Message),
     Library(library::Message),
-    Macros(macro_rail::Message),
     MetaMenu(meta_menu::Message),
     /// A press anywhere on the page (surface, chain, block page, …): close what floats.
     Dismiss,
@@ -200,7 +196,7 @@ pub enum Message {
     Matrix(matrix::Message),
     Chain(chain_view::Event),
     Page(block_modal::Message),
-    Drawer(drawer::Message),
+    Dock(dock::Message),
     Chat(chat::Message),
     Controls(controls::Message),
     Settings(settings::Message),
@@ -229,9 +225,6 @@ impl Shell {
             slide: Animation::new(false).duration(Duration::from_millis(260)).easing(Easing::EaseOutCubic),
             library_open: false,
             library_slide: Animation::new(false).duration(Duration::from_millis(260)).easing(Easing::EaseOutCubic),
-            macros_open: false,
-            macros_slide: Animation::new(false).duration(Duration::from_millis(260)).easing(Easing::EaseOutCubic),
-            macro_rail: macro_rail::Rail::new(),
             now: Instant::now(),
             dragging_macro: None,
             passive: false,
@@ -245,7 +238,7 @@ impl Shell {
             view: notch::View::Surface,
             page: None,
             motion: None,
-            drawer: drawer::Drawer::new(),
+            dock: dock::Dock::new(),
             matrix: matrix::Matrix::default(),
             source_drag: None,
             dropped: None,
@@ -353,14 +346,18 @@ impl Shell {
                     if self.session.current.is_none() && !self.passive {
                         self.set_library(true);
                     }
-                    // Dev aid: SCRIPTFX_DEV_SHEET=chat|controls|settings|library|drawer|entry opens it at start.
+                    // Dev aid: SCRIPTFX_DEV_SHEET=chat|controls|settings|library|editor|entry opens it at start
+                    // (editor: LFO 1's, in the dock).
                     match std::env::var("SCRIPTFX_DEV_SHEET").as_deref() {
                         Ok("chat") => self.open_sheet(Some(Sheet::Chat)),
                         Ok("controls") => self.open_sheet(Some(Sheet::Controls)),
                         Ok("settings") => self.open_sheet(Some(Sheet::Settings)),
                         Ok("library") => self.set_library(true),
-                        Ok("macros") => self.set_macros(true),
-                        Ok("drawer") => self.drawer.set_open(true, Instant::now()),
+                        Ok("editor") => {
+                            let lfo1 = patch::RouteSource::Modulator(patch::ModulatorId::Lfo1);
+                            self.dock.select(lfo1, Instant::now());
+                            self.dock.select(lfo1, Instant::now());
+                        }
                         // The value entry of the first macro, as if right-clicked at Neon's Tape knob.
                         Ok("entry") => self.open_entry(stage::Target::Macro(0), iced::Point::new(165.0, 388.0)),
                         _ => {}
@@ -385,7 +382,7 @@ impl Shell {
                     }
                 }
                 self.session.tick(ctx, &params, &shared);
-                self.drawer.tick(&self.session.values.modulators, &self.session.values.modulator_phases);
+                self.dock.tick(&self.session.values.modulators, &self.session.values.modulator_phases);
                 self.modal_tick();
                 let patch_name = self.session.current.as_ref().map(|c| c.folder.clone());
                 if let Some(result) = self.listen.poll(&shared, self.track.as_deref(), patch_name.as_deref()) {
@@ -403,7 +400,6 @@ impl Shell {
             }
             Message::TopBar(msg) => match msg {
                 top_bar::Message::ToggleLibrary => self.set_library(!self.library_open),
-                top_bar::Message::ToggleMacros => self.set_macros(!self.macros_open),
                 top_bar::Message::ToggleControls => self.toggle_sheet(Sheet::Controls),
                 top_bar::Message::ToggleChat => self.toggle_sheet(Sheet::Chat),
                 top_bar::Message::ToggleSettings => self.toggle_sheet(Sheet::Settings),
@@ -426,15 +422,22 @@ impl Shell {
             Message::Notch(msg) => match msg {
                 notch::Message::Reload => self.session.reload(ctx, &params, &shared),
                 notch::Message::View(v) => self.set_view(v),
+                notch::Message::Bypass(on) => {
+                    let setter = self.ctx.nice_context.param_setter();
+                    setter.begin_set_parameter(&params.bypass);
+                    setter.set_parameter(&params.bypass, on);
+                    setter.end_set_parameter(&params.bypass);
+                }
             },
             Message::Matrix(msg) => self.matrix.update(&mut self.session, &params, &shared, msg),
-            Message::Drawer(msg) => {
+            Message::Dock(msg) => {
                 self.now = Instant::now();
                 let mods = self.session.current.as_ref().map_or(&[][..], |c| &c.patch.modulators[..]);
-                match self.drawer.update(msg, self.now, mods) {
-                    Some(drawer::Event::Grab(id)) => self.start_source_drag(patch::RouteSource::Modulator(id)),
-                    Some(drawer::Event::Set(spec)) => self.session.set_modulator(&params, spec),
-                    Some(drawer::Event::Dragging(on)) => self.dragging = on,
+                match self.dock.update(msg, self.now, mods) {
+                    Some(dock::Event::Macro(slot, e)) => self.macro_knob(slot, e, &params, &shared),
+                    Some(dock::Event::Grab(source, at)) => self.start_source_drag(source, at),
+                    Some(dock::Event::Set(spec)) => self.session.set_modulator(&params, spec),
+                    Some(dock::Event::Dragging(on)) => self.dragging = on,
                     None => {}
                 }
             }
@@ -444,14 +447,6 @@ impl Shell {
                 }
             }
             Message::Surface(surface::Message::Macro(slot, e)) => self.macro_knob(slot, e, &params, &shared),
-            Message::Macros(msg) => {
-                self.now = Instant::now();
-                match self.macro_rail.update(msg, self.now) {
-                    Some(macro_rail::Event::Macro(slot, e)) => self.macro_knob(slot, e, &params, &shared),
-                    Some(macro_rail::Event::Close) => self.set_macros(false),
-                    None => {}
-                }
-            }
             Message::Chat(msg) => match self.chat.update(msg) {
                 Some(chat::Event::Close) => self.open_sheet(None),
                 Some(chat::Event::Listen) => self.listen.start(&shared),
@@ -491,7 +486,13 @@ impl Shell {
             Message::Released => {
                 self.dragging = false;
                 if let Some(d) = self.source_drag.take() {
-                    self.dropped = Some((d, Instant::now()));
+                    if d.moved() {
+                        self.dropped = Some((d, Instant::now()));
+                    } else {
+                        // Pressed and released in place: a click on the source.
+                        self.now = Instant::now();
+                        self.dock.select(d.source, self.now);
+                    }
                 }
             }
             Message::Panel(ev) => {
@@ -536,13 +537,11 @@ impl Shell {
             Message::MetaMenu(meta_menu::Message::OpenMatrix) => self.set_view(notch::View::Matrix),
             Message::Escape => {
                 if self.entry.take().is_none() && self.meta_menu.take().is_none() {
-                    // Closes what floats first; with nothing open, closes a block's modal.
-                    let open = self.library_open || self.macros_open || self.sheet.is_some() || self.drawer.is_open();
+                    // Closes what floats first, then the dock's editor and focus, then a block's modal.
+                    let open = self.library_open || self.sheet.is_some();
                     self.set_library(false);
-                    self.set_macros(false);
                     self.open_sheet(None);
-                    self.close_drawer();
-                    if !open {
+                    if !open && !self.dock.escape(Instant::now()) {
                         self.close_modal();
                     }
                 }
@@ -559,9 +558,6 @@ impl Shell {
         self.page = None;
         self.motion = None;
         iced_wgpu::postfx::set(None);
-        if view == notch::View::Matrix {
-            self.close_drawer();
-        }
     }
 
     fn controls(&mut self, msg: controls::Message, params: &FxParams, shared: &Shared) {
@@ -591,7 +587,7 @@ impl Shell {
         }
     }
 
-    /// Input on one of the drawer's macro knobs.
+    /// Input on a macro's knob (the dock, the macro surface).
     fn macro_knob(&mut self, slot: usize, e: knob::KnobEvent, params: &FxParams, shared: &Shared) {
         use stage::Change::*;
         match e {
@@ -610,15 +606,20 @@ impl Shell {
                 }
             }
             knob::KnobEvent::Entry(at) => self.open_entry(stage::Target::Macro(slot), window_to_panel(at)),
-            knob::KnobEvent::Grab => self.start_source_drag(patch::RouteSource::Macro(slot)),
+            knob::KnobEvent::Grab(at) => self.start_source_drag(patch::RouteSource::Macro(slot), at),
             // A modulator dropped on the macro: it modulates the macro (and so all it drives).
             knob::KnobEvent::Drop => {
                 let Some(source) = self.take_drop() else { return };
                 let Some(id) = self.session.current.as_ref().and_then(|c| c.patch.macros.get(slot)).map(|m| m.id.clone()) else { return };
                 self.session.add_route(params, source, patch::ModDestination::Macro(id));
             }
-            // Macro cells have no meta knobs or modes.
-            knob::KnobEvent::Meta(..) | knob::KnobEvent::Mode(_) => {}
+            // The k-th meta knob is the macro's k-th route (`routing::macro_metas`).
+            knob::KnobEvent::Meta(k, ev) => {
+                let Some(p) = self.session.current.as_ref().map(|c| &c.patch) else { return };
+                let Some(&route) = routing::macro_metas(p, slot).0.get(k) else { return };
+                self.meta_event(route, ev, params, shared);
+            }
+            knob::KnobEvent::Mode(_) => {}
         }
     }
 
@@ -639,21 +640,27 @@ impl Shell {
                 // The knob's k-th meta knob is its k-th route (`routing::metas`).
                 let Some(p) = self.session.current.as_ref().map(|c| &c.patch) else { return };
                 let Some(&route) = routing::metas(p, i).0.get(k) else { return };
-                let (Some(current), Some(reset)) = (p.route_settings(route), p.route_reset(route)) else { return };
-                match ev {
-                    knob::MetaEvent::Begin => self.dragging = true,
-                    knob::MetaEvent::End => self.dragging = false,
-                    knob::MetaEvent::Amount(a) => self.session.set_route(params, shared, route, patch::ModSettings { amount: a, ..current }),
-                    knob::MetaEvent::Reset => self.session.set_route(params, shared, route, reset),
-                    knob::MetaEvent::Menu(at) => self.meta_menu = Some(meta_menu::MetaMenu { route, at }),
-                }
+                self.meta_event(route, ev, params, shared);
             }
             knob::KnobEvent::Drop => {
                 let Some(source) = self.take_drop() else { return };
                 self.session.add_route(params, source, patch::ModDestination::Param(spec.id.clone()));
             }
             // Block knobs have no grip, and no modes yet.
-            knob::KnobEvent::Grab | knob::KnobEvent::Mode(_) => {}
+            knob::KnobEvent::Grab(_) | knob::KnobEvent::Mode(_) => {}
+        }
+    }
+
+    /// Input on a route's meta knob (on a block knob or a macro).
+    fn meta_event(&mut self, route: patch::Route, ev: knob::MetaEvent, params: &FxParams, shared: &Shared) {
+        let Some(p) = self.session.current.as_ref().map(|c| &c.patch) else { return };
+        let (Some(current), Some(reset)) = (p.route_settings(route), p.route_reset(route)) else { return };
+        match ev {
+            knob::MetaEvent::Begin => self.dragging = true,
+            knob::MetaEvent::End => self.dragging = false,
+            knob::MetaEvent::Amount(a) => self.session.set_route(params, shared, route, patch::ModSettings { amount: a, ..current }),
+            knob::MetaEvent::Reset => self.session.set_route(params, shared, route, reset),
+            knob::MetaEvent::Menu(at) => self.meta_menu = Some(meta_menu::MetaMenu { route, at }),
         }
     }
 
@@ -705,13 +712,13 @@ impl Shell {
         iced_wgpu::postfx::set(self.modal_look().map(|look| self.blur(&look)));
     }
 
-    /// Where the modal sits: centred in the room the notch and the drawer leave (it moves up as
-    /// the drawer opens).
+    /// Where the modal sits: centred in the room the notch and a modulator's editor leave (it
+    /// moves up as the editor rises).
     fn modal_target(&self) -> iced::Rectangle {
         let (w, h) = theme::stage_size();
         let size = block_modal::SIZE;
         let top = notch::size().1 + theme::SPACE_2;
-        let bottom = h - self.drawer.height(self.now) - theme::SPACE_2;
+        let bottom = h - self.editor_height() - theme::SPACE_2;
         let y = ((top + bottom - size.height) / 2.0).max(top);
         iced::Rectangle::new(iced::Point::new((w - size.width) / 2.0, y), size)
     }
@@ -792,47 +799,26 @@ impl Shell {
         }
     }
 
-    /// The renderer's blur for this frame of the modal.
+    /// The renderer's blur for this frame of the modal: the chain under the camera only (it's
+    /// drawn as the `backdrop`; the modal, its arrows and everything over the stage are drawn
+    /// after it and stay sharp). `rect` keeps the samples inside the stage.
     fn blur(&self, look: &Look) -> iced_wgpu::postfx::RadialBlur {
         let (w, h) = theme::stage_size();
         let (x, y) = (theme::SPACE_GUTTER, theme::SIZE_TOP_BAR + theme::SPACE_GUTTER);
-        let at = |r: iced::Rectangle| [x + r.x, y + r.y, r.width, r.height];
         let c = look.rect.center();
-        // The chevrons stay sharp once the camera rests (only their stroke: a larger area would
-        // show the unblurred chain behind them).
-        let chevron = |r: iced::Rectangle| {
-            if look.velocity > 0.0 { return [0.0; 4] }
-            let c = r.center();
-            [x + c.x - 7.0, y + c.y - 12.0, 14.0, 24.0]
-        };
-        let (left, right) = look.arrows();
-        // What floats over the chain stays sharp: the notch (top centre), the drawer at its current
-        // height (bottom centre, it may be sliding), the macro rail (top left), the modal and its
-        // arrows, and whatever floats anywhere (a menu, a value entry, a dragged chip: no soft
-        // blur then, they can sit over the chain).
-        let (nw, nh) = notch::size();
-        let dw = theme::drawer_width() + 2.0 * theme::RADIUS_WINDOW;
-        let dh = self.drawer.height(self.now);
-        let rail = if self.macros_t() > 0.0 { [x, y, macros_width(), macro_rail::HEIGHT + 2.0 * theme::SPACE_2] } else { [0.0; 4] };
-        let library = self.library_t() * library_width();
-        let sheet = self.slide_t() * sheet_width();
         iced_wgpu::postfx::RadialBlur {
             center: [x + c.x, y + c.y],
             rect: [x, y, w, h],
             // strongest mid-way, none at the ends
             amount: Look::BLUR * look.velocity,
             soft: 0.0,
-            keep: [
-                [x + (w - nw + library - sheet) / 2.0, y, nw, nh],
-                [x + (w - dw) / 2.0, y + h - dh, dw, dh],
-                rail,
-                at(look.rect),
-                chevron(left),
-                chevron(right),
-                [x, y, library, h],
-                [x + w - sheet, y, sheet, h],
-            ],
+            keep: [[0.0; 4]; iced_wgpu::postfx::KEEP],
         }
+    }
+
+    /// The modulator editor's height over the stage now (0 while closed or stepped aside).
+    fn editor_height(&self) -> f32 {
+        if self.source_drag.as_ref().is_some_and(routing::SourceDrag::moved) { 0.0 } else { self.dock.editor_height(self.now) }
     }
 
     /// Applies a param change: macros go to the host (automation gestures), free params into
@@ -903,24 +889,11 @@ impl Shell {
     fn set_library(&mut self, open: bool) {
         if open {
             self.open_sheet(None);
-            self.set_macros(false);
         }
         if self.library_open != open {
             self.library_open = open;
             self.now = Instant::now();
             self.library_slide.go_mut(open, self.now);
-        }
-    }
-
-    /// The macro rail shares the left side with the library: opening one closes the other.
-    fn set_macros(&mut self, open: bool) {
-        if open {
-            self.set_library(false);
-        }
-        if self.macros_open != open {
-            self.macros_open = open;
-            self.now = Instant::now();
-            self.macros_slide.go_mut(open, self.now);
         }
     }
 
@@ -945,39 +918,28 @@ impl Shell {
         }
     }
 
-    /// A press on the page (any view: surface, chain, block page, …) closes everything that
-    /// floats over it: sheets on both sides, the macro rail, the drawer, a value entry. New
-    /// floating things belong in here too.
-    /// A press on the page closes what floats over it: the library, a sheet, the drawer, the value
-    /// entry, the meta menu. The macro rail stays (a tool for the page: turn a macro, drag it onto
-    /// a knob); it closes with its own button and Escape.
+    /// A press on the page (any view: surface, chain, block modal, …) closes what floats over it:
+    /// the library, a sheet, the value entry, the meta menu. New floating things belong in here
+    /// too. The dock stays as it is (its editor and focus close with Escape).
     fn dismiss(&mut self) {
         self.set_library(false);
         self.open_sheet(None);
-        self.close_drawer();
         self.entry = None;
         self.meta_menu = None;
     }
 
-    /// A macro's or modulator's grip was pressed: drag it (onto a knob).
-    fn start_source_drag(&mut self, source: patch::RouteSource) {
+    /// A source's title bar was pressed (at this window point): drag it (onto a knob).
+    fn start_source_drag(&mut self, source: patch::RouteSource, start: iced::Point) {
         self.meta_menu = None;
         self.entry = None;
         self.dropped = None;
-        self.source_drag = Some(routing::SourceDrag { source, at: None });
+        self.source_drag = Some(routing::SourceDrag { source, start, at: None });
     }
 
     /// A knob reported a drop: the drag that just ended (if it was this recent), once.
     fn take_drop(&mut self) -> Option<patch::RouteSource> {
         let (d, at) = self.dropped.take()?;
         (at.elapsed() < Duration::from_millis(500)).then_some(d.source)
-    }
-
-    fn close_drawer(&mut self) {
-        if self.drawer.is_open() {
-            self.now = Instant::now();
-            self.drawer.set_open(false, self.now);
-        }
     }
 
     fn toggle_sheet(&mut self, s: Sheet) {
@@ -1041,8 +1003,6 @@ impl Shell {
 
         let top_bar = top_bar::view(top_bar::Props {
             library_open: self.library_open,
-            macros_available: s.current.as_ref().is_some_and(|c| !c.patch.macros.is_empty()),
-            macros_open: self.macros_open,
             controls_available: s.current.is_some(),
             controls_open: self.sheet == Some(Sheet::Controls),
             chat_open: self.sheet == Some(Sheet::Chat),
@@ -1062,7 +1022,7 @@ impl Shell {
 
     /// The dragged source's chip, next to the pointer: a dot in its colour and its name.
     fn drag_chip(&self) -> Option<Element<'_, Message>> {
-        let d = self.source_drag.as_ref()?;
+        let d = self.source_drag.as_ref().filter(|d| d.moved())?;
         let at = d.at?;
         let patch = &self.session.current.as_ref()?.patch;
         let colour = routing::colour(d.source);
@@ -1082,7 +1042,9 @@ impl Shell {
         Some(pin(chip).x(at.x + 14.0).y(at.y + 10.0).into())
     }
 
-    /// The patch window with the shell's intrusions: the notch and the sheets.
+    /// The stage with the shell's intrusions (the notch, the sheets), the dock below it. The
+    /// stage's content is laid out at its full size and drawn scaled into the room the dock
+    /// leaves (`fit`); the notch and the sheets aren't scaled.
     fn window(&self) -> Element<'_, Message> {
         let Some(cur) = &self.session.current else { return column![].into() };
         let bg = session::hex(cur.patch.theme.color("bg")).unwrap_or(theme::c().frame_raised);
@@ -1090,48 +1052,60 @@ impl Shell {
         // While sheets are open the notch centres on the part of the window they leave visible,
         // gliding along with them.
         let notch = notch::view(notch::Props {
-            view: self.view,
             snapshot: "Init",
             sync: if self.session.error.is_some() { notch::Sync::Error } else { notch::Sync::Ok },
+            bypassed: self.plugin.params.bypass.value(),
         })
         .map(Message::Notch);
+        // The view switch: three icons in the stage's top-right corner (left of a sheet).
+        let switch = container(notch::view_switch(self.view).map(Message::Notch))
+            .width(Fill)
+            .padding(Padding { top: SWITCH_INSET, right: SWITCH_INSET + self.slide_t() * sheet_width(), ..Padding::ZERO })
+            .align_x(alignment::Horizontal::Right);
         let notch = container(notch)
             .width(Fill)
             .padding(Padding { left: self.library_t() * library_width(), right: self.slide_t() * sheet_width(), ..Padding::ZERO })
             .align_x(alignment::Horizontal::Center);
 
-        // The drawer hangs into the window from its bottom edge, centred (sheets slide over it).
-        let drawer = container(self.drawer.view(self.now, &cur.patch.modulators).map(Message::Drawer))
-            .width(Fill)
-            .height(Fill)
-            .align_x(alignment::Horizontal::Center)
-            .align_y(alignment::Vertical::Bottom);
-
-        let content: Element<'_, Message> = match self.view {
-            notch::View::Chain => self.chain_content(cur),
-            notch::View::Matrix => self.matrix.view(&cur.patch, &self.session.values).map(Message::Matrix),
+        let (content, ground): (Element<'_, Message>, iced::Color) = match self.view {
+            notch::View::Chain => (self.chain_content(cur), theme::c().frame_raised),
+            notch::View::Matrix => (self.matrix.view(&cur.patch, &self.session.values).map(Message::Matrix), theme::c().frame_raised),
             notch::View::Surface => match &cur.panel {
-                Some(panel) => stage::view(panel, bg).map(Message::Panel),
+                Some(panel) => (stage::view(panel, bg).map(Message::Panel), bg),
                 None => {
                     let brand = self.session.library.iter().find(|p| p.folder == cur.folder).map(|p| &p.brand);
-                    surface::view(&cur.patch, brand, &self.session.values).map(Message::Surface)
+                    (surface::view(&cur.patch, brand, &self.session.values, self.source_drag.as_ref().and_then(routing::SourceDrag::macro_drop)).map(Message::Surface), bg)
                 }
             },
         };
-        let content = press::on_any_press(content, Message::Dismiss);
-        let mut layers = stack![content, notch, drawer].width(Fill).height(Fill);
-        for layer in [self.macros_layer(), self.library_layer(), self.sheet_layer()].into_iter().flatten() {
-            layers = layers.push(layer);
-        }
+        // The stage's content, in its own coordinates: the page, a value entry, the meta menu.
+        let mut stage = stack![press::on_any_press(content, Message::Dismiss)].width(Fill).height(Fill);
         if let Some(e) = &self.entry {
             // Right of the click point, clamped into the stage.
             let (s, offset) = stage::panel_fit();
             let (w, h) = theme::stage_size();
             let x = (offset.x + e.at.x * s + 14.0).min(w - entry::SIZE.0 - 8.0).max(8.0);
             let y = (offset.y + e.at.y * s - entry::SIZE.1 / 2.0).min(h - entry::SIZE.1 - 8.0).max(8.0);
-            layers = layers.push(pin(e.view().map(Message::Entry)).x(x).y(y));
+            stage = stage.push(pin(e.view().map(Message::Entry)).x(x).y(y));
         }
         if let Some(layer) = self.meta_menu_layer() {
+            stage = stage.push(layer);
+        }
+        let stage = container(stage).width(Fill).height(Fill).style(move |_: &Theme| container::Style {
+            background: Some(ground.into()),
+            border: Border { radius: theme::radius(theme::RADIUS_WINDOW), ..Default::default() },
+            ..Default::default()
+        });
+
+        let mut layers = stack![stage, notch, switch].width(Fill).height(Fill);
+        // The modulator's editor rises from the dock over the stage's lower part; it steps aside
+        // while a source is dragged (so whatever is under it takes the drop).
+        if self.editor_height() > 0.0 {
+            if let Some(editor) = self.dock.editor_view(self.now, &cur.patch.modulators) {
+                layers = layers.push(container(editor.map(Message::Dock)).width(Fill).height(Fill).align_y(alignment::Vertical::Bottom));
+            }
+        }
+        for layer in [self.library_layer(), self.sheet_layer()].into_iter().flatten() {
             layers = layers.push(layer);
         }
         layers = layers.push(self.error_card());
@@ -1139,7 +1113,9 @@ impl Shell {
             layers = layers.push(self.stats());
         }
 
-        container(layers)
+        let dock = self.dock.view(&cur.patch, &self.session.values, self.source_drag.as_ref()).map(Message::Dock);
+        column![container(layers).width(Fill).height(theme::stage_size().1), dock]
+            .spacing(theme::SPACE_2)
             .padding(Padding { top: theme::SPACE_GUTTER, right: theme::SPACE_GUTTER, left: theme::SPACE_GUTTER, bottom: theme::SPACE_GUTTER })
             .width(Fill)
             .height(Fill)
@@ -1197,7 +1173,10 @@ impl Shell {
         // A click beside the modal closes it.
         let veil = iced::widget::mouse_area(container(chain_view::zoom_dots(anchor, look.grid)).width(Fill).height(Fill).style(window(theme::alpha(ground_colour, fade))))
             .on_press(Message::Page(block_modal::Message::Close));
-        let mut layers = stack![container(column![]).width(Fill).height(Fill).style(window(ground_colour)), world, veil, stage::corners()].width(Fill).height(Fill);
+        // The chain under the camera is the blur's backdrop; the box, content, label and arrows
+        // are drawn over it, sharp.
+        let under = stack![container(column![]).width(Fill).height(Fill).style(window(ground_colour)), world, veil, stage::corners()].width(Fill).height(Fill);
+        let mut layers = stack![backdrop::backdrop(under)].width(Fill).height(Fill);
 
         // The box: the block, grown. `Idle`: clicks on it don't fall through to the veil.
         let (r, a, radius) = (look.rect, look.box_alpha, look.radius);
@@ -1260,37 +1239,6 @@ impl Shell {
     /// 0 = library hidden, 1 = fully in.
     fn library_t(&self) -> f32 {
         self.library_slide.interpolate(0.0, 1.0, self.now)
-    }
-
-    /// 0 = macro rail hidden, 1 = fully in.
-    fn macros_t(&self) -> f32 {
-        self.macros_slide.interpolate(0.0, 1.0, self.now)
-    }
-
-    /// The macro rail, over the left side of the window, under the top bar.
-    fn macros_layer(&self) -> Option<Element<'_, Message>> {
-        let t = self.macros_t();
-        if t <= 0.0 {
-            return None;
-        }
-        let cur = self.session.current.as_ref()?;
-        let values = &self.session.values;
-        let macros = (0..cur.patch.macros.len())
-            .map(|slot| {
-                let v = values.macros[slot];
-                knob::Macro {
-                    slot,
-                    label: &cur.patch.macros[slot].name,
-                    value_text: cur.patch.macro_text(slot, v),
-                    value: v,
-                    default: cur.patch.macro_default(slot),
-                    drop: self.source_drag.as_ref().and_then(routing::SourceDrag::macro_drop),
-                }
-            })
-            .collect();
-        let rail = self.macro_rail.view(self.now, macros).map(Message::Macros);
-        let rail = container(rail).height(Fill).padding(theme::SPACE_2);
-        Some(slide::slide_left(rail, macros_width(), (1.0 - t) * macros_width()).into())
     }
 
     /// The meta knob's menu, right of the click, clamped into the stage.
@@ -1467,7 +1415,6 @@ fn neighbour(chain: &[patch::BlockSpec], id: &str, forward: bool) -> Option<Stri
     order.get(j).map(|s| s.to_string())
 }
 
-/// The library sheet plus its margin.
 /// A block anywhere in the chain (inside containers too), by id.
 fn find_block<'a>(chain: &'a [patch::BlockSpec], id: &str) -> Option<&'a patch::BlockSpec> {
     let mut found = None;
@@ -1487,13 +1434,11 @@ fn window_to_panel(at: iced::Point) -> iced::Point {
     iced::Point::new((p.x - offset.x) / s, (p.y - offset.y) / s)
 }
 
+/// The view switch's distance from the stage's top-right corner.
+const SWITCH_INSET: f32 = 10.0;
+
 fn library_width() -> f32 {
     theme::SIZE_LIBRARY + 2.0 * theme::SPACE_2
-}
-
-/// The macro rail plus its margin.
-fn macros_width() -> f32 {
-    macro_rail::WIDTH + 2.0 * theme::SPACE_2
 }
 
 /// A right-hand sheet plus its margin.

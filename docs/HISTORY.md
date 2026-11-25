@@ -5,6 +5,31 @@ _What earlier sessions built and found, newest first. Moved here from STATUS "Wh
 changed details (e.g. the panel is now the "Surface" view, macros are Serum-style slots). Measurements
 and findings: [`research/findings.md`](research/findings.md)._
 
+## 2026-11-25 · Mod dock (branch `mod-dock`)
+
+From Flemming's "ScriptFX Shell Layout" mockup (2026-11-21, now in
+`research/mockups/shell-layout/`, rules in `research/shell-layout.md`), the dock only: the macro
+rail and the drawer are gone, macros (8 per page) and modulators (live mini displays) sit in a
+108 px strip below the stage, each source with a title bar as its drag handle. Click focuses,
+click again opens a modulator's editor. Window 836 × 714. First the dock grew and the stage was
+drawn scaled (a `fit` widget mapping the cursor back); Flemming didn't like the scaling, so the
+editor became a panel floating over the stage's lower part that steps aside during drags (the
+`fit` widget is gone). Macros (dock and Surface) got meta knobs for modulators on them (the drop
+already worked but showed nothing). The notch became one row with a bypass button (new host
+bypass param, latency-aligned dry, 10 ms crossfade); the view switch moved to three icons in the
+stage's corner. Checked on Xvfb: focus, editor, drag onto a block knob and onto a macro with the
+editor open, bypass button state, view switch. Not checked: bypass by ear, in a host. Found:
+xdotool's absolute moves add up under the pointer lock (the knob jumps), a test artefact. Then: the
+Matrix's "now" column is the level bar only (the value text pushed the bar down), the curve column
+a small graph of the response as in Serum (drag up/down, double-click = linear, wheel); and Neon
+Saturator's ADVANCED tab failed (`ipairs` on a string): a component asking for a `series` that has
+no data got the series' name, now an empty list (`ui-components`, test `neon_advanced_tab_renders`).
+The chain ↔ modal zoom blur now applies to the chain only: the renderer splits the frame at a
+marked backdrop layer (`shell/backdrop.rs`, `vendor/iced_wgpu` patch), so the notch, the view
+switch, the modal and anything else over the stage stay sharp without keep rectangles (which
+missed the notch's flares and let its pixels smear into the blur). Macro knobs (dock and Surface)
+got the white live dot (base + the modulators on it).
+
 ## 2026-11-19 · Top bar = title bar + sheet openers; settings & library sheets; panel input
 
 **Top bar = title bar + sheet openers** (2026-11-19, after the polish pass). "ScriptFX"

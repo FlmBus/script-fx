@@ -27,9 +27,12 @@ pub const CHAT: &str = r#"<path d="M4 5h16v11H9l-5 4z"/>"#;
 pub const GEAR: &str = r#"<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>"#;
 /// The patch's controls (macros, params): two sliders.
 pub const SLIDERS: &str = r#"<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>"#;
-pub const DIAL: &str = r#"<circle cx="12" cy="12" r="7"/><path d="M12 12l4-4"/>"#;
-/// Six dots: "drag me" (the drawer's modulator tabs). Filled, draw with stroke width 0.
-pub const GRIP: &str = r#"<circle cx="9" cy="5.5" r="2" fill="black"/><circle cx="15" cy="5.5" r="2" fill="black"/><circle cx="9" cy="12" r="2" fill="black"/><circle cx="15" cy="12" r="2" fill="black"/><circle cx="9" cy="18.5" r="2" fill="black"/><circle cx="15" cy="18.5" r="2" fill="black"/>"#;
+/// The views (Surface: a panel with two knobs; Chain: two blocks joined; Matrix: a table).
+pub const VIEW_SURFACE: &str = r#"<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="13" r="2.5"/><circle cx="15.5" cy="13" r="2.5"/>"#;
+pub const VIEW_CHAIN: &str = r#"<rect x="2" y="9" width="6" height="6" rx="1.5"/><rect x="16" y="9" width="6" height="6" rx="1.5"/><path d="M8 12h8"/>"#;
+pub const VIEW_MATRIX: &str = r#"<path d="M3 6h18M3 12h18M3 18h18M9 3v18"/>"#;
+/// Bypass (Lucide "power", ISC).
+pub const POWER: &str = r#"<path d="M12 3v9"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>"#;
 pub const CLOSE: &str =r#"<path d="M6 6l12 12M18 6L6 18"/>"#;
 pub const HEADPHONES: &str = r#"<path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="3" y="14" width="4" height="6" rx="1"/><rect x="17" y="14" width="4" height="6" rx="1"/>"#;
 

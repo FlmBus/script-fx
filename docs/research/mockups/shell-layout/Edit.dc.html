@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Editing a modulator</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<div style="width: 984px; height: 708px; position: relative; overflow: hidden; background: #0b0b0c; font-family: Inter, system-ui, sans-serif; color: #f4f4f5">
+  <div style="position: absolute; left: 0; top: 0">
+    <dc-import name="TopBar" hint-size="984px,40px"></dc-import>
+  </div>
+
+  <!-- the stage made room: the panel scaled to 64 % (uniformly, animated), the patch's colour around it -->
+  <div style="position: absolute; left: 12px; top: 44px; width: 960px; height: 348px; background: #17141c; border-radius: 12px; overflow: hidden">
+    <div style="position: absolute; left: 170px; top: 0; width: 960px; height: 540px; transform: scale(0.644); transform-origin: 0 0">
+      <dc-import name="PatchArt" hint-size="960px,540px"></dc-import>
+    </div>
+  </div>
+
+  <div style="position: absolute; left: 362px; top: 44px">
+    <dc-import name="Notch" hint-size="260px,36px"></dc-import>
+  </div>
+  <div style="position: absolute; left: 864px; top: 54px">
+    <dc-import name="ViewTabs" active="Surface" hint-size="98px,34px"></dc-import>
+  </div>
+
+  <!-- the dock grew: the strip stays, LFO 1's editor below it -->
+  <div style="position: absolute; left: 12px; top: 400px">
+    <dc-import name="Dock" selected="lfo1" expanded="{{true}}" hint-size="960px,300px"></dc-import>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":984,"height":708}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

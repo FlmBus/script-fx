@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Notch: snapshots</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<!-- One row, hanging from the top bar into the stage: previous · snapshot · next | save · load -->
+<div style="width: 260px; height: 36px; position: relative; font-family: Inter, system-ui, sans-serif; color: #f4f4f5">
+  <!-- concave flares into the window edge, like the notch had -->
+  <svg style="position: absolute; left: 0; top: 0" width="260" height="36" viewBox="0 0 260 36" aria-hidden="true">
+    <path d="M0 0 L260 0 Q248 0 248 12 L248 24 Q248 36 236 36 L24 36 Q12 36 12 24 L12 12 Q12 0 0 0 Z" fill="#0b0b0c"/>
+  </svg>
+  <div style="position: absolute; left: 16px; top: 4px; width: 228px; height: 26px; display: flex; align-items: center; gap: 2px">
+    <button style="width: 22px; height: 24px; border: 0; border-radius: 6px; background: none; color: #9b9ba3; display: flex; align-items: center; justify-content: center; padding: 0" aria-label="Previous snapshot">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+    </button>
+    <button style="flex: 1; height: 24px; border: 0; border-radius: 6px; background: rgba(255,255,255,0.06); color: #f4f4f5; font: 500 11.5px Inter; display: flex; align-items: center; justify-content: space-between; padding: 0 8px">
+      Init
+      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#9b9ba3" stroke-width="2.5" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+    </button>
+    <button style="width: 22px; height: 24px; border: 0; border-radius: 6px; background: none; color: #9b9ba3; display: flex; align-items: center; justify-content: center; padding: 0" aria-label="Next snapshot">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+    </button>
+    <span style="width: 1px; height: 14px; background: rgba(255,255,255,0.12); margin: 0 3px"></span>
+    <button style="width: 24px; height: 24px; border: 0; border-radius: 6px; background: none; color: #b4b4bc; display: flex; align-items: center; justify-content: center; padding: 0" aria-label="Save snapshot">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
+    </button>
+    <button style="width: 24px; height: 24px; border: 0; border-radius: 6px; background: none; color: #b4b4bc; display: flex; align-items: center; justify-content: center; padding: 0" aria-label="Load snapshot file">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+    </button>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":260,"height":36}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

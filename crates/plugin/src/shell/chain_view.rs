@@ -54,9 +54,9 @@ const SLOT_LABEL: f32 = 38.0;
 const SLOT_END: f32 = 16.0 + 8.0;
 pub const CARD_PAD: f32 = 6.0;
 /// Room above the chain for the notch.
-const NOTCH_CLEARANCE: f32 = 84.0;
-/// Room below the chain for the collapsed drawer, which hangs into the window.
-const DRAWER_CLEARANCE: f32 = theme::SIZE_DRAWER_BAR + 16.0;
+const NOTCH_CLEARANCE: f32 = 56.0;
+/// A margin below the chain (the dock is outside the stage).
+const BOTTOM_CLEARANCE: f32 = 24.0;
 
 /// The card's header bar (the container's button).
 const CARD_HEADER: f32 = 22.0;
@@ -157,7 +157,7 @@ fn snake<'a>(cx: Cx<'a>, width: f32) -> Element<'a, Event> {
     }
 
     // Centred while it fits; a card wider than the window scrolls.
-    let padded = container(rows).padding(Padding { left: SIDE_PAD, right: SIDE_PAD, top: NOTCH_CLEARANCE, bottom: DRAWER_CLEARANCE });
+    let padded = container(rows).padding(Padding { left: SIDE_PAD, right: SIDE_PAD, top: NOTCH_CLEARANCE, bottom: BOTTOM_CLEARANCE });
     let padded = Mark { content: padded.into(), kind: MarkKind::Scrolled, record: cx.record, hidden: false };
     let scroll = scrollable(padded)
         .direction(scrollable::Direction::Both { vertical: thin(), horizontal: thin() })

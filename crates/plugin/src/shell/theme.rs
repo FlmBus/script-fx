@@ -224,25 +224,16 @@ pub const SIZE_TOP_BAR: f32 = 34.0;
 pub const SIZE_LIBRARY: f32 = 248.0;
 pub const SIZE_SHEET: f32 = 340.0;
 pub const SIZE_CONTROL: f32 = 30.0;
-/// The collapsed drawer (handle + tabs): hangs into the ControlPanel from the window's bottom
-/// edge, like the notch from the top. Panels keep that strip free of controls.
-pub const SIZE_DRAWER_BAR: f32 = 42.0;
-/// The drawer when it's open (it rises over the panel): handle, tabs and the modulator's
-/// controls, kept low so block pages keep their knobs above it (drag & drop).
-pub const SIZE_DRAWER_OPEN: f32 = 180.0;
+/// The mod dock below the stage: macros and modulators in one strip.
+pub const SIZE_DOCK: f32 = 108.0;
 
-/// The patch window = the ControlPanel's area: the editor minus top bar and gutters (fixed
-/// window). The sizes are chosen so this is exactly the ControlPanel's 3:2 (816×544): no
-/// letterbox bars around the panel (`stage_fits_the_panel` checks it). Notch and drawer hang
-/// into it; neither takes a strip of its own.
+/// The stage (the patch window) at rest = the ControlPanel's area: the editor minus top bar,
+/// gutters and the dock. The sizes are chosen so this is exactly the ControlPanel's 3:2
+/// (816×544): no letterbox bars around the panel (`stage_fits_the_panel` checks it). The notch
+/// hangs into it; the dock has a row of its own below it.
 pub fn stage_size() -> (f32, f32) {
     let (w, h) = crate::WINDOW_SIZE;
-    (w - 2.0 * SPACE_GUTTER, h - SIZE_TOP_BAR - 2.0 * SPACE_GUTTER)
-}
-
-/// The drawer's width: the patch window minus three window radii on each side.
-pub fn drawer_width() -> f32 {
-    stage_size().0 - 6.0 * RADIUS_WINDOW
+    (w - 2.0 * SPACE_GUTTER, h - SIZE_TOP_BAR - 2.0 * SPACE_GUTTER - SPACE_2 - SIZE_DOCK)
 }
 
 // ---- type ---------------------------------------------------------------------------------------

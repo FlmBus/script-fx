@@ -1,7 +1,7 @@
 //! The shell's knob cells. One canvas per cell draws everything and handles the input, so a cell
 //! is one widget: background, knob, tag, label.
 //!
-//! - [`Macro`]: the macro rail's cell (64 × 58, yellow, no ticks).
+//! - [`Macro`]: the mod dock's macro cell (54 × 74, yellow, no ticks): title bar, knob, slot, value.
 //! - [`Param`]: a block knob (64 × 92, tick ring), on the block page; the surface shows macros
 //!   with it too, larger and without the macro look. A modulated knob still turns: it edits the
 //!   base value. Serum's layers (`docs/research/chain-editor.md`): ticks (lit to the base), the
@@ -17,7 +17,7 @@
 //!
 //! Drag & drop: while a source (a macro, a modulator) is dragged, cells that can take it get
 //! `drop` (the source's colour): they outline themselves, and a release over one reports
-//! [`KnobEvent::Drop`]. A macro cell's "M3" tag is its grip: pressing it starts dragging the
+//! [`KnobEvent::Drop`]. A macro cell's title bar is its grip: pressing it starts dragging the
 //! macro ([`KnobEvent::Grab`]) instead of turning the knob.
 //!
 //! Input, as on the ControlPanel: drag up/down (200 px = full range), Shift = fine, wheel steps,
@@ -56,8 +56,8 @@ pub enum KnobEvent {
     Meta(usize, MetaEvent),
     /// The dragged source was released over this cell.
     Drop,
-    /// The macro cell's grip was pressed: start dragging the macro.
-    Grab,
+    /// The macro cell's title bar was pressed (at this window point): start dragging the macro.
+    Grab(Point),
     /// A mode pill was pressed: `true` = the second mode (sync).
     Mode(bool),
 }
@@ -76,8 +76,10 @@ pub enum MetaEvent {
     Menu(Point),
 }
 
-/// Macro cell size.
-pub const MACRO_SIZE: Size = Size::new(64.0, 58.0);
+/// Macro cell size (the mod dock's cell: title bar, knob, slot and value).
+pub const MACRO_SIZE: Size = Size::new(54.0, 74.0);
+/// The cell's title bar: the macro's name and a grip, the drag handle.
+const MACRO_BAR: f32 = 16.0;
 
 /// The macro colour (fixed, never a patch colour).
 pub const MACRO: Color = Color::from_rgb(0xfa as f32 / 255.0, 0xcc as f32 / 255.0, 0x15 as f32 / 255.0);
@@ -90,7 +92,8 @@ const FINE: f32 = 0.2;
 const START: f32 = 0.75 * PI;
 const SWEEP: f32 = 1.5 * PI;
 
-/// A macro knob cell: "M3" tag, 32 px knob, label (or the value while dragging).
+/// A macro cell in the mod dock: a title bar in macro yellow (its name and a grip: drag it onto
+/// a knob), a 30 px knob that turns the macro, the slot ("M3") and the value.
 pub struct Macro<'a> {
     pub slot: usize,
     pub label: &'a str,
@@ -98,9 +101,17 @@ pub struct Macro<'a> {
     pub value_text: String,
     /// Normalized.
     pub value: f32,
+    /// Normalized value after the modulators on it (= `value` without any).
+    pub effective: f32,
     pub default: f32,
     /// A modulator is being dragged and could go here: its colour.
     pub drop: Option<Color>,
+    /// The focused source in the dock: outlined.
+    pub picked: bool,
+    /// Another source is focused: drawn faded.
+    pub dim: bool,
+    /// The modulators that modulate the macro, one meta knob each (beside the knob).
+    pub mods: Vec<Meta<'a>>,
 }
 
 #[derive(Default)]
@@ -115,6 +126,8 @@ pub struct State {
     meta_hover: Option<usize>,
     /// The slot whose range arc shows (param cells).
     focus: usize,
+    /// The pointer is over the title bar (macro cells).
+    bar_hover: bool,
 }
 
 
@@ -172,13 +185,19 @@ where
     type State = State;
 
     fn update(&self, state: &mut State, event: &Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<Action<M>> {
+        if let Event::Mouse(mouse::Event::CursorMoved { .. }) = event {
+            state.bar_hover = cursor.position_over(bounds).is_some_and(|p| on_bar(bounds, p));
+        }
         if let Some(e) = drop_input(self.drop, state, event, bounds, cursor) {
             return e.map(|e| Action::publish(M::from((self.slot, e))).and_capture());
         }
         if let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event
-            && cursor.position_over(bounds).is_some_and(|p| on_grip(bounds, p))
+            && let Some(p) = cursor.position_over(bounds).filter(|p| on_bar(bounds, *p))
         {
-            return Some(Action::publish(M::from((self.slot, KnobEvent::Grab))).and_capture());
+            return Some(Action::publish(M::from((self.slot, KnobEvent::Grab(p)))).and_capture());
+        }
+        if let Some(action) = meta_input(&MACRO_DIALS, self.slot, &self.mods, self.value, state, event, bounds, cursor) {
+            return Some(action);
         }
         let e = input(state, event, bounds, cursor, self.value, self.default)?;
         Some(Action::publish(M::from((self.slot, e))).and_capture())
@@ -187,90 +206,170 @@ where
     fn draw(&self, state: &State, renderer: &Renderer, _: &Theme, bounds: Rectangle, _: mouse::Cursor) -> Vec<canvas::Geometry> {
         let c = theme::c();
         let mut f = Frame::new(renderer, bounds.size());
-        // Drawn at MACRO_SIZE and scaled to the bounds (the surface shows bigger cells).
         f.scale(bounds.width / MACRO_SIZE.width);
-        let w = MACRO_SIZE.width;
+        let (w, h) = (MACRO_SIZE.width, MACRO_SIZE.height);
+        let fade = |col: Color| if self.dim { theme::alpha(col, col.a * DIM) } else { col };
 
-        // Cell: a faint yellow wash, a touch lighter on hover or while dragging.
-        let wash = if state.hover || state.drag.is_some() { 0.07 } else { 0.04 };
-        f.fill(&Path::rounded_rectangle(Point::ORIGIN, MACRO_SIZE, 8.0.into()), theme::alpha(MACRO, wash));
+        // Cell: a faint yellow wash, stronger when picked, a touch lighter on hover or while dragging.
+        let wash = if self.picked { 0.10 } else if state.hover || state.drag.is_some() { 0.07 } else { 0.04 };
+        f.fill(&Path::rounded_rectangle(Point::ORIGIN, MACRO_SIZE, 8.0.into()), fade(theme::alpha(MACRO, wash)));
 
-        // "M3", top right, with grip dots: drag it onto a knob.
-        for (dx, dy) in [(0.0, 0.0), (0.0, 3.0), (0.0, 6.0), (2.6, 0.0), (2.6, 3.0), (2.6, 6.0)] {
-            f.fill(&Path::circle(Point::new(GRIP.x + 1.0 + dx, GRIP.y + 1.5 + dy), 0.75), theme::alpha(MACRO, if state.hover { 0.8 } else { 0.45 }));
-        }
-        f.fill_text(Text {
-            content: format!("M{}", self.slot + 1),
-            position: Point::new(w - 5.0, 4.0),
-            color: theme::alpha(MACRO, 0.75),
-            size: Pixels(8.5),
-            font: theme::font::MONO,
-            align_x: Alignment::Right,
-            align_y: alignment::Vertical::Top,
-            ..Text::default()
-        });
-        drop_outline(&mut f, MACRO_SIZE, self.drop, state.hover);
+        // The title bar: name and grip.
+        let bar = if self.picked { 0.32 } else if state.bar_hover { 0.26 } else { 0.16 };
+        title_bar(&mut f, w, fade(theme::alpha(MACRO, bar)), fade(source_ink(MACRO)), &fit(self.label, w - 24.0, 8.5), 5.0);
 
-        // Knob (32 px): track, yellow value arc, disc with a thin yellow rim, pointer.
-        let centre = Point::new(w / 2.0, 22.0);
+        // Knob (30 px): track, yellow value arc, disc, pointer.
+        let centre = Point::new(w / 2.0, MACRO_BAR + 22.0);
         let arc = |r: f32, from: f32, to: f32| {
             Path::new(|p| p.arc(Arc { center: centre, radius: r, start_angle: from.into(), end_angle: to.into() }))
         };
         let stroke = |color: Color, width: f32| Stroke::default().with_color(color).with_width(width).with_line_cap(canvas::LineCap::Round);
-        f.stroke(&arc(12.0, START, START + SWEEP), stroke(theme::alpha(c.frame_ink, 0.09), 2.5));
+        f.stroke(&arc(10.5, START, START + SWEEP), stroke(fade(theme::alpha(c.frame_ink, 0.1)), 2.5));
         let angle = START + SWEEP * self.value;
         if self.value > 0.001 {
-            f.stroke(&arc(12.0, START, angle), stroke(MACRO, 2.5));
+            f.stroke(&arc(10.5, START, angle), stroke(fade(MACRO), 2.5));
         }
-        let disc = Path::circle(centre, 8.0);
-        // #1f1f22 on the dark frame; the light mode gets the same step towards its ink.
-        f.fill(&disc, theme::mix(c.frame, c.frame_ink, 0.08));
-        f.stroke(&disc, Stroke::default().with_color(theme::alpha(MACRO, 0.35)).with_width(1.0));
+        f.fill(&Path::circle(centre, 6.8), fade(theme::mix(c.frame, c.frame_ink, 0.1)));
         let dir = Vector::new(angle.cos(), angle.sin());
-        f.stroke(
-            &Path::line(centre + dir * 2.5, centre + dir * 7.0),
-            stroke(c.frame_ink, 1.6),
-        );
+        f.stroke(&Path::line(centre + dir * 2.0, centre + dir * 6.0), stroke(fade(c.frame_ink), 1.5));
 
-        // Label, or the value while dragging, shortened to the cell's width.
-        let (content, color, font) = if state.drag.is_some() {
-            (self.value_text.clone(), c.frame_ink, theme::font::MONO)
-        } else {
-            (self.label.to_string(), c.frame_ink_2, theme::font::SANS)
-        };
-        f.fill_text(Text {
-            content: fit(&content, w - 8.0, 9.5),
-            position: Point::new(w / 2.0, 47.0),
+        // A meta knob per modulator on the macro, beside the knob; the focused one's range arc
+        // just outside the track.
+        let active = state.meta_drag.as_ref().map(|(k, _)| *k).or(state.meta_hover);
+        let n = self.mods.len();
+        let focused = focus(state, n);
+        let shown = macro_shown(n);
+        for (k, m) in self.mods.iter().take(shown).enumerate() {
+            let (at, r) = macro_place(k, n);
+            meta_dial(&mut f, at, r, m, k == focused, active == Some(k));
+        }
+        if shown < n {
+            f.fill_text(Text {
+                content: format!("+{}", n - shown),
+                position: macro_place(shown, n).0,
+                color: c.frame_muted,
+                size: Pixels(7.5),
+                font: theme::font::MONO,
+                align_x: Alignment::Center,
+                align_y: alignment::Vertical::Center,
+                ..Text::default()
+            });
+        }
+        if let Some(m) = self.mods.get(focused) {
+            let s = m.settings;
+            let at = |v: f32| START + SWEEP * v.clamp(0.0, 1.0);
+            let ink = theme::alpha(m.colour, if s.bypass { 0.3 } else { 0.85 });
+            let reach = reach(s);
+            for to in [Some(self.value + reach), s.bipolar.then_some(self.value - reach)].into_iter().flatten() {
+                let (a, b) = (at(self.value), at(to));
+                if (b - a).abs() > 1e-3 {
+                    f.stroke(&arc(MACRO_RANGE_R, a.min(b), a.max(b)), stroke(ink, 1.5));
+                }
+            }
+            // Live value (all modulators summed): a soft white dot riding the outer ring.
+            let live = at(self.effective);
+            let dot = centre + Vector::new(live.cos(), live.sin()) * MACRO_RANGE_R;
+            f.fill(&Path::circle(dot, 3.0), theme::alpha(m.colour, 0.16));
+            f.fill(&Path::circle(dot, 2.1), Color { a: 0.35, ..Color::WHITE });
+            f.fill(&Path::circle(dot, 1.2), Color::WHITE);
+        }
+
+        // The slot, and the value (bright while dragging).
+        let row = h - 9.0;
+        let mono = |content: String, x: f32, color: Color, align_x: Alignment| Text {
+            content,
+            position: Point::new(x, row),
             color,
-            size: Pixels(9.5),
-            font,
-            align_x: Alignment::Center,
+            size: Pixels(8.5),
+            font: theme::font::MONO,
+            align_x,
             align_y: alignment::Vertical::Center,
             ..Text::default()
-        });
+        };
+        if let Some(m) = active.and_then(|k| self.mods.get(k)) {
+            // A meta knob under the pointer: its source and amount in place of slot and value.
+            f.fill_text(Text { content: fit(&meta_text(m), w - 6.0, 8.0), position: Point::new(w / 2.0, row), color: m.colour, size: Pixels(8.0), ..mono(String::new(), 0.0, m.colour, Alignment::Center) });
+        } else {
+            f.fill_text(mono(format!("M{}", self.slot + 1), 5.0, fade(theme::alpha(source_ink(MACRO), 0.8)), Alignment::Left));
+            let ink = if state.drag.is_some() { c.frame_ink } else { c.frame_ink_2 };
+            f.fill_text(mono(fit(&self.value_text, w - 22.0, 8.5), w - 5.0, fade(ink), Alignment::Right));
+        }
 
+        if self.picked {
+            let outline = Path::rounded_rectangle(Point::new(0.75, 0.75), Size::new(w - 1.5, h - 1.5), 7.5.into());
+            f.stroke(&outline, Stroke::default().with_color(MACRO).with_width(1.5));
+        }
+        drop_outline(&mut f, MACRO_SIZE, self.drop, state.hover);
         vec![f.into_geometry()]
     }
 
     fn mouse_interaction(&self, state: &State, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
         // No hand over a knob; hidden while dragging (the shell hides it window-wide too).
-        if state.drag.is_some() {
+        if state.drag.is_some() || state.meta_drag.is_some() {
             mouse::Interaction::Hidden
-        } else if cursor.position_over(bounds).is_some_and(|p| on_grip(bounds, p)) {
+        } else if cursor.position_over(bounds).is_some_and(|p| on_bar(bounds, p)) {
             mouse::Interaction::Grab
+        } else if cursor.position_over(bounds).and_then(|p| meta_at(&MACRO_DIALS, &self.mods, self.value, state, bounds, p)).is_some() {
+            mouse::Interaction::ResizingVertically
         } else {
             mouse::Interaction::None
         }
     }
 }
 
-/// The macro cell's grip (the "M3" tag), unscaled.
-const GRIP: Point = Point::new(MACRO_SIZE.width - 26.0, 3.0);
+/// The macro cell's meta knobs: beside the knob, left then right, two rows (four places; with
+/// more, the fourth says "+N").
+fn macro_place(k: usize, _n: usize) -> (Point, f32) {
+    let x = if k % 2 == 0 { 6.5 } else { MACRO_SIZE.width - 6.5 };
+    let y = MACRO_BAR + if k < 2 { 13.0 } else { 29.0 };
+    (Point::new(x, y), 4.2)
+}
 
-fn on_grip(bounds: Rectangle, p: Point) -> bool {
+fn macro_shown(n: usize) -> usize {
+    if n <= 4 { n } else { 3 }
+}
+
+/// The macro knob's range arc: just outside its track.
+const MACRO_RANGE_R: f32 = 13.8;
+
+const MACRO_DIALS: Dials = Dials { size: MACRO_SIZE, place: macro_place, shown: macro_shown, handle: None };
+
+/// How much a source fades while another one is focused in the dock.
+pub const DIM: f32 = 0.55;
+
+fn on_bar(bounds: Rectangle, p: Point) -> bool {
     let scale = bounds.width / MACRO_SIZE.width;
-    let (x, y) = ((p.x - bounds.x) / scale, (p.y - bounds.y) / scale);
-    x >= GRIP.x - 3.0 && y <= GRIP.y + 12.0
+    (p.y - bounds.y) / scale <= MACRO_BAR
+}
+
+/// A dock cell's title bar, `MACRO_BAR` high across the top of a `w` wide cell (top corners
+/// rounded): the source's name at the left, a grip (three lines) at the right.
+pub fn title_bar(f: &mut Frame, w: f32, fill: Color, ink: Color, name: &str, pad: f32) {
+    let radius = nice_plug_iced::iced::border::Radius { top_left: 8.0, top_right: 8.0, bottom_right: 0.0, bottom_left: 0.0 };
+    f.fill(&Path::rounded_rectangle(Point::ORIGIN, Size::new(w, MACRO_BAR), radius), fill);
+    f.fill_text(Text {
+        content: name.to_string(),
+        position: Point::new(pad, MACRO_BAR / 2.0),
+        color: ink,
+        size: Pixels(8.5),
+        font: theme::font::SANS_SEMIBOLD,
+        align_y: alignment::Vertical::Center,
+        ..Text::default()
+    });
+    let grip = Stroke::default().with_color(theme::alpha(ink, ink.a * 0.8)).with_width(1.2).with_line_cap(canvas::LineCap::Round);
+    for dy in [-2.5, 0.0, 2.5] {
+        let y = MACRO_BAR / 2.0 + dy;
+        f.stroke(&Path::line(Point::new(w - pad - 8.0, y), Point::new(w - pad, y)), grip.clone());
+    }
+}
+
+/// A title bar's height.
+pub const BAR: f32 = MACRO_BAR;
+
+/// A source's ink on its title bar: its colour, lightened towards the frame's ink (pale yellow
+/// on the dark frame, a deeper tone on the light one).
+pub fn source_ink(colour: Color) -> Color {
+    theme::mix(colour, theme::c().frame_ink, 0.3)
 }
 
 /// While a source is dragged (`drop`): hover tracking, and a release over the cell is a drop.
@@ -302,7 +401,7 @@ fn drop_outline(f: &mut Frame, size: Size, drop: Option<Color>, hover: bool) {
 
 /// `s` cut with "…" to about `width` at font `size` (average glyph ≈ 0.56 em; canvas text has no
 /// clipping or measuring). TODO: scroll long labels (concept), once we measure text.
-fn fit(s: &str, width: f32, size: f32) -> String {
+pub fn fit(s: &str, width: f32, size: f32) -> String {
     let max = (width / (size * 0.56)).floor() as usize;
     if s.chars().count() <= max {
         return s.to_string();
@@ -424,7 +523,7 @@ where
                 return Some(Action::publish(M::from((self.index, KnobEvent::Mode(k == 1)))).and_capture());
             }
         }
-        if let Some(action) = self.meta_input(state, event, bounds, cursor) {
+        if let Some(action) = meta_input(&PARAM_DIALS, self.index, &self.mods, self.value, state, event, bounds, cursor) {
             return Some(action);
         }
         let e = input(state, event, bounds, cursor, self.value, self.default)?;
@@ -557,7 +656,7 @@ where
         if state.drag.is_some() || state.meta_drag.is_some() {
             // The shell hides the cursor while anything drags (`hide_cursor`); this is for the cell.
             mouse::Interaction::Hidden
-        } else if cursor.position_over(bounds).and_then(|p| self.meta_at(state, bounds, p)).is_some() {
+        } else if cursor.position_over(bounds).and_then(|p| meta_at(&PARAM_DIALS, &self.mods, self.value, state, bounds, p)).is_some() {
             mouse::Interaction::ResizingVertically
         } else {
             mouse::Interaction::None
@@ -565,76 +664,112 @@ where
     }
 }
 
-impl<'a> Param<'a> {
-    /// The meta knob (or the focused range arc's handle) at window point `p`.
-    fn meta_at(&self, state: &State, bounds: Rectangle, p: Point) -> Option<usize> {
-        let scale = bounds.width / PARAM_SIZE.width;
-        let local = Point::new((p.x - bounds.x) / scale, (p.y - bounds.y) / scale);
-        let n = self.mods.len();
-        let (r, _, shown) = meta_layout(n);
-        let dial = (0..shown).find(|&k| local.distance(meta_centre(k, n)) <= r + 2.5);
-        dial.or_else(|| {
-            let k = focus(state, self.mods.len());
-            let m = self.mods.get(k)?;
-            let end = START + SWEEP * (self.value + reach(m.settings)).clamp(0.0, 1.0);
-            (local.distance(KNOB_CENTRE + Vector::new(end.cos(), end.sin()) * RANGE_R) <= 4.5).then_some(k)
-        })
-    }
+/// Where a kind of cell puts its meta knobs (unscaled; the cell scales by its width).
+#[derive(Clone, Copy)]
+struct Dials {
+    size: Size,
+    /// The `k`-th of `n` dials: centre and radius.
+    place: fn(usize, usize) -> (Point, f32),
+    /// How many of `n` show (with more, the place after the last says "+N").
+    shown: fn(usize) -> usize,
+    /// The focused range arc's handle: the knob's centre and the arc's radius.
+    handle: Option<(Point, f32)>,
+}
 
-    /// Input on the meta knobs and the range arc's handle; `None` = not theirs (the knob's own
-    /// input runs). Pressing a meta knob focuses its slot (its range arc shows).
-    fn meta_input<M: From<(usize, KnobEvent)>>(&self, state: &mut State, event: &Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<Action<M>> {
-        let scale = bounds.width / PARAM_SIZE.width;
-        let local = |p: Point| Point::new((p.x - bounds.x) / scale, (p.y - bounds.y) / scale);
-        let n = self.mods.len();
-        let (r, _, shown) = meta_layout(n);
-        let dial_at = |p: Point| (0..shown).find(|&k| local(p).distance(meta_centre(k, n)) <= r + 2.5);
-        let publish = |k: usize, e: MetaEvent| Some(Action::publish(M::from((self.index, KnobEvent::Meta(k, e)))).and_capture());
-        // Dragging up turns the amount clockwise (negative = the other way).
-        match event {
-            Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                state.meta_hover = cursor.position_over(bounds).and_then(dial_at);
-                let (k, d) = state.meta_drag.as_mut()?;
-                let fine = if state.fine { FINE } else { 1.0 };
-                // 200 px = the whole −100…+100 % span.
-                let v = d.moved(position.y, fine * 2.0 / DRAG_RANGE, -1.0..=1.0);
-                publish(*k, MetaEvent::Amount(v))
-            }
-            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                let p = cursor.position_over(bounds)?;
-                let on_dial = dial_at(p);
-                let k = self.meta_at(state, bounds, p)?;
-                state.focus = k;
-                let double = state.last_press.is_some_and(|t| t.elapsed() < Duration::from_millis(350));
-                state.last_press = Some(Instant::now());
-                if double && on_dial.is_some() {
-                    state.meta_drag = None;
-                    return publish(k, MetaEvent::Reset);
-                }
-                state.meta_drag = Some((k, Drag::start(self.mods[k].settings.amount, p.y)));
-                publish(k, MetaEvent::Begin)
-            }
-            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                let (k, _) = state.meta_drag.take()?;
-                publish(k, MetaEvent::End)
-            }
-            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
-                let p = cursor.position_over(bounds)?;
-                let k = dial_at(p)?;
-                state.focus = k;
-                publish(k, MetaEvent::Menu(p))
-            }
-            Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
-                let k = dial_at(cursor.position_over(bounds)?)?;
-                let notches = match *delta {
-                    mouse::ScrollDelta::Lines { x, y } => if y != 0.0 { y } else { x },
-                    mouse::ScrollDelta::Pixels { x, y } => (if y != 0.0 { y } else { x }) / 40.0,
-                };
-                let step = notches * SCROLL_STEP * if state.fine { FINE } else { 1.0 };
-                publish(k, MetaEvent::Amount((self.mods[k].settings.amount + step).clamp(-1.0, 1.0)))
-            }
-            _ => None,
+fn param_place(k: usize, n: usize) -> (Point, f32) {
+    (meta_centre(k, n), meta_layout(n).0)
+}
+
+fn param_shown(n: usize) -> usize {
+    meta_layout(n).2
+}
+
+const PARAM_DIALS: Dials = Dials { size: PARAM_SIZE, place: param_place, shown: param_shown, handle: Some((KNOB_CENTRE, RANGE_R)) };
+
+/// The meta knob (or the focused range arc's handle) at window point `p`.
+fn meta_at(d: &Dials, mods: &[Meta<'_>], value: f32, state: &State, bounds: Rectangle, p: Point) -> Option<usize> {
+    let scale = bounds.width / d.size.width;
+    let local = Point::new((p.x - bounds.x) / scale, (p.y - bounds.y) / scale);
+    let n = mods.len();
+    let dial = (0..(d.shown)(n)).find(|&k| {
+        let (c, r) = (d.place)(k, n);
+        local.distance(c) <= r + 2.5
+    });
+    dial.or_else(|| {
+        let (centre, radius) = d.handle?;
+        let k = focus(state, n);
+        let m = mods.get(k)?;
+        let end = START + SWEEP * (value + reach(m.settings)).clamp(0.0, 1.0);
+        (local.distance(centre + Vector::new(end.cos(), end.sin()) * radius) <= 4.5).then_some(k)
+    })
+}
+
+/// Input on the meta knobs and the range arc's handle; `None` = not theirs (the knob's own
+/// input runs). Pressing a meta knob focuses its slot (its range arc shows).
+fn meta_input<M: From<(usize, KnobEvent)>>(
+    d: &Dials,
+    index: usize,
+    mods: &[Meta<'_>],
+    value: f32,
+    state: &mut State,
+    event: &Event,
+    bounds: Rectangle,
+    cursor: mouse::Cursor,
+) -> Option<Action<M>> {
+    let scale = bounds.width / d.size.width;
+    let local = |p: Point| Point::new((p.x - bounds.x) / scale, (p.y - bounds.y) / scale);
+    let n = mods.len();
+    let dial_at = |p: Point| {
+        (0..(d.shown)(n)).find(|&k| {
+            let (c, r) = (d.place)(k, n);
+            local(p).distance(c) <= r + 2.5
+        })
+    };
+    let publish = |k: usize, e: MetaEvent| Some(Action::publish(M::from((index, KnobEvent::Meta(k, e)))).and_capture());
+    // Dragging up turns the amount clockwise (negative = the other way).
+    match event {
+        Event::Mouse(mouse::Event::CursorMoved { position }) => {
+            state.meta_hover = cursor.position_over(bounds).and_then(dial_at);
+            let (k, drag) = state.meta_drag.as_mut()?;
+            let fine = if state.fine { FINE } else { 1.0 };
+            // 200 px = the whole −100…+100 % span.
+            let v = drag.moved(position.y, fine * 2.0 / DRAG_RANGE, -1.0..=1.0);
+            publish(*k, MetaEvent::Amount(v))
         }
+        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+            let p = cursor.position_over(bounds)?;
+            let on_dial = dial_at(p);
+            let k = meta_at(d, mods, value, state, bounds, p)?;
+            state.focus = k;
+            let double = state.last_press.is_some_and(|t| t.elapsed() < Duration::from_millis(350));
+            state.last_press = Some(Instant::now());
+            if double && on_dial.is_some() {
+                state.meta_drag = None;
+                return publish(k, MetaEvent::Reset);
+            }
+            state.meta_drag = Some((k, Drag::start(mods[k].settings.amount, p.y)));
+            publish(k, MetaEvent::Begin)
+        }
+        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+            let (k, _) = state.meta_drag.take()?;
+            publish(k, MetaEvent::End)
+        }
+        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
+            let p = cursor.position_over(bounds)?;
+            let k = dial_at(p)?;
+            state.focus = k;
+            publish(k, MetaEvent::Menu(p))
+        }
+        Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+            let k = dial_at(cursor.position_over(bounds)?)?;
+            let notches = match *delta {
+                mouse::ScrollDelta::Lines { x, y } => if y != 0.0 { y } else { x },
+                mouse::ScrollDelta::Pixels { x, y } => (if y != 0.0 { y } else { x }) / 40.0,
+            };
+            let step = notches * SCROLL_STEP * if state.fine { FINE } else { 1.0 };
+            publish(k, MetaEvent::Amount((mods[k].settings.amount + step).clamp(-1.0, 1.0)))
+        }
+        _ => None,
     }
 }
 

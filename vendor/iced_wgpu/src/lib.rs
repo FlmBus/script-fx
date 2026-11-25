@@ -102,6 +102,8 @@ pub struct Renderer {
     gpu_timer: Option<frame_stats::GpuTimer>,
     // PATCH(scriptfx): post-process pass, made on first use.
     postfx: Option<postfx::PostFx>,
+    // PATCH(scriptfx): the backdrop's layers this frame (first, one past the last), see `postfx`.
+    backdrop: (Option<usize>, Option<usize>),
 }
 
 impl Renderer {
@@ -138,6 +140,7 @@ impl Renderer {
 
             gpu_timer: frame_stats::GpuTimer::new(&engine.device, &engine.queue),
             postfx: None,
+            backdrop: (None, None),
 
             engine,
         }
@@ -149,14 +152,28 @@ impl Renderer {
         target: &wgpu::TextureView,
         viewport: &Viewport,
     ) -> wgpu::CommandEncoder {
+        self.draw_split(clear_color, target, viewport, None)
+    }
+
+    /// PATCH(scriptfx): `draw`, optionally switching targets after the backdrop: layers
+    /// `..end` go to `target`, then `fx` draws `target` through the blur into `frame`, then the
+    /// remaining layers go to `frame` on top. Layers aren't merged then (a merge could move
+    /// content across the split).
+    fn draw_split(
+        &mut self,
+        clear_color: Option<Color>,
+        target: &wgpu::TextureView,
+        viewport: &Viewport,
+        split: Option<Split<'_>>,
+    ) -> wgpu::CommandEncoder {
         let mut encoder = self.engine.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor {
                 label: Some("iced_wgpu encoder"),
             },
         );
 
-        self.prepare(&mut encoder, viewport);
-        self.render(&mut encoder, target, clear_color, viewport);
+        self.prepare(&mut encoder, viewport, split.is_none());
+        self.render(&mut encoder, target, clear_color, viewport, split);
 
         self.quad.trim();
         self.triangle.trim();
@@ -199,8 +216,18 @@ impl Renderer {
                 let size = viewport.physical_size();
                 let mut fx = self.postfx.take().expect("just made");
                 let target = fx.target(&self.engine.device, size.width, size.height).clone();
-                let mut encoder = self.draw(clear_color, &target, viewport);
-                fx.apply(&mut encoder, &self.engine.queue, frame, effect, viewport.scale_factor());
+                let encoder = match self.backdrop {
+                    // A backdrop: only it (and what's under it) goes through the blur.
+                    (Some(start), Some(end)) if start < end => {
+                        let split = Split { end, frame, fx: &fx, effect };
+                        self.draw_split(clear_color, &target, viewport, Some(split))
+                    }
+                    _ => {
+                        let mut encoder = self.draw(clear_color, &target, viewport);
+                        fx.apply(&mut encoder, &self.engine.queue, frame, effect, viewport.scale_factor());
+                        encoder
+                    }
+                };
                 self.postfx = Some(fx);
                 encoder
             }
@@ -344,6 +371,7 @@ impl Renderer {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         viewport: &Viewport,
+        merge: bool,
     ) {
         let scale_factor = viewport.scale_factor();
 
@@ -354,7 +382,12 @@ impl Renderer {
             viewport.physical_size(),
         ));
 
-        self.layers.merge();
+        // PATCH(scriptfx): no merging while the frame is split at the backdrop.
+        if merge {
+            self.layers.merge();
+        } else {
+            self.layers.flush();
+        }
 
         for layer in self.layers.iter() {
             let clip_bounds = layer.bounds * scale_factor;
@@ -465,8 +498,10 @@ impl Renderer {
         frame: &wgpu::TextureView,
         clear_color: Option<Color>,
         viewport: &Viewport,
+        mut split: Option<Split<'_>>,
     ) {
         use std::mem::ManuallyDrop;
+        let mut frame = frame;
 
         let mut render_pass = ManuallyDrop::new(encoder.begin_render_pass(
             &wgpu::RenderPassDescriptor {
@@ -514,7 +549,33 @@ impl Renderer {
 
         let scale = Transformation::scale(scale_factor);
 
-        for layer in self.layers.iter() {
+        for (index, layer) in self.layers.iter().enumerate() {
+            // PATCH(scriptfx): past the backdrop, blur what's drawn so far into the frame and
+            // carry on there.
+            if split.as_ref().is_some_and(|s| index == s.end) {
+                let s = split.take().expect("checked");
+                let _ = ManuallyDrop::into_inner(render_pass);
+                s.fx.apply(encoder, &self.engine.queue, s.frame, s.effect, scale_factor);
+                frame = s.frame;
+                render_pass = ManuallyDrop::new(encoder.begin_render_pass(
+                    &wgpu::RenderPassDescriptor {
+                        label: Some("iced_wgpu render pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: frame,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    },
+                ));
+            }
+
             let Some(physical_bounds) =
                 physical_bounds.intersection(&(layer.bounds * scale_factor))
             else {
@@ -701,6 +762,11 @@ impl Renderer {
 
         let _ = ManuallyDrop::into_inner(render_pass);
 
+        // PATCH(scriptfx): the backdrop ran to the last layer: blur it all now.
+        if let Some(s) = split {
+            s.fx.apply(encoder, &self.engine.queue, s.frame, s.effect, scale_factor);
+        }
+
         debug::layers_rendered(|| {
             self.layers
                 .iter()
@@ -715,13 +781,30 @@ impl Renderer {
     }
 }
 
+/// PATCH(scriptfx): where `render` switches from the offscreen target to the frame.
+struct Split<'a> {
+    /// The first layer drawn on top (sharp).
+    end: usize,
+    frame: &'a wgpu::TextureView,
+    fx: &'a postfx::PostFx,
+    effect: postfx::RadialBlur,
+}
+
 impl core::Renderer for Renderer {
     fn start_layer(&mut self, bounds: Rectangle) {
         self.layers.push_clip(bounds);
+        // PATCH(scriptfx): the backdrop's first layer (`postfx::mark_backdrop_start`).
+        if postfx::take_mark_start() {
+            self.backdrop = (Some(self.layers.iter().count() - 1), None);
+        }
     }
 
     fn end_layer(&mut self) {
         self.layers.pop_clip();
+        // PATCH(scriptfx): the layers after this one are on top of the backdrop.
+        if postfx::take_mark_end() {
+            self.backdrop.1 = Some(self.layers.iter().count());
+        }
     }
 
     fn start_transformation(&mut self, transformation: Transformation) {
@@ -743,6 +826,7 @@ impl core::Renderer for Renderer {
 
     fn reset(&mut self, new_bounds: Rectangle) {
         self.layers.reset(new_bounds);
+        self.backdrop = (None, None);
     }
 
     fn allocate_image(

@@ -1,0 +1,144 @@
+{
+  "v": 3,
+  "attachments": {},
+  "boards": {
+    "Chat.dc.html": {
+      "h": 708,
+      "title": "4 · Chat docked beside the stage",
+      "w": 984,
+      "x": 0,
+      "y": 828
+    },
+    "Dock.dc.html": {
+      "h": 108,
+      "title": "Component · mod dock",
+      "w": 960,
+      "x": 1064,
+      "y": 1656
+    },
+    "Edit.dc.html": {
+      "h": 708,
+      "title": "3 · Editing LFO 1: the dock grows, the stage scales",
+      "w": 984,
+      "x": 2128,
+      "y": 0
+    },
+    "Focus.dc.html": {
+      "h": 708,
+      "title": "2 · Source focus (LFO 1) on a block page",
+      "w": 984,
+      "x": 1064,
+      "y": 0
+    },
+    "Main.dc.html": {
+      "h": 708,
+      "title": "1 · Surface: stage + mod dock",
+      "w": 984,
+      "x": 0,
+      "y": 0
+    },
+    "Map.dc.html": {
+      "h": 708,
+      "title": "6 · Layout map and rules",
+      "w": 984,
+      "x": 2128,
+      "y": 828
+    },
+    "PatchArt.dc.html": {
+      "h": 540,
+      "title": "Component · patch ControlPanel (Tape Glow, 960 × 540)",
+      "w": 960,
+      "x": 0,
+      "y": 1816
+    },
+    "TopBar.dc.html": {
+      "h": 40,
+      "title": "Component · top bar",
+      "w": 984,
+      "x": 0,
+      "y": 1656
+    },
+    "Library.dc.html": {
+      "h": 708,
+      "title": "5 · Library docked left",
+      "w": 984,
+      "x": 1064,
+      "y": 828
+    },
+    "Notch.dc.html": {
+      "h": 36,
+      "title": "Component · notch (snapshots)",
+      "w": 260,
+      "x": 2128,
+      "y": 1656
+    },
+    "ViewTabs.dc.html": {
+      "h": 34,
+      "title": "Component · view switch",
+      "w": 98,
+      "x": 2468,
+      "y": 1656
+    },
+    "Collapsed.dc.html": {
+      "h": 632,
+      "title": "7 · Dock collapsed: just the stage",
+      "w": 984,
+      "x": 3192,
+      "y": 828
+    },
+    "Handles.dc.html": {
+      "h": 708,
+      "title": "8 · Source handles: title bars",
+      "w": 984,
+      "x": 3712,
+      "y": 0
+    }
+  },
+  "createdOnFiles": {
+    "at": "2026-11-21T05:10:00Z",
+    "v": 1
+  },
+  "designSystems": [],
+  "launch": {
+    "view": "canvas"
+  },
+  "noteOrder": [
+    "title",
+    "rules"
+  ],
+  "notes": {
+    "rules": {
+      "fill": "gray",
+      "size": 24,
+      "text": "Rules\n\n1. The stage (the patch's ControlPanel, now 960×540 = 16:9, drawn 1:1) is never covered by panels. Whatever needs room docks beside or below it, and the stage scales down uniformly (animated). Only two small shell controls sit on it: the notch and the view switch.\n2. Top bar: patches + patch name (with reload), ScriptFX, chat, settings. No Macros button, no Controls sheet.\n3. The notch is back, slimmer: one row of snapshot controls (‹ Init › · save · load), hanging from the top bar.\n4. Surface / Chain / Matrix: three icon buttons floating in the stage's top-right corner (label on hover).\n5. The mod dock below the stage is always there: macros (paged 1–8 / 9–16) and the five modulators, each with a live mini display.\n6. Knobs show only small route dots. Selecting a source in the dock shows that source's rings + meta knobs on every knob (Serum's rule); everything else dims. Clicking it again opens its editor: the dock grows, the stage shrinks.\n7. Window 984×708 (was 836×640 with an 840×560 panel at 97 %): wider, not taller. The dock gets its own 108 px; its chevron collapses it to a 32 px strip (button + a dot per modulator) and the window shrinks to 984×632.\n8. Every source has a title bar in its colour (name + ≡ grip): the drag handle. Grab it: the bar lifts off as a tag tied to its tile by a thin cable; knobs that can take it get a dashed outline in its colour, the one under the tag turns solid and previews the range; on release the tag drops in and a meta knob is left. Circles stay reserved for knobs and meta knobs.",
+      "w": 440,
+      "x": 3192,
+      "y": 0
+    },
+    "title": {
+      "kind": "title1",
+      "maxW": 4696,
+      "text": "ScriptFX shell: dock, don't float",
+      "w": 240,
+      "x": 0,
+      "y": -300
+    }
+  },
+  "order": [
+    "Main.dc.html",
+    "Focus.dc.html",
+    "Edit.dc.html",
+    "Chat.dc.html",
+    "Library.dc.html",
+    "Map.dc.html",
+    "Collapsed.dc.html",
+    "Handles.dc.html",
+    "TopBar.dc.html",
+    "Dock.dc.html",
+    "PatchArt.dc.html",
+    "Notch.dc.html",
+    "ViewTabs.dc.html"
+  ],
+  "pages": [],
+  "title": "ScriptFX Shell Layout"
+}

@@ -1,23 +1,24 @@
 //! The control notch: a tab of frame material hanging from the window's top edge, joined to
-//! it by concave flares. Two rows:
-//! - the view switch, full width: Surface | Chain | Matrix (what the patch window shows);
-//! - reload (+ sync LED) | snapshot selector, save, load.
+//! it by concave flares. One row: reload (+ sync LED) | snapshot selector, save, load | bypass.
 //!
-//! The sheet openers (controls, chat, settings) live in the top bar. Stateless: the shell owns
-//! everything it shows. Snapshots are not built yet (the selector shows "Init", Save and Load
-//! are off).
+//! The view switch (Surface · Chain · Matrix) floats in the stage's top-right corner as three
+//! icons ([`view_switch`]); the sheet openers (controls, chat, settings) live in the top bar.
+//! Stateless: the shell owns everything it shows. Snapshots are not built yet (the selector shows
+//! "Init", Save and Load are off).
 
 use super::{icons, tabs, theme};
 use nice_plug_iced::iced::{
     Border, Center, Element, Fill, Padding, Point, Rectangle, Renderer, Shadow, Theme, Vector,
     mouse,
-    widget::{button, canvas, column, container, row, space, stack, text},
+    widget::{button, canvas, container, row, space, stack, text},
 };
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Reload,
     View(View),
+    /// The bypass button: the plugin's (host) bypass on or off.
+    Bypass(bool),
 }
 
 /// What the patch window shows.
@@ -41,6 +42,14 @@ impl View {
             View::Matrix => "Matrix",
         }
     }
+
+    fn icon(self) -> &'static str {
+        match self {
+            View::Surface => icons::VIEW_SURFACE,
+            View::Chain => icons::VIEW_CHAIN,
+            View::Matrix => icons::VIEW_MATRIX,
+        }
+    }
 }
 
 /// The patch file's state, shown by the LED on Reload.
@@ -53,9 +62,10 @@ pub enum Sync {
 }
 
 pub struct Props<'a> {
-    pub view: View,
     pub snapshot: &'a str,
     pub sync: Sync,
+    /// The plugin is bypassed (the host's bypass parameter).
+    pub bypassed: bool,
 }
 
 pub fn view<'a>(p: Props<'a>) -> Element<'a, Message> {
@@ -89,16 +99,35 @@ pub fn view<'a>(p: Props<'a>) -> Element<'a, Message> {
     let save = square(icons::icon(icons::SAVE, 13.0, 2.0, off), None, false);
     let load = square(icons::icon(icons::FOLDER, 13.0, 2.0, off), None, false);
 
-    let tools = row![
+    // Bypass: lit while the effect runs; bypassed, the button turns amber.
+    let bypass = {
+        let (ink, msg) = if p.bypassed { (theme::c().led_reduce, Message::Bypass(false)) } else { (ink, Message::Bypass(true)) };
+        let b = button(container(icons::icon(icons::POWER, 13.0, 2.2, ink)).center(Fill))
+            .on_press(msg)
+            .width(theme::SIZE_CONTROL)
+            .height(theme::SIZE_CONTROL)
+            .padding(0);
+        let b = if p.bypassed {
+            b.style(|t: &Theme, s| button::Style {
+                background: Some(theme::alpha(theme::c().led_reduce, 0.16).into()),
+                border: Border { radius: theme::radius(theme::RADIUS_BUTTON), width: 1.0, color: theme::alpha(theme::c().led_reduce, 0.5) },
+                ..theme::frame_ghost(false)(t, s)
+            })
+        } else {
+            b.style(theme::frame_ghost(false))
+        };
+        tooltip(b, if p.bypassed { "Bypassed: click to turn the effect on" } else { "Bypass" })
+    };
+
+    let controls = row![
         reload,
         divider(),
         row![selector, save, load].spacing(theme::SPACE_HAIR),
+        divider(),
+        bypass,
     ]
     .spacing(theme::SPACE_2)
     .align_y(Center);
-
-    // The view switch spans the width of the row below it.
-    let controls = column![view_switch(p.view), tools].spacing(6);
 
     // Three layers, so the notch has no seams at fractional UI scales (separate flare and body
     // widgets each antialiased the shared edge, and the patch showed through as a thin line):
@@ -132,37 +161,56 @@ const SELECTOR_WIDTH: f32 = 168.0;
 
 /// The notch's size, flares included (where the shell's blur leaves it sharp).
 pub fn size() -> (f32, f32) {
-    (TOOLS_WIDTH + 2.0 * 8.0 + 2.0 * theme::RADIUS_WINDOW, 4.0 + (24.0 + 4.0) + 6.0 + theme::SIZE_CONTROL + 6.0)
+    (TOOLS_WIDTH + 2.0 * 8.0 + 2.0 * theme::RADIUS_WINDOW, 4.0 + theme::SIZE_CONTROL + 6.0)
 }
 
-/// The width of the tools row (reload | selector, save, load); the view switch matches it.
+/// The width of the row (reload | selector, save, load | bypass).
 const TOOLS_WIDTH: f32 =
-    theme::SIZE_CONTROL + 2.0 * theme::SPACE_2 + 1.0 + SELECTOR_WIDTH + 2.0 * theme::SPACE_HAIR + 2.0 * theme::SIZE_CONTROL;
+    theme::SIZE_CONTROL + 4.0 * theme::SPACE_2 + 2.0 + SELECTOR_WIDTH + 2.0 * theme::SPACE_HAIR + 3.0 * theme::SIZE_CONTROL;
 
-/// Surface | Chain | Matrix in a recessed track; the highlight slides between them.
-fn view_switch<'a>(current: View) -> Element<'a, Message> {
+/// Surface · Chain · Matrix as three icons in a small frame-coloured group (floating in the
+/// stage's top-right corner); the highlight slides between them, the name shows on hover.
+pub fn view_switch<'a>(current: View) -> Element<'a, Message> {
     let segment = |v: View, on: bool| -> Element<'a, Message> {
-        button(container(text(v.label()).size(12).font(if on { theme::font::SANS_SEMIBOLD } else { theme::font::SANS })).center(Fill))
+        let ink = if on { theme::c().on_frame_invert } else { theme::c().frame_ink_2 };
+        let b = button(container(icons::icon(v.icon(), 14.0, 2.0, ink)).center(Fill))
             .on_press_maybe((v != current).then_some(Message::View(v)))
-            .width(Fill)
-            .height(24)
+            .width(30)
+            .height(26)
             .padding(0)
-            .style(tabs::style(on, theme::frame_switch(on)))
-            .into()
+            .style(tabs::style(on, theme::frame_switch(on)));
+        // The labels only on the layer under the highlight's (one tooltip per button).
+        if on { b.into() } else { tooltip(b, v.label()) }
     };
     let off = row(View::ALL.into_iter().map(|v| segment(v, false))).spacing(2);
     let on = row(View::ALL.into_iter().map(|v| segment(v, true))).spacing(2);
     let selected = View::ALL.iter().position(|v| *v == current);
     let pill = tabs::Pill {
         background: theme::c().frame_invert,
-        radius: theme::RADIUS_BUTTON,
+        radius: 7.0,
         shadow: Shadow::default(),
     };
     container(tabs::tabs(off, on, selected, pill))
-        .width(TOOLS_WIDTH)
-        .padding(2)
-        .style(theme::frame_track)
+        .padding(3)
+        .style(|_: &Theme| container::Style {
+            background: Some(theme::c().frame.into()),
+            border: Border { radius: theme::radius(10.0), ..Default::default() },
+            shadow: Shadow { color: theme::shadow(0.3), offset: Vector::new(0.0, 4.0), blur_radius: 14.0 },
+            ..Default::default()
+        })
         .into()
+}
+
+/// A label under the control on hover.
+fn tooltip<'a>(content: impl Into<Element<'a, Message>>, label: &'a str) -> Element<'a, Message> {
+    let tip = container(text(label).size(11).font(theme::font::SANS_MEDIUM).color(theme::c().frame_ink))
+        .padding(Padding { top: 3.0, bottom: 3.0, left: 7.0, right: 7.0 })
+        .style(|_: &Theme| container::Style {
+            background: Some(theme::c().frame_raised.into()),
+            border: Border { radius: theme::radius(6.0), width: 1.0, color: theme::c().frame_hairline_strong },
+            ..Default::default()
+        });
+    nice_plug_iced::iced::widget::tooltip(content, tip, nice_plug_iced::iced::widget::tooltip::Position::Bottom).gap(6).into()
 }
 
 /// A square icon button; `None` = disabled. `active`: highlighted (its sheet is open).

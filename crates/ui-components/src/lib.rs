@@ -429,8 +429,12 @@ impl Ui {
             if let Some(l) = level {
                 p.set("level", l)?;
             }
-            if let Some(s) = series {
-                p.set("series", self.lua.create_sequence_from(s)?)?;
+            // A component that asks for a series always gets a list (empty until there's data),
+            // never the series' name it was given.
+            match series {
+                Some(s) => p.set("series", self.lua.create_sequence_from(s)?)?,
+                None if n.series.is_some() => p.set("series", self.lua.create_table()?)?,
+                None => {}
             }
             if let Some(t) = time {
                 p.set("time", t)?;

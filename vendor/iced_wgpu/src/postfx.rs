@@ -6,8 +6,39 @@
 //! Without an effect nothing changes (no offscreen pass, no extra cost).
 //!
 //! Coordinates are logical (the app's); the pass scales them by the viewport's scale factor.
+//!
+//! **Backdrop:** an app can mark part of its UI as the backdrop ([`mark_backdrop_start`] right
+//! before `with_layer`, [`mark_backdrop_end`] right before that layer ends). Then only the layers
+//! up to the backdrop's end go through the blur; the layers drawn after it are drawn on top,
+//! sharp, whatever their shape (no `keep` rectangles needed). Without a backdrop the whole frame
+//! goes through the blur (with `keep`).
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU8, Ordering};
+
+/// A pending backdrop mark, consumed by the renderer's next `start_layer` / `end_layer`.
+static MARK: AtomicU8 = AtomicU8::new(MARK_NONE);
+const MARK_NONE: u8 = 0;
+const MARK_START: u8 = 1;
+const MARK_END: u8 = 2;
+
+/// The next layer started is the backdrop's (call right before `Renderer::with_layer`).
+pub fn mark_backdrop_start() {
+    MARK.store(MARK_START, Ordering::Relaxed);
+}
+
+/// The next layer ended closes the backdrop (call at the end of the `with_layer` closure).
+pub fn mark_backdrop_end() {
+    MARK.store(MARK_END, Ordering::Relaxed);
+}
+
+pub(crate) fn take_mark_start() -> bool {
+    MARK.compare_exchange(MARK_START, MARK_NONE, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+}
+
+pub(crate) fn take_mark_end() -> bool {
+    MARK.compare_exchange(MARK_END, MARK_NONE, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+}
 
 /// A zoom blur towards `center` plus a soft blur of radius `soft`, applied inside `rect` (pixels
 /// outside it pass through; samples stay inside, so nothing from outside bleeds in). `keep`:
