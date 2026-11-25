@@ -52,6 +52,24 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
   parameter, `FxParams::bypass`: the input passes through delayed by the chain's latency, 10 ms
   crossfade; the graph keeps running). The view switch is three icons in the stage's top-right
   corner (name on hover).
+- **Snapshots** (2026-11-25, `snapshots.rs`, `shell/snapshot_menu.rs`): a snapshot is the whole
+  sound of a patch, everything the project saves for it: macros (by id), every param's value, the
+  meta knobs that differ from the patch, the routing edits. Stored per user, apart from the patch
+  code: `<data dir>/ScriptFX/snapshots/<patch folder>/<name>.json` (`SCRIPTFX_SNAPSHOTS`
+  overrides; atomic writes). "Init" = the patch's defaults, never a file. Values are keyed by id,
+  so a snapshot survives a patch growing or shrinking (missing → default). The notch: ‹ › step
+  through Init and the saved ones (recall replaces the sound), the selector shows the name with a
+  dot while the sound differs from it (compared 5×/s with float tolerance) and opens the menu
+  (recall, Save as new…, Rename…, Revert, Export…, Delete… with a confirmation), Save overwrites
+  the selected one or asks for a name on Init, Load imports a file (one saved from another patch
+  is refused). The library lists Init + the saved ones per patch; a row loads the patch with it.
+  The selection is saved with the project (`FxParams::snapshot`); a snapshot file that's gone
+  falls back to Init. Import/export use native dialogs (`rfd` 0.17, XDG portal on Linux, no GTK;
+  0.18 needs Rust 1.92) on their own thread, modal on macOS (AppKit's main thread). Checked on
+  Xvfb: modified dot, save on Init (naming), invalid name refused, step, recall from the menu and
+  from the library across patches, rename, delete. **Not checked:** the dialogs themselves (no
+  portal on Xvfb; without one, Load silently does nothing: `rfd` reports it as a cancel), Windows,
+  macOS, a host's project save/restore of the selection.
 - **Layers:** a page press closes the library, sheets, the entry and menus; the dock stays. The
   chain ↔ modal blur keeps the notch, the sheets and the modal sharp (through the stage's
   scale).
@@ -136,8 +154,8 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
    (live and reopening at ≠ 100 %, host accepts the resize), library wheel scrolling, controls
    sheet (automation gestures, names), hot reload + error card, unload, close/reopen ×10, two
    instances, HiDPI.
-6. **Snapshots** (saved values of a patch): the notch selector/save/load and the library rows are
-   placeholders ("Init" = defaults) until then.
+6. ~~**Snapshots**~~ built 2026-11-25 (see "Snapshots" above). Left: check the native file
+   dialogs on Windows, macOS and in hosts; factory snapshots shipped with patches, if wanted.
 7. **Multi-track Listen** (the real feature, with the chat; all decided 2026-11-25, Flemming).
    Clicking Listen lets the user **choose which instances to record**, default: only the current
    one. Every selected instance contributes its **input and output** with the **full** analysis
@@ -182,7 +200,7 @@ patches, informed by an analysis of the actual audio on the track (and the mix).
 |---|---|---|
 | **Shell** | the plugin itself and its own UI (top bar, notch, views, sheets, dock) | `crates/plugin/src/shell/` |
 | **Patch** | a Luau script describing a chain, its macros, theme and ControlPanel (`return Patch.new(...)`) | crate `patch`, `patches/<name>/init.luau` |
-| **Snapshot** | saved values of a patch (macros + params). Not implemented yet | — |
+| **Snapshot** | a saved sound of a patch: macros, params, meta-knob settings, routing edits; "Init" = its defaults | `snapshots.rs`, `shell/snapshot_menu.rs` |
 | **ControlPanel** | a patch's own UI: reactive Luau components, fixed 840×560; the `panel` of `Patch.new`. To be renamed "surface" | `ui_components::Ui`, `shell/stage.rs` |
 | **Surface** | the first view: the ControlPanel, or the macro surface (the macros as knobs) | `shell/surface.rs` |
 | **Component** | one visual part of a ControlPanel; each instance is a cached layer | `Component.define`, `X.new {}` |
@@ -328,8 +346,8 @@ Principle (Flemming, 2026-11-19): patches are isolated from the shell and from e
   (patch folder + content hash), so they can't restyle the shell or each other (fixed 2026-11-19).
 - **Not yet:** chat logs and attached captures are in memory per plugin instance (sharing and
   persistence: "Global chats" above). Captures use one shared folder and second-resolution names, so
-  concurrent captures can collide. Param values and slot settings are dropped on patch switch;
-  per-patch state is needed once snapshots exist.
+  concurrent captures can collide. Param values and slot settings are dropped on patch switch
+  (save a snapshot to keep them).
 - **Backlog: assets as a manifest** (discussed 2026-11-19, parked: the attack surface is small,
   patches can only load files from their own folder). Idea: `Font.new(id, path)` /
   `Image.new(id, path, { columns, frames })` objects, declarable in any patch file but only while

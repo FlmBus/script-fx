@@ -5,6 +5,15 @@ _What earlier sessions built and found, newest first. Moved here from STATUS "Wh
 changed details (e.g. the panel is now the "Surface" view, macros are Serum-style slots). Measurements
 and findings: [`research/findings.md`](research/findings.md)._
 
+## 2026-11-25 · Snapshots
+
+The last missing piece of the shell layout. Decided with Flemming: snapshots live in the user data
+dir per patch (not in the patch folder), hold the whole sound (macros, params, meta knobs, routing
+edits), and Load/Export go through native file dialogs. `snapshots.rs` (storage, `capture` /
+`resolve` / `same_sound`, unit tests), `Session::recall/save_snapshot/…`, the notch's ‹ selector ›
+save · load, `shell/snapshot_menu.rs`, the library's rows, `FxParams::snapshot`, `dialog.rs`
+(`rfd` 0.17: 0.18 needs Rust 1.92). Checked on Xvfb (see STATUS); the dialogs need a desktop.
+
 ## 2026-11-25 · Mod dock (branch `mod-dock`)
 
 From Flemming's "ScriptFX Shell Layout" mockup (2026-11-21, now in

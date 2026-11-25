@@ -12,6 +12,7 @@ use patch::{MACRO_SLOTS, ModDestination, ModSettings, ModulatorSpec, Patch, Rout
 
 use super::brand::{self, Brand};
 use super::stage::Panel;
+use crate::snapshots::{self, Snapshot};
 use crate::{FxParams, Shared, patches_root};
 
 /// One entry of the library (a patch folder).
@@ -26,6 +27,8 @@ pub struct PatchInfo {
     pub broken: bool,
     /// The card's title font and logo (`theme.library.font/logo`, else `fonts.title`/`images.logo`).
     pub brand: Brand,
+    /// The patch's saved snapshots (sorted; Init isn't listed).
+    pub snapshots: Vec<String>,
 }
 
 pub struct Loaded {
@@ -54,14 +57,27 @@ pub struct Session {
     /// over the playing graph's state, so this doesn't click). Until then the playing graph's
     /// settings slots no longer match the patch's routes and aren't written.
     graph_dirty: bool,
+    /// Where snapshots are stored (`snapshots::root`).
+    snap_root: PathBuf,
+    /// The selected snapshot as it sounds on the loaded patch (`Snapshot::resolve`): what
+    /// "modified" compares against.
+    baseline: Option<Snapshot>,
+    /// The sound differs from the selected snapshot (checked a few times a second).
+    pub modified: bool,
+    last_compare: Instant,
 }
 
 impl Session {
     pub fn new() -> Self {
         let now = Instant::now();
         let mut new_fonts = Vec::new();
+        let snap_root = snapshots::root();
         Self {
-            library: scan_library(&mut new_fonts),
+            library: scan_library(&mut new_fonts, &snap_root),
+            snap_root,
+            baseline: None,
+            modified: false,
+            last_compare: now,
             new_fonts,
             current: None,
             free: Vec::new(),
@@ -120,6 +136,8 @@ impl Session {
         *params.patch_name.write().unwrap() = folder.to_string();
         let setter = ctx.param_setter();
         if reset {
+            // A patch's defaults: Init.
+            params.snapshot.write().unwrap().clear();
             let mut stored = params.param_values.write().unwrap();
             stored.clear();
             for p in &patch.params {
@@ -146,6 +164,7 @@ impl Session {
         nice_log!("loaded patch '{folder}' (reset={reset})");
         self.current = Some(Loaded { folder: folder.to_string(), mtime: patch_mtime(&dir), dir, patch, panel });
         self.error = None;
+        self.refresh_baseline(params);
     }
 
     /// Runs a change to a patch's files (the assistant's commit or undo) and loads the result.
@@ -177,7 +196,7 @@ impl Session {
                 }
             }
         }
-        self.library = scan_library(&mut self.new_fonts);
+        self.library = scan_library(&mut self.new_fonts, &self.snap_root);
         Ok(out)
     }
 
@@ -208,6 +227,9 @@ impl Session {
     /// Back to "no patch": passthrough, default slot names.
     pub fn unload(&mut self, ctx: &GuiContext, params: &FxParams, shared: &Shared) {
         params.patch_name.write().unwrap().clear();
+        params.snapshot.write().unwrap().clear();
+        self.baseline = None;
+        self.modified = false;
         params.param_values.write().unwrap().clear();
         let empty = Patch::empty();
         shared.publish(&empty, &[]);
@@ -220,7 +242,7 @@ impl Session {
 
     /// Rescans the library and reloads the current patch (keeping its values).
     pub fn reload(&mut self, ctx: &GuiContext, params: &FxParams, shared: &Shared) {
-        self.library = scan_library(&mut self.new_fonts);
+        self.library = scan_library(&mut self.new_fonts, &self.snap_root);
         if let Some(folder) = self.current.as_ref().map(|c| c.folder.clone()) {
             self.load(ctx, params, shared, &folder, false);
         }
@@ -309,9 +331,168 @@ impl Session {
         }
     }
 
+    // ---- snapshots ------------------------------------------------------------------------------
+
+    /// The selected snapshot ("Init" = the patch's defaults).
+    pub fn snapshot(&self, params: &FxParams) -> String {
+        let name = params.snapshot.read().unwrap();
+        if name.is_empty() { snapshots::INIT.to_string() } else { name.clone() }
+    }
+
+    /// The loaded patch's saved snapshots.
+    pub fn snapshot_names(&self) -> &[String] {
+        let Some(cur) = &self.current else { return &[] };
+        self.library.iter().find(|p| p.folder == cur.folder).map_or(&[], |p| &p.snapshots[..])
+    }
+
+    /// Init, then the saved ones: what ‹ › step through.
+    pub fn snapshot_cycle(&self) -> Vec<String> {
+        std::iter::once(snapshots::INIT.to_string()).chain(self.snapshot_names().iter().cloned()).collect()
+    }
+
+    /// Recalls a snapshot of the loaded patch (Init: its defaults). Replaces the current sound.
+    pub fn recall(&mut self, ctx: &GuiContext, params: &FxParams, shared: &Shared, name: &str) -> Result<(), String> {
+        let Some(folder) = self.current.as_ref().map(|c| c.folder.clone()) else { return Err("no patch loaded".into()) };
+        if name == snapshots::INIT {
+            self.load(ctx, params, shared, &folder, true);
+            return Ok(());
+        }
+        let snap = snapshots::read(&self.snap_root, &folder, name).map_err(|e| format!("Couldn't read “{name}”: {e}"))?;
+        snap.store(params);
+        *params.snapshot.write().unwrap() = name.to_string();
+        self.load(ctx, params, shared, &folder, false);
+        // Macros are host parameters: set them with gestures, once the patch is in.
+        let Some(cur) = &self.current else { return Ok(()) };
+        let setter = ctx.param_setter();
+        for (i, m) in cur.patch.macros.iter().enumerate() {
+            let p = &params.macros[i].value;
+            let v = snap.macros.get(&m.id).copied().unwrap_or_else(|| cur.patch.macro_default(i)).clamp(0.0, 1.0);
+            if p.unmodulated_normalized_value() != v {
+                setter.begin_set_parameter(p);
+                setter.set_parameter_normalized(p, v);
+                setter.end_set_parameter(p);
+            }
+        }
+        self.compare(params);
+        Ok(())
+    }
+
+    /// Saves the current sound as `name` (`overwrite`: replacing a snapshot of that name is
+    /// intended) and selects it. Returns the stored name.
+    pub fn save_snapshot(&mut self, params: &FxParams, name: &str, overwrite: bool) -> Result<String, String> {
+        let name = snapshots::check_name(name)?;
+        let Some(cur) = &self.current else { return Err("no patch loaded".into()) };
+        if !overwrite && snapshots::exists(&self.snap_root, &cur.folder, &name) {
+            return Err("a snapshot with that name exists".into());
+        }
+        let snap = Snapshot::capture(&cur.folder, params, &cur.patch, &self.free);
+        snapshots::write(&self.snap_root, &cur.folder, &name, &snap).map_err(|e| format!("Couldn't save: {e}"))?;
+        *params.snapshot.write().unwrap() = name.clone();
+        self.rescan_snapshots();
+        self.refresh_baseline(params);
+        Ok(name)
+    }
+
+    /// Renames a saved snapshot (the selection follows). Returns the new name.
+    pub fn rename_snapshot(&mut self, params: &FxParams, from: &str, to: &str) -> Result<String, String> {
+        let to = snapshots::check_name(to)?;
+        let Some(cur) = &self.current else { return Err("no patch loaded".into()) };
+        snapshots::rename(&self.snap_root, &cur.folder, from, &to).map_err(|e| format!("Couldn't rename: {e}"))?;
+        let mut selected = params.snapshot.write().unwrap();
+        if *selected == from {
+            *selected = to.clone();
+        }
+        drop(selected);
+        self.rescan_snapshots();
+        Ok(to)
+    }
+
+    /// Deletes a saved snapshot. If it was selected, the sound stays and counts as a change to
+    /// Init.
+    pub fn delete_snapshot(&mut self, params: &FxParams, name: &str) -> Result<(), String> {
+        let Some(cur) = &self.current else { return Err("no patch loaded".into()) };
+        snapshots::delete(&self.snap_root, &cur.folder, name).map_err(|e| format!("Couldn't delete: {e}"))?;
+        if *params.snapshot.read().unwrap() == name {
+            params.snapshot.write().unwrap().clear();
+            self.refresh_baseline(params);
+        }
+        self.rescan_snapshots();
+        Ok(())
+    }
+
+    /// Copies a snapshot file into the loaded patch's snapshots (under a free name based on the
+    /// file's) and recalls it. Refuses one saved from another patch.
+    pub fn import_snapshot(&mut self, ctx: &GuiContext, params: &FxParams, shared: &Shared, path: &Path) -> Result<String, String> {
+        let snap = snapshots::read_file(path).map_err(|e| format!("Couldn't import: {e}"))?;
+        let Some(cur) = &self.current else { return Err("no patch loaded".into()) };
+        if !snap.patch.is_empty() && snap.patch != cur.folder {
+            return Err(format!("That snapshot is for the patch “{}”, not this one.", snap.patch));
+        }
+        let base = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Imported");
+        let name = snapshots::free_name(&self.snap_root, &cur.folder, base);
+        let snap = Snapshot { patch: cur.folder.clone(), ..snap };
+        snapshots::write(&self.snap_root, &cur.folder, &name, &snap).map_err(|e| format!("Couldn't import: {e}"))?;
+        self.rescan_snapshots();
+        self.recall(ctx, params, shared, &name)?;
+        Ok(name)
+    }
+
+    /// Writes the current sound to a file (`.json` added if missing).
+    pub fn export_snapshot(&self, params: &FxParams, path: &Path) -> Result<(), String> {
+        let Some(cur) = &self.current else { return Err("no patch loaded".into()) };
+        let snap = Snapshot::capture(&cur.folder, params, &cur.patch, &self.free);
+        let path = if path.extension().is_some_and(|x| x == "json") { path.to_path_buf() } else { path.with_extension("json") };
+        snapshots::write_file(&path, &snap).map_err(|e| format!("Couldn't export: {e}"))
+    }
+
+    /// The selected snapshot, resolved against the loaded patch. A snapshot file that's gone or
+    /// unreadable falls back to Init (the sound stays, now as a change to Init).
+    fn refresh_baseline(&mut self, params: &FxParams) {
+        let Some(cur) = &self.current else {
+            self.baseline = None;
+            return;
+        };
+        let name = params.snapshot.read().unwrap().clone();
+        let stored = if name.is_empty() {
+            Snapshot::default()
+        } else {
+            match snapshots::read(&self.snap_root, &cur.folder, &name) {
+                Ok(s) => s,
+                Err(e) => {
+                    nice_log!("snapshot '{name}' of '{}': {e}; back to Init", cur.folder);
+                    params.snapshot.write().unwrap().clear();
+                    Snapshot::default()
+                }
+            }
+        };
+        self.baseline = Some(stored.resolve(&cur.folder, &cur.patch));
+        self.compare(params);
+    }
+
+    /// Updates `modified`.
+    fn compare(&mut self, params: &FxParams) {
+        self.last_compare = Instant::now();
+        self.modified = match (&self.current, &self.baseline) {
+            (Some(cur), Some(base)) => !Snapshot::capture(&cur.folder, params, &cur.patch, &self.free).same_sound(base),
+            _ => false,
+        };
+    }
+
+    /// The loaded patch's snapshot list, after a change on disk.
+    fn rescan_snapshots(&mut self) {
+        let Some(cur) = &self.current else { return };
+        let names = snapshots::list(&self.snap_root, &cur.folder);
+        if let Some(p) = self.library.iter_mut().find(|p| p.folder == cur.folder) {
+            p.snapshots = names;
+        }
+    }
+
     /// Once per frame: hot reload, then the values the UI shows.
     pub fn tick(&mut self, ctx: &GuiContext, params: &FxParams, shared: &Shared) {
         self.poll_hot_reload(ctx, params, shared);
+        if self.last_compare.elapsed().as_millis() >= 200 {
+            self.compare(params);
+        }
         if std::mem::take(&mut self.graph_dirty) {
             if let Some(cur) = &self.current {
                 shared.publish(&cur.patch, &self.free);
@@ -392,11 +573,12 @@ fn carry_over(params: &FxParams, old: &Patch, new: &Patch) -> Vec<f32> {
 }
 
 /// All patch folders with what the library shows (name, colours). Evaluates each patch.
-fn scan_library(new_fonts: &mut Vec<Vec<u8>>) -> Vec<PatchInfo> {
+fn scan_library(new_fonts: &mut Vec<Vec<u8>>, snap_root: &Path) -> Vec<PatchInfo> {
     patch::discover(&patches_root())
         .into_iter()
         .filter_map(|dir| {
             let folder = dir.file_name()?.to_str()?.to_string();
+            let snapshots = snapshots::list(snap_root, &folder);
             Some(match Patch::load(&dir) {
                 Ok(p) => {
                     let accent = hex(p.theme.library_accent()).unwrap_or(super::theme::c().frame_ink_2);
@@ -408,6 +590,7 @@ fn scan_library(new_fonts: &mut Vec<Vec<u8>>) -> Vec<PatchInfo> {
                     name: p.name,
                     folder,
                     broken: false,
+                    snapshots,
                 }
                 }
                 Err(_) => PatchInfo {
@@ -418,6 +601,7 @@ fn scan_library(new_fonts: &mut Vec<Vec<u8>>) -> Vec<PatchInfo> {
                     broken: true,
                     ink: None,
                     brand: Brand { font: None, title: None, logo: None },
+                    snapshots,
                 },
             })
         })

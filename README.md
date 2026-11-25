@@ -86,7 +86,7 @@ Without the plugin: `cargo run -p llm --example ask -- patches tape-glow "make i
 |---|---|
 | `SCRIPTFX_DEV_PATCH=<folder>` | a fresh instance loads this patch instead of starting empty |
 | `SCRIPTFX_DEV_VIEW=chain` | start in the chain view |
-| `SCRIPTFX_DEV_SHEET=chat\|controls\|settings\|library\|editor\|entry` | open it at start (`editor`: LFO 1's, in the dock) |
+| `SCRIPTFX_DEV_SHEET=chat\|controls\|settings\|library\|editor\|entry\|snapshots\|save` | open it at start (`editor`: LFO 1's, in the dock; `save`: the snapshot menu's name field) |
 | `SCRIPTFX_DEV_ZOOM_MS=2000` | slow down the chain → block modal zoom (default 280 ms) to look at it |
 | `SCRIPTFX_DEV_RESCALE=1.5` | set the UI scale 1 s after opening |
 | `SCRIPTFX_DEV_AUTOLISTEN=10` | start a 10 s listen when the editor opens |
@@ -94,6 +94,7 @@ Without the plugin: `cargo run -p llm --example ask -- patches tape-glow "make i
 | `SCRIPTFX_FRAME_US=16667` | the shell's frame interval |
 | `SCRIPTFX_TEST_INPUT=file.wav` | float WAV at the host rate, looped as input |
 | `SCRIPTFX_CAPTURES=<folder>` | where Listen stores captures (default: the user data dir) |
+| `SCRIPTFX_SNAPSHOTS=<folder>` | where snapshots are stored (default: `<data dir>/ScriptFX/snapshots`) |
 
 **Testing the UI on Linux:** run the standalone off-screen on Xvfb (`Xvfb :99`, then
 `DISPLAY=:99 WAYLAND_DISPLAY= WGPU_BACKEND=vulkan`); xdotool clicks and drags work there (they don't

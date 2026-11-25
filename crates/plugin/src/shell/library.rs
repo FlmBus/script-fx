@@ -1,6 +1,5 @@
 //! The patch library, a sheet on the left: one card per patch folder, painted in the patch's own
-//! colours, its snapshots listed inside. Snapshots don't exist yet, so every patch lists one:
-//! "Init" (the patch's defaults).
+//! colours, its snapshots listed inside: "Init" (the patch's defaults), then the saved ones.
 
 use std::collections::HashSet;
 
@@ -11,6 +10,7 @@ use nice_plug_iced::iced::{
 };
 
 use super::{brand, icons, session::PatchInfo, sheet, theme};
+use crate::snapshots::INIT;
 
 pub struct Library {
     open: HashSet<String>,
@@ -19,15 +19,16 @@ pub struct Library {
 #[derive(Debug, Clone)]
 pub enum Message {
     Toggle(String),
-    /// Load a patch with its defaults.
-    Pick(String),
+    /// Load a patch with one of its snapshots (Init: its defaults).
+    Pick(String, String),
     NewPatch,
     Close,
 }
 
 /// What the shell has to act on.
 pub enum Event {
-    Load(String),
+    /// Patch folder, snapshot.
+    Load(String, String),
     Unload,
     Close,
 }
@@ -50,13 +51,14 @@ impl Library {
                 }
                 None
             }
-            Message::Pick(f) => Some(Event::Load(f)),
+            Message::Pick(f, snapshot) => Some(Event::Load(f, snapshot)),
             Message::NewPatch => Some(Event::Unload),
             Message::Close => Some(Event::Close),
         }
     }
 
-    pub fn view<'a>(&'a self, patches: &'a [PatchInfo], loaded: Option<&'a str>) -> Element<'a, Message> {
+    /// `loaded`: the loaded patch's folder and its selected snapshot.
+    pub fn view<'a>(&'a self, patches: &'a [PatchInfo], loaded: Option<(&'a str, String)>) -> Element<'a, Message> {
         let c = theme::c();
         let small = |icon: &'static str, msg: Message| {
             button(container(icons::icon(icon, 11.0, 2.5, c.paper_ink)).center(Fill)).on_press(msg).width(28).height(26).padding(0).style(theme::paper_bare)
@@ -73,7 +75,7 @@ impl Library {
         .height(48)
         .padding(Padding { left: 16.0, right: 8.0, ..Padding::ZERO });
 
-        let cards = column(patches.iter().map(|p| self.card(p, loaded == Some(p.folder.as_str()))))
+        let cards = column(patches.iter().map(|p| self.card(p, loaded.as_ref().filter(|(f, _)| *f == p.folder).map(|(_, s)| s.as_str()))))
             .spacing(theme::SPACE_2)
             .padding(Padding { left: 12.0, right: 12.0, bottom: 12.0, top: 12.0 });
 
@@ -83,7 +85,9 @@ impl Library {
         )
     }
 
-    fn card<'a>(&self, p: &'a PatchInfo, active: bool) -> Element<'a, Message> {
+    /// `selected`: the patch is loaded, with this snapshot.
+    fn card<'a>(&self, p: &'a PatchInfo, selected: Option<&str>) -> Element<'a, Message> {
+        let active = selected.is_some();
         let is_open = self.open.contains(&p.folder);
         let ink = p.ink.unwrap_or(theme::mix(p.accent, Color::WHITE, 0.8));
         let (accent, bg) = (p.accent, p.bg);
@@ -110,20 +114,28 @@ impl Library {
 
         let mut body = column![header];
         if is_open {
-            let label = if p.broken { "doesn't load (open it to see why)" } else { "Init" };
-            let dot = container(space::horizontal().width(5).height(5)).style(move |_: &Theme| container::Style {
-                background: active.then(|| accent.into()),
-                border: Border { radius: theme::radius(3.0), ..Default::default() },
-                shadow: if active { Shadow { color: accent, offset: Vector::ZERO, blur_radius: 5.0 } } else { Shadow::default() },
-                ..Default::default()
-            });
-            let snapshot = button(container(row![dot, text(label).size(12)].spacing(7).align_y(Center)).center_y(Fill))
-                .on_press(Message::Pick(p.folder.clone()))
-                .width(Fill)
-                .height(26)
-                .padding(Padding { left: 15.0, right: 11.0, ..Padding::ZERO })
-                .style(move |_, status| snapshot_row(ink, active, status));
-            body = body.push(container(snapshot).padding(Padding { bottom: 5.0, ..Padding::ZERO }));
+            let row_of = |name: &'a str, label: &'a str| {
+                let on = selected == Some(name);
+                let dot = container(space::horizontal().width(5).height(5)).style(move |_: &Theme| container::Style {
+                    background: on.then(|| accent.into()),
+                    border: Border { radius: theme::radius(3.0), ..Default::default() },
+                    shadow: if on { Shadow { color: accent, offset: Vector::ZERO, blur_radius: 5.0 } } else { Shadow::default() },
+                    ..Default::default()
+                });
+                button(container(row![dot, text(label).size(12)].spacing(7).align_y(Center)).center_y(Fill))
+                    .on_press(Message::Pick(p.folder.clone(), name.to_string()))
+                    .width(Fill)
+                    .height(26)
+                    .padding(Padding { left: 15.0, right: 11.0, ..Padding::ZERO })
+                    .style(move |_, status| snapshot_row(ink, on, status))
+            };
+            let mut rows = column![row_of(INIT, if p.broken { "doesn't load (open it to see why)" } else { INIT })];
+            if !p.broken {
+                for name in &p.snapshots {
+                    rows = rows.push(row_of(name, name));
+                }
+            }
+            body = body.push(container(rows).padding(Padding { bottom: 5.0, ..Padding::ZERO }));
         }
 
         container(body)

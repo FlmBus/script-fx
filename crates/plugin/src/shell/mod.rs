@@ -6,6 +6,7 @@
 //! - `top_bar`      the wordmark, sheet openers (library left; controls, chat, settings right)
 //! - `library`      the patch library (sheet, left)
 //! - `notch`        view switch (Panel | Chain | Matrix); reload / snapshot selector, save, load
+//! - `snapshot_menu` the notch's snapshot menu (recall, save as, rename, revert, export, delete)
 //! - `dock`         below the stage: macros, modulators (live mini displays), focus, and a
 //!                  modulator's editor (a panel rising over the stage's lower part)
 //! - `stage`        the patch window: the ControlPanel and its pointer input
@@ -47,6 +48,7 @@ mod icons;
 mod library;
 mod matrix;
 mod meta_menu;
+mod snapshot_menu;
 mod motion;
 mod notch;
 mod passive;
@@ -163,6 +165,10 @@ pub struct Shell {
     dragging: bool,
     /// A meta knob's menu (right-click on it).
     meta_menu: Option<meta_menu::MetaMenu>,
+    /// The snapshot menu (the notch's selector).
+    snapshot_menu: Option<snapshot_menu::Menu>,
+    /// Snapshot import/export dialogs.
+    dialogs: crate::dialog::Dialogs,
     /// What the patch window shows (the notch's view switch).
     view: notch::View,
     /// The open block modal (block id) in the chain view.
@@ -187,6 +193,7 @@ pub enum Message {
     TopBar(top_bar::Message),
     Library(library::Message),
     MetaMenu(meta_menu::Message),
+    SnapshotMenu(snapshot_menu::Message),
     /// A press anywhere on the page (surface, chain, block page, …): close what floats.
     Dismiss,
     /// The pointer moved while a source is dragged (window coordinates).
@@ -237,6 +244,8 @@ impl Shell {
             dev_stats: std::env::var_os("SCRIPTFX_DEV_STATS").is_some(),
             entry: None,
             meta_menu: None,
+            snapshot_menu: None,
+            dialogs: Default::default(),
             dragging: false,
             view: notch::View::Surface,
             page: None,
@@ -349,8 +358,8 @@ impl Shell {
                     if self.session.current.is_none() && !self.passive {
                         self.set_library(true);
                     }
-                    // Dev aid: SCRIPTFX_DEV_SHEET=chat|controls|settings|library|editor|entry opens it at start
-                    // (editor: LFO 1's, in the dock).
+                    // Dev aid: SCRIPTFX_DEV_SHEET=chat|controls|settings|library|editor|entry|snapshots|save
+                    // opens it at start (editor: LFO 1's, in the dock; save: the snapshot menu naming).
                     match std::env::var("SCRIPTFX_DEV_SHEET").as_deref() {
                         Ok("chat") => self.open_sheet(Some(Sheet::Chat)),
                         Ok("controls") => self.open_sheet(Some(Sheet::Controls)),
@@ -363,6 +372,8 @@ impl Shell {
                         }
                         // The value entry of the first macro, as if right-clicked at Neon's Tape knob.
                         Ok("entry") => self.open_entry(stage::Target::Macro(0), iced::Point::new(165.0, 388.0)),
+                        Ok("snapshots") => self.snapshot_menu = Some(snapshot_menu::Menu::list()),
+                        Ok("save") => self.open_naming(snapshot_menu::Purpose::SaveAs, "Warm bus".into()),
                         _ => {}
                     }
                     // Dev aid: SCRIPTFX_DEV_VIEW=chain|matrix starts in that view.
@@ -385,6 +396,9 @@ impl Shell {
                     }
                 }
                 self.session.tick(ctx, &params, &shared);
+                if let Some(picked) = self.dialogs.poll() {
+                    self.dialog_done(picked, ctx, &params, &shared);
+                }
                 self.dock.tick(&self.session.values.modulators, &self.session.values.modulator_phases);
                 self.modal_tick();
                 let patch_name = self.session.current.as_ref().map(|c| c.folder.clone());
@@ -416,8 +430,17 @@ impl Shell {
                 top_bar::Message::ToggleSettings => self.toggle_sheet(Sheet::Settings),
             },
             Message::Library(msg) => match self.library.update(msg) {
-                Some(library::Event::Load(folder)) => {
-                    self.session.load(ctx, &params, &shared, &folder, true);
+                Some(library::Event::Load(folder, snapshot)) => {
+                    self.snapshot_menu = None;
+                    let loaded = self.session.current.as_ref().is_some_and(|c| c.folder == folder);
+                    if !loaded || snapshot == crate::snapshots::INIT {
+                        self.session.load(ctx, &params, &shared, &folder, true);
+                    }
+                    if snapshot != crate::snapshots::INIT && self.session.current.as_ref().is_some_and(|c| c.folder == folder) {
+                        if let Err(e) = self.session.recall(ctx, &params, &shared, &snapshot) {
+                            self.snapshot_error(e);
+                        }
+                    }
                     self.reveal_current();
                 }
                 Some(library::Event::Unload) => {
@@ -439,7 +462,37 @@ impl Shell {
                     setter.set_parameter(&params.bypass, on);
                     setter.end_set_parameter(&params.bypass);
                 }
+                notch::Message::Step(forward) => {
+                    self.snapshot_menu = None;
+                    let cycle = self.session.snapshot_cycle();
+                    let at = cycle.iter().position(|n| *n == self.session.snapshot(&params)).unwrap_or(0);
+                    let next = if forward { (at + 1) % cycle.len() } else { (at + cycle.len() - 1) % cycle.len() };
+                    if let Err(e) = self.session.recall(ctx, &params, &shared, &cycle[next]) {
+                        self.snapshot_error(e);
+                    }
+                }
+                notch::Message::Menu => {
+                    if self.snapshot_menu.take().is_none() {
+                        self.entry = None;
+                        self.meta_menu = None;
+                        self.snapshot_menu = Some(snapshot_menu::Menu::list());
+                    }
+                }
+                notch::Message::Save => {
+                    let name = self.session.snapshot(&params);
+                    if name == crate::snapshots::INIT {
+                        self.open_naming(snapshot_menu::Purpose::SaveAs, String::new());
+                    } else {
+                        // Saving over the selected snapshot.
+                        match self.session.save_snapshot(&params, &name, true) {
+                            Ok(_) => self.snapshot_menu = None,
+                            Err(e) => self.snapshot_error(e),
+                        }
+                    }
+                }
+                notch::Message::Import => self.dialogs.import(),
             },
+            Message::SnapshotMenu(msg) => self.snapshot_menu_message(msg, ctx, &params, &shared),
             Message::Matrix(msg) => self.matrix.update(&mut self.session, &params, &shared, msg),
             Message::Dock(msg) => {
                 self.now = Instant::now();
@@ -595,7 +648,15 @@ impl Shell {
             }
             Message::MetaMenu(meta_menu::Message::OpenMatrix) => self.set_view(notch::View::Matrix),
             Message::Escape => {
-                if self.entry.take().is_none() && self.meta_menu.take().is_none() {
+                // The snapshot menu steps back from naming/confirming first, then closes.
+                if let Some(m) = &mut self.snapshot_menu {
+                    if matches!(m.mode, snapshot_menu::Mode::List) {
+                        self.snapshot_menu = None;
+                    } else {
+                        m.mode = snapshot_menu::Mode::List;
+                        m.error = None;
+                    }
+                } else if self.entry.take().is_none() && self.meta_menu.take().is_none() {
                     // Closes what floats first, then the dock's editor and focus, then a block's modal.
                     let open = self.library_open || self.sheet.is_some();
                     self.set_library(false);
@@ -1079,6 +1140,94 @@ impl Shell {
         self.open_sheet(None);
         self.entry = None;
         self.meta_menu = None;
+        self.snapshot_menu = None;
+    }
+
+    // ---- snapshots ------------------------------------------------------------------------------
+
+    fn snapshot_menu_message(&mut self, msg: snapshot_menu::Message, ctx: &GuiContext, params: &FxParams, shared: &Shared) {
+        use snapshot_menu::{Message as M, Mode, Purpose};
+        let current = self.session.snapshot(params);
+        let Some(menu) = &mut self.snapshot_menu else { return };
+        menu.error = None;
+        match msg {
+            M::Recall(name) => {
+                self.snapshot_menu = None;
+                if let Err(e) = self.session.recall(ctx, params, shared, &name) {
+                    self.snapshot_error(e);
+                }
+            }
+            M::Revert => {
+                self.snapshot_menu = None;
+                if let Err(e) = self.session.recall(ctx, params, shared, &current) {
+                    self.snapshot_error(e);
+                }
+            }
+            M::SaveAs => self.open_naming(Purpose::SaveAs, String::new()),
+            M::Rename => self.open_naming(Purpose::Rename(current.clone()), current),
+            M::Delete => menu.mode = Mode::ConfirmDelete(current),
+            M::ConfirmDelete => {
+                let Mode::ConfirmDelete(name) = &menu.mode else { return };
+                match self.session.delete_snapshot(params, &name.clone()) {
+                    Ok(()) => self.snapshot_menu = Some(snapshot_menu::Menu::list()),
+                    Err(e) => self.snapshot_error(e),
+                }
+            }
+            M::Export => {
+                self.snapshot_menu = None;
+                self.dialogs.export(&current);
+            }
+            M::Edit(t) => {
+                if let Mode::Name { text, .. } = &mut menu.mode {
+                    *text = t;
+                }
+            }
+            M::Submit => {
+                let Mode::Name { purpose, text } = &menu.mode else { return };
+                let result = match purpose.clone() {
+                    Purpose::SaveAs => self.session.save_snapshot(params, &text.clone(), false),
+                    Purpose::Rename(from) => self.session.rename_snapshot(params, &from, &text.clone()),
+                };
+                match result {
+                    Ok(_) => self.snapshot_menu = None,
+                    Err(e) => {
+                        if let Some(m) = &mut self.snapshot_menu {
+                            m.error = Some(e);
+                        }
+                        self.tasks.push(iced::widget::operation::focus(snapshot_menu::input_id()));
+                    }
+                }
+            }
+            M::Back => menu.mode = Mode::List,
+        }
+    }
+
+    /// The snapshot menu with a name field, focused and selected.
+    fn open_naming(&mut self, purpose: snapshot_menu::Purpose, text: String) {
+        self.entry = None;
+        self.meta_menu = None;
+        self.snapshot_menu = Some(snapshot_menu::Menu::naming(purpose, text));
+        self.tasks.push(iced::widget::operation::focus(snapshot_menu::input_id()));
+        self.tasks.push(iced::widget::operation::select_all(snapshot_menu::input_id()));
+    }
+
+    /// A snapshot action failed: say so in the snapshot menu (opened if needed).
+    fn snapshot_error(&mut self, e: String) {
+        nice_plug::nice_log!("snapshot: {e}");
+        let menu = self.snapshot_menu.get_or_insert_with(snapshot_menu::Menu::list);
+        menu.mode = snapshot_menu::Mode::List;
+        menu.error = Some(e);
+    }
+
+    /// A file dialog answered (import or export).
+    fn dialog_done(&mut self, picked: crate::dialog::Picked, ctx: &GuiContext, params: &FxParams, shared: &Shared) {
+        let result = match picked {
+            crate::dialog::Picked::Import(path) => self.session.import_snapshot(ctx, params, shared, &path).map(|_| ()),
+            crate::dialog::Picked::Export(path) => self.session.export_snapshot(params, &path),
+        };
+        if let Err(e) = result {
+            self.snapshot_error(e);
+        }
     }
 
     /// A source's title bar was pressed (at this window point): drag it (onto a knob).
@@ -1208,8 +1357,12 @@ impl Shell {
 
         // While sheets are open the notch centres on the part of the window they leave visible,
         // gliding along with them.
+        let snapshot = self.session.snapshot(&self.plugin.params);
         let notch = notch::view(notch::Props {
-            snapshot: "Init",
+            snapshot: snapshot.clone(),
+            modified: self.session.modified,
+            can_step: !self.session.snapshot_names().is_empty(),
+            menu_open: self.snapshot_menu.is_some(),
             sync: if self.session.error.is_some() { notch::Sync::Error } else { notch::Sync::Ok },
             bypassed: self.plugin.params.bypass.value(),
         })
@@ -1255,6 +1408,9 @@ impl Shell {
         });
 
         let mut layers = stack![stage, notch, switch].width(Fill).height(Fill);
+        if let Some(menu) = self.snapshot_menu_layer(&snapshot) {
+            layers = layers.push(menu);
+        }
         // The modulator's editor rises from the dock over the stage's lower part; it steps aside
         // while a source is dragged (so whatever is under it takes the drop).
         if self.editor_height() > 0.0 {
@@ -1412,6 +1568,25 @@ impl Shell {
         Some(pin(menu.view(title, settings, reset).map(Message::MetaMenu)).x(x).y(y).into())
     }
 
+    /// The snapshot menu, hanging under the notch (centred like it).
+    fn snapshot_menu_layer(&self, current: &str) -> Option<Element<'_, Message>> {
+        let menu = self.snapshot_menu.as_ref()?;
+        let cycle = self.session.snapshot_cycle();
+        let card = menu.view(cycle, current, self.session.modified).map(Message::SnapshotMenu);
+        Some(
+            container(card)
+                .width(Fill)
+                .padding(Padding {
+                    top: notch::size().1 + theme::SPACE_HAIR,
+                    left: self.library_t() * library_width(),
+                    right: self.slide_t() * sheet_width(),
+                    ..Padding::ZERO
+                })
+                .align_x(alignment::Horizontal::Center)
+                .into(),
+        )
+    }
+
     /// The library sheet, over the left side of the window.
     fn library_layer(&self) -> Option<Element<'_, Message>> {
         let t = self.library_t();
@@ -1419,7 +1594,8 @@ impl Shell {
             return None;
         }
         let s = &self.session;
-        let sheet = self.library.view(&s.library, s.current.as_ref().map(|c| c.folder.as_str())).map(Message::Library);
+        let snapshot = s.snapshot(&self.plugin.params);
+        let sheet = self.library.view(&s.library, s.current.as_ref().map(|c| (c.folder.as_str(), snapshot))).map(Message::Library);
         let sheet = container(sheet).height(Fill).padding(theme::SPACE_2);
         Some(slide::slide_left(sheet, library_width(), (1.0 - t) * library_width()).into())
     }

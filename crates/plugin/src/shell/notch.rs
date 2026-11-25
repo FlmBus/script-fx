@@ -3,8 +3,9 @@
 //!
 //! The view switch (Surface · Chain · Matrix) floats in the stage's top-right corner as three
 //! icons ([`view_switch`]); the sheet openers (controls, chat, settings) live in the top bar.
-//! Stateless: the shell owns everything it shows. Snapshots are not built yet (the selector shows
-//! "Init", Save and Load are off).
+//! Stateless: the shell owns everything it shows. Snapshots: ‹ › step through Init and the saved
+//! ones, the selector opens the snapshot menu (`snapshot_menu`), Save stores the sound (a name is
+//! asked for on Init), Load imports a snapshot file.
 
 use super::{icons, tabs, theme};
 use nice_plug_iced::iced::{
@@ -19,6 +20,13 @@ pub enum Message {
     View(View),
     /// The bypass button: the plugin's (host) bypass on or off.
     Bypass(bool),
+    /// ‹ ›: the previous / next snapshot.
+    Step(bool),
+    /// The selector: open or close the snapshot menu.
+    Menu,
+    Save,
+    /// Load: import a snapshot file.
+    Import,
 }
 
 /// What the patch window shows.
@@ -61,14 +69,19 @@ pub enum Sync {
     Error,
 }
 
-pub struct Props<'a> {
-    pub snapshot: &'a str,
+pub struct Props {
+    pub snapshot: String,
+    /// The sound differs from the snapshot (a dot after its name).
+    pub modified: bool,
+    /// There is more than Init to step through.
+    pub can_step: bool,
+    pub menu_open: bool,
     pub sync: Sync,
     /// The plugin is bypassed (the host's bypass parameter).
     pub bypassed: bool,
 }
 
-pub fn view<'a>(p: Props<'a>) -> Element<'a, Message> {
+pub fn view<'a>(p: Props) -> Element<'a, Message> {
     let ink = theme::c().frame_ink_2;
     let off = theme::alpha(ink, 0.35);
 
@@ -80,24 +93,47 @@ pub fn view<'a>(p: Props<'a>) -> Element<'a, Message> {
     });
     let reload = square(row![icons::icon(icons::RELOAD, 13.0, 2.2, ink), led].spacing(4).align_y(Center), Some(Message::Reload), false);
 
-    // Snapshots: selector, save, load (disabled until snapshots exist).
+    // Snapshots: ‹ selector ›, save, load.
+    let arrow = |forward: bool| {
+        let ink = if p.can_step { ink } else { off };
+        button(container(icons::icon_rotated(icons::CHEVRON_RIGHT, 8.0, 3.0, ink, if forward { 0.0 } else { 180.0 })).center(Fill))
+            .on_press_maybe(p.can_step.then_some(Message::Step(forward)))
+            .width(ARROW_WIDTH)
+            .height(theme::SIZE_CONTROL)
+            .padding(0)
+            .style(theme::frame_ghost(false))
+    };
+    let mut name = row![text(p.snapshot.clone()).size(12).font(theme::font::SANS_MEDIUM).color(theme::c().frame_ink).wrapping(text::Wrapping::None)]
+        .spacing(6)
+        .align_y(Center)
+        .clip(true);
+    if p.modified {
+        name = name.push(container(space::horizontal().width(5).height(5)).style(|_: &Theme| container::Style {
+            background: Some(theme::c().frame_ink_2.into()),
+            border: Border { radius: theme::radius(3.0), ..Default::default() },
+            ..Default::default()
+        }));
+    }
     let selector = button(
         container(
             row![
-                text(p.snapshot).size(12).font(theme::font::SANS_MEDIUM).color(theme::c().frame_ink),
+                name,
                 space::horizontal(),
-                icons::icon(icons::CHEVRON_DOWN, 10.0, 2.5, theme::c().frame_muted),
+                icons::icon_rotated(icons::CHEVRON_DOWN, 10.0, 2.5, theme::c().frame_muted, if p.menu_open { 180.0 } else { 0.0 }),
             ]
+            .spacing(6)
             .align_y(Center),
         )
         .center_y(Fill),
     )
+    .on_press(Message::Menu)
     .width(SELECTOR_WIDTH)
     .height(theme::SIZE_CONTROL)
     .padding(Padding { left: 12.0, right: 10.0, ..Padding::ZERO })
     .style(theme::frame_ghost(true));
-    let save = square(icons::icon(icons::SAVE, 13.0, 2.0, off), None, false);
-    let load = square(icons::icon(icons::FOLDER, 13.0, 2.0, off), None, false);
+    let selector = tooltip(selector, if p.modified { "Changed since saved" } else { "Snapshots" });
+    let save = tooltip(square(icons::icon(icons::SAVE, 13.0, 2.0, ink), Some(Message::Save), false), "Save snapshot");
+    let load = tooltip(square(icons::icon(icons::FOLDER, 13.0, 2.0, ink), Some(Message::Import), false), "Load snapshot file");
 
     // Bypass: lit while the effect runs; bypassed, the button turns amber.
     let bypass = {
@@ -122,7 +158,7 @@ pub fn view<'a>(p: Props<'a>) -> Element<'a, Message> {
     let controls = row![
         reload,
         divider(),
-        row![selector, save, load].spacing(theme::SPACE_HAIR),
+        row![arrow(false), selector, arrow(true), save, load].spacing(theme::SPACE_HAIR).align_y(Center),
         divider(),
         bypass,
     ]
@@ -157,16 +193,22 @@ pub fn view<'a>(p: Props<'a>) -> Element<'a, Message> {
         .into()
 }
 
-const SELECTOR_WIDTH: f32 = 168.0;
+const SELECTOR_WIDTH: f32 = 156.0;
+const ARROW_WIDTH: f32 = 22.0;
 
 /// The notch's size, flares included (where the shell's blur leaves it sharp).
 pub fn size() -> (f32, f32) {
     (TOOLS_WIDTH + 2.0 * 8.0 + 2.0 * theme::RADIUS_WINDOW, 4.0 + theme::SIZE_CONTROL + 6.0)
 }
 
-/// The width of the row (reload | selector, save, load | bypass).
-const TOOLS_WIDTH: f32 =
-    theme::SIZE_CONTROL + 4.0 * theme::SPACE_2 + 2.0 + SELECTOR_WIDTH + 2.0 * theme::SPACE_HAIR + 3.0 * theme::SIZE_CONTROL;
+/// The width of the row (reload | ‹ selector ›, save, load | bypass).
+const TOOLS_WIDTH: f32 = theme::SIZE_CONTROL
+    + 4.0 * theme::SPACE_2
+    + 2.0
+    + 2.0 * ARROW_WIDTH
+    + SELECTOR_WIDTH
+    + 4.0 * theme::SPACE_HAIR
+    + 3.0 * theme::SIZE_CONTROL;
 
 /// Surface · Chain · Matrix as three icons in a small frame-coloured group (floating in the
 /// stage's top-right corner); the highlight slides between them, the name shows on hover.

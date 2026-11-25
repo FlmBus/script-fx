@@ -17,8 +17,10 @@ use patch::{MACRO_SLOTS, ModEdits, ModSettings, Patch};
 mod assistant;
 mod captures;
 mod diag;
+mod dialog;
 mod listen;
 mod shell;
+mod snapshots;
 mod user_settings;
 
 /// Listen/capture states (`Shared::listen_state`).
@@ -362,6 +364,10 @@ pub struct FxParams {
     #[persist = "patch"]
     pub patch_name: RwLock<String>,
 
+    /// The patch's snapshot this sound started from (`snapshots`); empty = Init (its defaults).
+    #[persist = "snapshot"]
+    pub snapshot: RwLock<String>,
+
     /// Plain values of the patch's free (not macro-driven) params, by param id.
     #[persist = "param-values"]
     pub param_values: RwLock<HashMap<String, f32>>,
@@ -402,6 +408,7 @@ impl Default for FxParams {
         let macro_names: [Arc<RwLock<String>>; MACRO_SLOTS] = std::array::from_fn(|_| Arc::default());
         Self {
             patch_name: RwLock::new(String::new()),
+            snapshot: RwLock::new(String::new()),
             param_values: RwLock::new(HashMap::new()),
             mod_settings: RwLock::new(HashMap::new()),
             mod_edits: RwLock::new(ModEdits::default()),
