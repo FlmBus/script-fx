@@ -6,13 +6,13 @@ Concepts, research and measurements: [`research/`](research/)._
 
 ## Current state
 
-The chain editor is on `main`: Surface and Chain views, block modals, the macro rail, the
+The chain editor is on `main`: the Surface and Chain surfaces with block modals, the macro rail, the
 modulators (Follow, LFO 1–3, Step) with their drawer panels, Serum-style routes with drag & drop
 onto knobs, and the Matrix (every route, add/remove). See
 [`research/chain-editor.md`](research/chain-editor.md) for the design and remaining deviations.
 Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in a real host.
 
-- **Surface** shows the patch's ControlPanel, or a themed macro surface when it has none.
+- **Surface** shows the patch's own UI, or the themed default macro surface when it declares none.
   **Chain** shows the block tree; clicking a block (or a container's header bar, both light up on
   hover) opens its **modal** (2026-11-23, mockup `research/mockups/block-modal.html`): the camera
   flies into the block, zooming by the size ratio of block and modal (~8× for a block, ≥ 1.4× for
@@ -36,7 +36,7 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
   position (`Graph::modulator_phases`), like Serum: one LFO cycle (`dsp::modulators::morph`, what
   plays) with a dot, Step's bars with the playing step lit. Only Follow is a live trace. A trace
   sampled once per UI frame aliases any LFO above a few Hz into noise (2026-11-21).
-- **Layers:** a page press closes the library, sheets, the drawer, the entry and menus; the macro
+- **Layers:** a press on the surface closes the library, sheets, the drawer, the entry and menus; the macro
   rail stays (drag a macro onto a knob, then turn it). The drawer opens to 180 px and the block
   modal moves up above it. The chain ↔ modal blur keeps the notch, the drawer (at its
   current height) and the rail sharp (`postfx` has three keep rects).
@@ -90,8 +90,13 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
    §§ drawer/chain); `Hz | sync` pills on block knobs (rates, delay times); a
    route's meta knob focused right after a drop; modulators onto Surface macros. Then a host
    round trip (save project, reopen) of routes and modulator edits.
-2. **Surface naming:** the macro fallback already appears for patches without a panel. Rename
-   panels to surfaces throughout the API (`ui.Panel`), code and docs (decided, Flemming).
+2. **Surfaces** ([`GLOSSARY.md`](GLOSSARY.md), decided 2026-11-25). Done: the tier is collapsed —
+   `shell/viewport.rs` holds `SurfaceId` and the switcher list, the shell's per-view special cases
+   are per-surface traits (`wants_drawer`, `owns_block_modal`), `notch::View` is gone. Remaining:
+   **(a)** move the chain's state out of the shell struct (`page`, `motion`, `chain_content`) so
+   each surface owns its own — the point of the exercise; **(b)** rename `ui.Panel` → `ui.Surface`
+   in the Luau API, `has_panel` → surfaces, and `stage.rs`'s `Panel` with it (breaking, all six
+   patches); **(c)** let a patch declare 0..n surfaces, which the switcher then lists.
 3. **Block modals:** build the displays designed in
    [`research/mockups/block-displays.html`](research/mockups/block-displays.html), in the order of
    [`research/block-displays.md`](research/block-displays.md) (steps 1 and 2 done: the `dsp::preview`
@@ -159,36 +164,10 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
 and the patch's own UI. An LLM (prompt / chat inside the plugin) writes and adjusts these
 patches, informed by an analysis of the actual audio on the track (and the mix).
 
-## Glossary (used in code, UI and docs)
+## Glossary
 
-| Term | Meaning | Code |
-|---|---|---|
-| **Shell** | the plugin itself and its own UI (top bar, notch, views, sheets, drawer) | `crates/plugin/src/shell/` |
-| **Patch** | a Luau script describing a chain, its macros, theme and ControlPanel (`return Patch.new(...)`) | crate `patch`, `patches/<name>/init.luau` |
-| **Snapshot** | saved values of a patch (macros + params). Not implemented yet | — |
-| **ControlPanel** | a patch's own UI: reactive Luau components, fixed 840×560; the `panel` of `Patch.new`. To be renamed "surface" | `ui_components::Ui`, `shell/stage.rs` |
-| **Surface** | the first view: the ControlPanel, or the macro surface (the macros as knobs) | `shell/surface.rs` |
-| **Component** | one visual part of a ControlPanel; each instance is a cached layer | `Component.define`, `X.new {}` |
-| **Chain / Block** | DSP description / one **building block**: the unit patches build professional effect chains from, so it exposes every parameter it can ([`research/blocks.md`](research/blocks.md)) (`Chain.new`, `Blocks.<Type>.new(id, {...})`) | `patch::chain`, `BlockSpec` |
-| **Chain view / Block modal** | the view of the chain's tree / one block's modal (display + knobs), zoomed into from its node | `shell/chain_view.rs`, `shell/block_modal.rs`, `shell/motion.rs` |
-| **Graph** | compiled chain running on the audio thread | `dsp::Graph` |
-| **Param** | a block's knob; has a base value (saved with the project) | `ParamSpec` |
-| **Macro** | host-automatable control of a patch, drives 1..n params | `MacroSpec` |
-| **Host slot** | one of the 16 fixed host parameters macros are mapped onto | `MACRO_SLOTS` |
-| **Modulation slot / route** | one source → param (or modulator → macro) link: amount (range size, sign = direction), uni/bi, curve, bypass | `patch::Modulation`, `ModAssignment`, `patch::Route`, `ModSettings` |
-| **Meta knob / range arc / live dot** | a slot's mini knob on its target / the slot's range on the knob / the value after modulation | `shell/knob.rs` |
-| **Modulator** | Follow, LFO 1–3, Step: sources that live outside the chain | `dsp::modulators`, `shell/drawer.rs` |
-| **Drawer / Macro rail / Notch / Sheet** | modulator tabs at the bottom / the macros' card on the left / view switch + snapshots at the top / side panels (library, controls, chat, settings) | `shell/drawer.rs`, `macro_rail.rs`, `notch.rs`, `sheet.rs` |
-| **Matrix** | every route as a table (live values, add/remove) | `shell/matrix.rs` |
-| **Bind / Source** | what a component reads: `bind` = a Macro/Param object (value, draggable), `source` = a metered block or `Meters.IN/OUT` | `__ref`, `patch::Source` |
-| **Theme** | a patch's design tokens (colours, fonts, images); used by its ControlPanel, library card and macro surface, never by the rest of the shell | `Theme` |
-| **Listen / Capture / Analysis** | the action / recorded audio / analysis result | `listen.rs`, `crates/analysis` |
-| **Passive mode** | an instance with **no patch loaded** (passthrough, controls disabled, a "passive listener" card instead of the views) that exists to be a Listen target. Not built | — |
-| **Chat** | planned global conversation with the LLM, captures as attachments; today one in-memory chat per shell, no LLM | `shell/chat.rs` |
-
-Avoid: "preset" (ambiguous between patch and snapshot), "editor"/"chrome" (use shell), "panel" alone
-(use ControlPanel, later surface), "slot" alone (host slot, modulation slot, or a container's slot such as a band split's bands), "master mode" (use
-passive mode).
+Moved to [`GLOSSARY.md`](GLOSSARY.md): the terms used in code, UI and docs, the
+**viewport → surface** model (settled 2026-11-25) and the list of words to avoid.
 
 ## Decisions
 
@@ -200,10 +179,11 @@ passive mode).
 | Platforms | Linux x86_64, Windows x86_64, macOS universal (arm64 + x86_64) | via GitHub Actions |
 | Blocks | **Building blocks for professional chains**: expose every parameter a device or engineer would set; continuous ones are Params; styles are presets of one versatile block where possible (Flemming, 2026-11-21) | patches (and the LLM) can only build what the blocks allow; see [`research/blocks.md`](research/blocks.md) |
 | Modulation amount | **One control**: the amount's sign is the direction (no separate invert); it is the size of the range for both polarities (bipolar swings ±amount/2) (Flemming, 2026-11-21) | one knob says everything; switching uni/bi doesn't change how far the knob moves |
+| Viewport terminology | **viewport → surface**, two tiers: the chain and the Matrix are surfaces like a patch's own UI, each owning its state; a patch may declare 0..n surfaces and the notch switcher lists them. "page" and "view" (as nouns) retired (Flemming, 2026-11-25) | one tier instead of three; per-view special cases become per-surface metadata, and the chain's modal state leaves the shell struct. See [`GLOSSARY.md`](GLOSSARY.md) |
 | Lua's role | **describes only** (params, macros, chain, theme) and renders the UI components (UI thread, sandboxed + instruction budget); never on the audio thread | real-time safety, LLM-friendly validation |
 | Patch model | **params** = the blocks' knobs (unlimited, base value saved with the project) + **macros** (max 16, host-automatable, each drives 1..n params) | 8–16 macros are enough when macros can drive many params; hosts can't handle changing parameter lists |
 | Modulation | **Serum's model** (2026-11-20, source of truth: [`research/serum-modulation.md`](research/serum-modulation.md)): every source → param link is a slot (amount −1…+1 of the knob's travel, uni/bi, curve, bypass; no invert, see "Modulation amount"); deltas sum on the knob's base in normalized space, clamped, then the param's scale; any number of slots per knob. Sources: macros and the modulators (Follow, LFO 1–3, Step). Slot edits saved per DAW project | the earlier unit-based from/to mappings didn't add up across lin/log knobs; Serum's model is proven and intuitive |
-| Chain editor | a **tree** with container slots (not a free graph); views: Surface, Chain (+ block modals), Matrix; concept: [`research/chain-editor.md`](research/chain-editor.md) | cable salad at mid-size patches in the free-graph mockup |
+| Chain editor | a **tree** with container slots (not a free graph); surfaces: Surface, Chain (+ block modals), Matrix; concept: [`research/chain-editor.md`](research/chain-editor.md) | cable salad at mid-size patches in the free-graph mockup |
 | Host parameters | 16 fixed host slots, **names follow the patch** (patched nice-plug: VST3 `kParamTitlesChanged`, CLAP `RESCAN_INFO`). **Verified in Reaper.** Automation stays on the slot across patch changes (same contract as Serum's macros) | plugins can't delete host automation; renaming is safe because hosts key automation by ID |
 | DSP | declarative `chain` → `dsp::Graph` compiled off the audio thread, swapped lock-free (rtrb), old graphs freed off-thread | |
 | Patch UI | **reactive Luau components** → SVG → one cached layer each (resvg), fixed 840×560. Parked on 2026-11-18 for the raster plan, then revised and back: **still the plan**; raster layers / sprite sheets / shaders stay open ideas ([`research/raster-ui-plan.md`](research/raster-ui-plan.md)) | declarative, cached, sandboxed; the earlier SVG + bindings panel was removed |

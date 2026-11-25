@@ -23,8 +23,6 @@ use nice_plug_iced::iced::{
 pub enum Message {
     /// Back to the chain (✕, Escape, a click beside the modal).
     Close,
-    /// Walk the chain: the previous / next block.
-    Walk(bool),
     /// Input on a knob (param index).
     Knob(usize, knob::KnobEvent),
 }

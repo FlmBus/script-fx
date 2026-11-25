@@ -5,8 +5,9 @@ DSP blocks), its host-automatable macros, its theme and its own UI, and Rust doe
 rendering. The goal: an LLM in the plugin writes and adjusts patches, informed by an analysis of the
 track's audio. VST3 + CLAP + standalone, Linux / Windows / macOS.
 
-**Docs:** [`docs/STATUS.md`](docs/STATUS.md) (start here: where we are, next steps, decisions,
-glossary) · [`docs/HISTORY.md`](docs/HISTORY.md) (what each session built) ·
+**Docs:** [`docs/STATUS.md`](docs/STATUS.md) (start here: where we are, next steps, decisions) ·
+[`docs/GLOSSARY.md`](docs/GLOSSARY.md) (what everything is called) ·
+[`docs/HISTORY.md`](docs/HISTORY.md) (what each session built) ·
 [`docs/research/`](docs/research/) (concepts, research, [measurements](docs/research/findings.md)).
 
 ```
