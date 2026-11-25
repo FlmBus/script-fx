@@ -517,6 +517,29 @@ pub fn frame_pick_list(_: &Theme, status: pick_list::Status) -> pick_list::Style
     }
 }
 
+/// A pick list on a sheet.
+pub fn paper_pick_list(_: &Theme, status: pick_list::Status) -> pick_list::Style {
+    let active = matches!(status, pick_list::Status::Opened { .. } | pick_list::Status::Hovered);
+    pick_list::Style {
+        text_color: c().paper_ink,
+        placeholder_color: c().paper_muted,
+        handle_color: c().paper_muted,
+        background: Background::Color(c().paper_raised),
+        border: Border { radius: radius(RADIUS_BUTTON), width: 1.0, color: if active { c().paper_muted } else { c().paper_line } },
+    }
+}
+
+pub fn paper_menu(_: &Theme) -> overlay::menu::Style {
+    overlay::menu::Style {
+        background: Background::Color(c().paper),
+        border: Border { radius: radius(RADIUS_BUTTON), width: 1.0, color: c().paper_edge },
+        text_color: c().paper_ink_2,
+        selected_text_color: c().paper_ink,
+        selected_background: Background::Color(alpha(c().paper_ink, 0.1)),
+        shadow: Shadow { color: shadow(0.4), offset: Vector::new(0.0, 6.0), blur_radius: 18.0 },
+    }
+}
+
 /// The open pick list's menu.
 pub fn frame_menu(_: &Theme) -> overlay::menu::Style {
     overlay::menu::Style {

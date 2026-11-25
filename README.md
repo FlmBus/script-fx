@@ -13,6 +13,7 @@ glossary) · [`docs/HISTORY.md`](docs/HISTORY.md) (what each session built) ·
 crates/patch         patch model (params, macros + modulation slots, chain), sandboxed Luau runtime + require, patch & UI API (src/*.luau)
 crates/dsp           native DSP: compiles a patch's chain into a graph (no alloc/locks/Lua on the audio thread); `preview` = curves for the UI
 crates/analysis      offline analysis of a capture → LLM-friendly JSON (loudness/LUFS, spectrum, dynamics, stereo, pitch)
+crates/llm           the chat's LLM: backends (claude CLI, OpenAI-compatible API), prompt, staging + checks, commit/undo
 crates/ui-components reactive Luau components → SVG → one cached layer per component (a patch's ControlPanel)
 crates/plugin        package `scriptfx`: nice-plug plugin (VST3/CLAP/standalone) + the iced shell (src/shell/, one module per section)
 crates/xtask         `cargo xtask bundle` (nice-plug-xtask)
@@ -72,6 +73,12 @@ The last 20 captures are kept (`captures::KEEP`); audio is the expensive part, ~
 `analysis::digest()` (one line per stream) and read sections through `captures::read()` — the
 query the planned `get_analysis` tool calls. `cargo run --release -p analysis --example analyze
 -- file.wav` analyses a WAV from the command line and prints its digest.
+
+**AI** (off until picked in Settings): *Claude Code* (the installed CLI and its login; run without
+tools, settings or MCP servers) or *API* (any OpenAI-compatible address; the key goes to the OS
+keychain, per address). Settings lists the models the login or key can use. Changes are checked in a copy (loader, panel render, noise through the DSP,
+`luau-lsp` if installed), backed up to `<data dir>/ScriptFX/history/`, then loaded; the chat has Undo.
+Without the plugin: `cargo run -p llm --example ask -- patches tape-glow "make it darker" [model]`.
 
 **Dev aids** (environment variables):
 

@@ -152,6 +152,8 @@ pub struct Shell {
     captures: captures::Usage,
     /// Per-user settings (UI scale), saved on change.
     settings: UserSettings,
+    /// An API key being typed (settings sheet); goes to the keychain, never to disk.
+    ai_key: String,
     dev_stats: bool,
     /// Dev aid: `SCRIPTFX_DEV_RESCALE=1.5` sets the UI scale 1 s after opening (like −/+).
     dev_rescale: Option<(Instant, f32)>,
@@ -231,6 +233,7 @@ impl Shell {
             track: None,
             captures: captures::Usage::default(),
             settings: { let s = UserSettings::load(); apply_theme(s.theme); s },
+            ai_key: String::new(),
             dev_stats: std::env::var_os("SCRIPTFX_DEV_STATS").is_some(),
             entry: None,
             meta_menu: None,
@@ -386,8 +389,16 @@ impl Shell {
                 self.modal_tick();
                 let patch_name = self.session.current.as_ref().map(|c| c.folder.clone());
                 if let Some(result) = self.listen.poll(&shared, self.track.as_deref(), patch_name.as_deref()) {
-                    self.chat.capture_done(result);
+                    shared.assistant.lock().unwrap().capture_done(result);
                     self.open_sheet(Some(Sheet::Chat));
+                }
+                let done = shared.assistant.lock().unwrap().poll();
+                if let Some(done) = done {
+                    self.turn_done(done, &params, &shared);
+                }
+                self.chat.sync(&shared.assistant.lock().unwrap());
+                if self.sheet == Some(Sheet::Chat) && self.chat.take_follow() {
+                    self.tasks.push(iced::widget::operation::snap_to_end(chat::Chat::log_id()));
                 }
                 icons::set_scale(self.ctx.window_size().scale_factor as f32);
                 let scale = stage::panel_fit().0 * self.ctx.window_size().scale_factor as f32;
@@ -449,7 +460,18 @@ impl Shell {
             Message::Surface(surface::Message::Macro(slot, e)) => self.macro_knob(slot, e, &params, &shared),
             Message::Chat(msg) => match self.chat.update(msg) {
                 Some(chat::Event::Close) => self.open_sheet(None),
+                Some(chat::Event::Send(text)) => {
+                    // Also when it fails: the reason is the newest entry.
+                    self.chat.to_end();
+                    if self.send(text, false, &params, &shared) {
+                        self.chat.sent();
+                    }
+                }
+                Some(chat::Event::Cancel) => shared.assistant.lock().unwrap().cancel(),
+                Some(chat::Event::Undo(i)) => self.undo_change(i, &params, &shared),
+                Some(chat::Event::Detach) => shared.assistant.lock().unwrap().attached = None,
                 Some(chat::Event::Listen) => self.listen.start(&shared),
+                Some(chat::Event::StopListen) => self.listen.stop(&shared),
                 Some(chat::Event::CancelListen) => self.listen.cancel(&shared),
                 Some(chat::Event::CycleLength) => {
                     self.listen.seconds = if self.listen.seconds >= 30.0 { 10.0 } else { self.listen.seconds + 10.0 };
@@ -466,6 +488,34 @@ impl Shell {
                 }
                 settings::Message::ScaleDown => self.set_ui_scale(self.settings.ui_scale - user_settings::UI_SCALE_STEP),
                 settings::Message::ScaleUp => self.set_ui_scale(self.settings.ui_scale + user_settings::UI_SCALE_STEP),
+                settings::Message::SetProvider(p) => {
+                    self.settings.ai.provider = p;
+                    self.settings.save();
+                    self.ai_key.clear();
+                    shared.assistant.lock().unwrap().probe(&self.settings.ai);
+                }
+                settings::Message::Ai(field, value) => {
+                    let ai = &mut self.settings.ai;
+                    match field {
+                        settings::Field::Model if ai.provider == user_settings::Provider::Claude => ai.claude_model = value,
+                        settings::Field::Model => ai.api_model = value,
+                        settings::Field::BaseUrl => {
+                            ai.base_url = value;
+                            shared.assistant.lock().unwrap().forget_connection();
+                        }
+                        settings::Field::ClaudeDir => ai.claude_config_dir = value,
+                        settings::Field::Key => {
+                            self.ai_key = value;
+                            return;
+                        }
+                    }
+                    self.settings.save();
+                }
+                settings::Message::Probe => shared.assistant.lock().unwrap().probe(&self.settings.ai),
+                settings::Message::SaveKey => {
+                    let key = std::mem::take(&mut self.ai_key);
+                    shared.assistant.lock().unwrap().save_key(&self.settings.ai, key);
+                }
                 settings::Message::TogglePassive => self.set_passive(!self.passive, ctx, &params, &shared),
                 settings::Message::ClearCaptures => {
                     match captures::clear() {
@@ -479,7 +529,16 @@ impl Shell {
                 passive::Message::Leave => self.set_passive(false, ctx, &params, &shared),
             },
             Message::Empty(msg) => match self.empty.update(msg) {
-                Some(e) => match e {},
+                Some(empty::Event::Build(text)) => {
+                    if self.send(text, true, &params, &shared) {
+                        self.empty = empty::Empty::default();
+                    }
+                    self.open_sheet(Some(Sheet::Chat));
+                }
+                Some(empty::Event::Listen) => {
+                    self.listen.start(&shared);
+                    self.open_sheet(Some(Sheet::Chat));
+                }
                 None => {}
             },
             Message::Dismiss => self.dismiss(),
@@ -547,6 +606,100 @@ impl Shell {
                 }
             }
             Message::DismissError => self.session.error = None,
+        }
+    }
+
+    /// Sends a chat message with the loaded patch (`fresh`: as a new chat). False: nothing was sent.
+    fn send(&mut self, text: String, fresh: bool, params: &FxParams, shared: &Shared) -> bool {
+        let current = self.session.describe(params);
+        shared.assistant.lock().unwrap().send(&self.settings.ai, text, current, fresh)
+    }
+
+    /// The assistant answered: post it, apply its change.
+    fn turn_done(&mut self, done: Result<llm::Outcome, llm::Error>, params: &FxParams, shared: &Shared) {
+        use crate::assistant::{Change, Item};
+        let outcome = match done {
+            Ok(o) => o,
+            Err(e) => {
+                let text = match e {
+                    llm::Error::Cancelled => "Cancelled.".to_string(),
+                    llm::Error::Failed(text) => text,
+                };
+                shared.assistant.lock().unwrap().log.push(Item::Error(text));
+                return;
+            }
+        };
+        let mut items = vec![Item::Reply(outcome.reply)];
+        if let Some(p) = outcome.proposal {
+            let ctx = &self.ctx.nice_context.clone();
+            let root = crate::patches_root();
+            let previous = self.session.current.as_ref().map(|c| c.folder.clone());
+            match self.session.change_files(ctx, params, shared, &p.folder, || p.commit(&root)) {
+                Ok(applied) => {
+                    if applied.is_new {
+                        // A new patch from the chat ends passive mode (it would load behind the card).
+                        if self.passive {
+                            self.passive = false;
+                            *params.passive.write().unwrap() = false;
+                        }
+                        self.session.load(ctx, params, shared, &p.folder, true);
+                        self.reveal_current();
+                        self.set_library(false);
+                    }
+                    self.forget_targets();
+                    items.push(Item::Change(Change { applied, previous, undone: false }));
+                }
+                Err(e) => items.push(Item::Error(format!("Couldn't write the patch: {e}"))),
+            }
+        }
+        shared.assistant.lock().unwrap().log.extend(items);
+    }
+
+    fn undo_change(&mut self, index: usize, params: &FxParams, shared: &Shared) {
+        use crate::assistant::Item;
+        let (applied, previous) = match shared.assistant.lock().unwrap().log.get(index) {
+            Some(Item::Change(c)) if !c.undone => (c.applied.clone(), c.previous.clone()),
+            _ => return,
+        };
+        let ctx = &self.ctx.nice_context.clone();
+        let root = crate::patches_root();
+        let loaded = self.session.current.as_ref().is_some_and(|c| c.folder == applied.folder);
+        let result = if applied.is_new {
+            applied.undo(&root).map(|()| {
+                if loaded {
+                    self.session.unload(ctx, params, shared);
+                    if let Some(folder) = previous {
+                        self.session.load(ctx, params, shared, &folder, true);
+                    }
+                }
+                self.session.reload(ctx, params, shared);
+            })
+        } else {
+            self.session.change_files(ctx, params, shared, &applied.folder, || applied.undo(&root))
+        };
+        self.forget_targets();
+        let mut a = shared.assistant.lock().unwrap();
+        match result {
+            Ok(()) => {
+                if let Some(Item::Change(c)) = a.log.get_mut(index) {
+                    c.undone = true;
+                }
+            }
+            Err(e) => a.log.push(Item::Error(format!("Couldn't undo: {e}"))),
+        }
+    }
+
+    /// The patch changed under the UI: close what points at its params, routes and blocks.
+    fn forget_targets(&mut self) {
+        self.entry = None;
+        self.meta_menu = None;
+        let gone = self.page.as_ref().is_some_and(|id| {
+            self.session.current.as_ref().is_none_or(|c| !c.patch.params.iter().any(|p| p.id.starts_with(&format!("{id}."))))
+        });
+        if gone {
+            self.page = None;
+            self.motion = None;
+            iced_wgpu::postfx::set(None);
         }
     }
 
@@ -955,10 +1108,14 @@ impl Shell {
         self.sheet = s;
         if let Some(s) = s {
             self.shown = s;
+            if s == Sheet::Chat {
+                self.chat.to_end();
+            }
             // The settings sheet reports what the captures folder holds; walking it once per
             // open is cheap, per frame would not be.
             if s == Sheet::Settings {
                 self.captures = captures::usage();
+                self.plugin.shared.assistant.lock().unwrap().probe(&self.settings.ai);
             }
         }
         // Switching between sheets swaps the content; only opening/closing slides.
@@ -1279,6 +1436,9 @@ impl Shell {
             (Sheet::Controls, Some(cur)) => controls::view(&cur.patch, &self.session.values, self.session.hot_reload).map(Message::Controls),
             (Sheet::Controls, None) => return None,
             (Sheet::Settings, _) => settings::view(settings::Props {
+                ai: &self.settings.ai,
+                ai_key: &self.ai_key,
+                ai_connection: self.plugin.shared.assistant.lock().unwrap().connection(),
                 theme: self.settings.theme,
                 ui_scale: self.settings.ui_scale,
                 passive: self.passive,

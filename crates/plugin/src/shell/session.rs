@@ -148,6 +148,63 @@ impl Session {
         self.error = None;
     }
 
+    /// Runs a change to a patch's files (the assistant's commit or undo) and loads the result.
+    /// The project's values stay, except where the change moved a default: there the new default
+    /// applies (the saved value would hide the change).
+    pub fn change_files<T>(
+        &mut self,
+        ctx: &GuiContext,
+        params: &FxParams,
+        shared: &Shared,
+        folder: &str,
+        change: impl FnOnce() -> std::io::Result<T>,
+    ) -> std::io::Result<T> {
+        let dir = patches_root().join(folder);
+        let loaded = self.current.as_ref().is_some_and(|c| c.folder == folder);
+        let old = if loaded { Patch::load(&dir).ok() } else { None };
+        let out = change()?;
+        if loaded {
+            let new = Patch::load(&dir).ok();
+            let macros = old.as_ref().zip(new.as_ref()).map(|(old, new)| carry_over(params, old, new)).unwrap_or_default();
+            self.load(ctx, params, shared, folder, false);
+            let setter = ctx.param_setter();
+            for (i, v) in macros.into_iter().enumerate() {
+                let p = &params.macros[i].value;
+                if p.unmodulated_normalized_value() != v {
+                    setter.begin_set_parameter(p);
+                    setter.set_parameter_normalized(p, v);
+                    setter.end_set_parameter(p);
+                }
+            }
+        }
+        self.library = scan_library(&mut self.new_fonts);
+        Ok(out)
+    }
+
+    /// The loaded patch's folder and values, for the assistant. `None`: no patch, or a folder
+    /// outside the library (the name comes from the project file).
+    pub fn describe(&self, params: &FxParams) -> Option<(String, String)> {
+        let cur = self.current.as_ref()?;
+        let mut parts = Path::new(&cur.folder).components();
+        if !matches!((parts.next(), parts.next()), (Some(std::path::Component::Normal(_)), None)) {
+            return None;
+        }
+        let p = &cur.patch;
+        let mut s = String::from("macros (0..1):\n");
+        for (i, m) in p.macros.iter().enumerate() {
+            s += &format!("- {}: {:.3}\n", m.id, params.macros[i].value.unmodulated_normalized_value());
+        }
+        s += "params (the knob's base value, before modulation):\n";
+        for (spec, v) in p.params.iter().zip(&self.free) {
+            s += &format!("- {}: {}\n", spec.id, spec.display_plain(*v));
+        }
+        let edits = params.mod_edits.read().unwrap();
+        if !edits.is_empty() {
+            s += &format!("the user's routing edits on top of the code: {}\n", serde_json::to_string(&*edits).unwrap_or_default());
+        }
+        Some((cur.folder.clone(), s))
+    }
+
     /// Back to "no patch": passthrough, default slot names.
     pub fn unload(&mut self, ctx: &GuiContext, params: &FxParams, shared: &Shared) {
         params.patch_name.write().unwrap().clear();
@@ -296,6 +353,44 @@ impl Session {
     }
 }
 
+/// Adapts the project's saved values to a changed patch file. Returns the macros' new values:
+/// macros are matched by id, so one that moved to another slot keeps its value.
+fn carry_over(params: &FxParams, old: &Patch, new: &Patch) -> Vec<f32> {
+    let mut stored = params.param_values.write().unwrap();
+    for spec in &new.params {
+        let before = old.param_index(&spec.id).map(|i| old.params[i].default_plain());
+        if before != Some(spec.default_plain()) {
+            stored.insert(spec.id.clone(), spec.default_plain());
+        }
+    }
+    drop(stored);
+
+    let routes = |p: &Patch| -> std::collections::HashMap<String, ModSettings> {
+        (0..p.modulations.len())
+            .flat_map(|i| (0..p.modulations[i].len()).map(move |k| (i, k)))
+            .map(|(i, k)| (p.mod_key(i, k), p.modulations[i][k].patch))
+            .collect()
+    };
+    let (was, is) = (routes(old), routes(new));
+    let changed = |key: &String| is.contains_key(key) && was.get(key) != is.get(key);
+    params.mod_settings.write().unwrap().retain(|key, _| !changed(key));
+    let mut edits = params.mod_edits.write().unwrap();
+    edits.removed.retain(|key| !changed(key));
+    if old.assignments != new.assignments {
+        edits.assignments = None;
+    }
+    if old.modulators != new.modulators {
+        edits.modulators = None;
+    }
+    drop(edits);
+
+    let value = |i: usize| match old.macro_index(&new.macros[i].id) {
+        Some(o) if old.macro_default(o) == new.macro_default(i) => params.macros[o].value.unmodulated_normalized_value(),
+        _ => new.macro_default(i),
+    };
+    (0..new.macros.len()).map(value).collect()
+}
+
 /// All patch folders with what the library shows (name, colours). Evaluates each patch.
 fn scan_library(new_fonts: &mut Vec<Vec<u8>>) -> Vec<PatchInfo> {
     patch::discover(&patches_root())
@@ -357,4 +452,32 @@ fn patch_mtime(dir: &Path) -> Option<SystemTime> {
     let mut newest = None;
     walk(dir, 0, &mut newest);
     newest
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn patch(name: &str, src: &str) -> Patch {
+        let dir = std::env::temp_dir().join(format!("scriptfx-carry-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("init.luau"), src).unwrap();
+        Patch::load(&dir).unwrap()
+    }
+
+    #[test]
+    fn a_changed_default_wins_over_the_saved_value() {
+        let src = |db: i32, freq: i32, d: f32| {
+            format!(
+                "local g = Blocks.Gain.new('g', {{ db = {db} }})\nlocal l = Blocks.LowPass.new('l', {{ freq = {freq} }})\n\
+                 return Patch.new('T', {{ chain = Chain.new({{ g, l }}), macros = {{ Macro.new('m', 'M', {{ default = {d} }}):drives(l.params.q) }} }})"
+            )
+        };
+        let (old, new) = (patch("a", &src(0, 8000, 0.5)), patch("b", &src(-6, 8000, 0.25)));
+        let params = FxParams::default();
+        params.param_values.write().unwrap().extend([("g.db".to_string(), 3.0), ("l.freq".to_string(), 500.0)]);
+        assert_eq!(carry_over(&params, &old, &new), vec![0.25]);
+        let stored = params.param_values.read().unwrap();
+        assert_eq!((stored["g.db"], stored["l.freq"]), (-6.0, 500.0));
+    }
 }

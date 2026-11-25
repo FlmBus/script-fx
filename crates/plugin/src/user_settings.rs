@@ -38,16 +38,90 @@ impl ThemeMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// Who answers in the chat.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum Provider {
+    /// Nothing leaves the machine until the user picks one.
+    #[default]
+    Off,
+    /// The user's installed, logged-in Claude Code.
+    Claude,
+    /// An OpenAI-compatible API; its key is in the OS keychain.
+    Api,
+}
+
+impl Provider {
+    pub const ALL: [Provider; 3] = [Provider::Off, Provider::Claude, Provider::Api];
+
+    fn key(self) -> &'static str {
+        match self {
+            Provider::Off => "off",
+            Provider::Claude => "claude",
+            Provider::Api => "api",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ai {
+    pub provider: Provider,
+    /// Per provider: the names have nothing in common.
+    pub claude_model: String,
+    pub api_model: String,
+    pub base_url: String,
+    /// `CLAUDE_CONFIG_DIR` for hosts that don't have it in their environment. Empty = unset.
+    pub claude_config_dir: String,
+}
+
+impl Default for Ai {
+    fn default() -> Self {
+        Self {
+            provider: Provider::Off,
+            claude_model: String::new(),
+            api_model: String::new(),
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
+            claude_config_dir: String::new(),
+        }
+    }
+}
+
+impl Ai {
+    fn read(map: &Map<String, Value>) -> Self {
+        let d = Self::default();
+        let v = map.get("ai");
+        let get = |k: &str, default: String| v.and_then(|v| v.get(k)).and_then(Value::as_str).map_or(default, String::from);
+        let provider = get("provider", String::new());
+        Self {
+            provider: Provider::ALL.into_iter().find(|p| p.key() == provider).unwrap_or_default(),
+            claude_model: get("claude_model", d.claude_model),
+            api_model: get("api_model", d.api_model),
+            base_url: get("base_url", d.base_url),
+            claude_config_dir: get("claude_config_dir", d.claude_config_dir),
+        }
+    }
+
+    fn write(&self, map: &mut Map<String, Value>) {
+        map.insert("ai".into(), json!({
+            "provider": self.provider.key(),
+            "claude_model": self.claude_model,
+            "api_model": self.api_model,
+            "base_url": self.base_url,
+            "claude_config_dir": self.claude_config_dir,
+        }));
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct UserSettings {
     /// Size of the whole plugin window (1.0 = 1040×640 logical px).
     pub ui_scale: f32,
     pub theme: ThemeMode,
+    pub ai: Ai,
 }
 
 impl Default for UserSettings {
     fn default() -> Self {
-        Self { ui_scale: 1.0, theme: ThemeMode::System }
+        Self { ui_scale: 1.0, theme: ThemeMode::System, ai: Ai::default() }
     }
 }
 
@@ -56,13 +130,14 @@ impl UserSettings {
         let Some(map) = read() else { return Self::default() };
         let ui_scale = map.get("ui_scale").and_then(Value::as_f64).map_or(1.0, |v| snap_ui_scale(v as f32));
         let theme = map.get("theme").and_then(Value::as_str).and_then(ThemeMode::from_key).unwrap_or_default();
-        Self { ui_scale, theme }
+        Self { ui_scale, theme, ai: Ai::read(&map) }
     }
 
     pub fn save(&self) {
         let mut map = read().unwrap_or_default();
         map.insert("ui_scale".into(), json!(self.ui_scale));
         map.insert("theme".into(), json!(self.theme.key()));
+        self.ai.write(&mut map);
         let Some(path) = path() else { return };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -98,7 +173,17 @@ fn read() -> Option<Map<String, Value>> {
 
 #[cfg(test)]
 mod tests {
-    use super::snap_ui_scale;
+    use super::*;
+
+    #[test]
+    fn ai_round_trips() {
+        let ai = Ai { provider: Provider::Api, api_model: "m".into(), ..Default::default() };
+        let mut map = Map::new();
+        assert_eq!(Ai::read(&map), Ai::default());
+        ai.write(&mut map);
+        assert_eq!(Ai::read(&map), ai);
+    }
+
 
     #[test]
     fn ui_scale_snaps_to_steps() {

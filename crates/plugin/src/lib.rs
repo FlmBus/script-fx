@@ -14,6 +14,7 @@ use nice_plug_iced::IcedEditorState;
 use nice_plug_iced::iced::PollSubNotifier;
 use patch::{MACRO_SLOTS, ModEdits, ModSettings, Patch};
 
+mod assistant;
 mod captures;
 mod diag;
 mod listen;
@@ -182,6 +183,8 @@ pub struct Shared {
     pub listen_progress: std::sync::atomic::AtomicUsize,
     /// Audio thread only ever `try_lock`s this (never blocks).
     pub capture: Mutex<CaptureBuf>,
+    /// The chat and its LLM worker. The audio thread never touches it.
+    pub assistant: Mutex<assistant::Assistant>,
 }
 
 impl Shared {
@@ -200,6 +203,22 @@ impl Shared {
 
     pub fn cancel_listen(&self) {
         self.listen_state.store(LISTEN_IDLE, Ordering::Release);
+    }
+
+    /// Ends a running capture early, keeping what was recorded.
+    pub fn finish_listen(&self) {
+        let mut cap = self.capture.lock().unwrap();
+        if cap.len > 0 {
+            // A block the audio thread is just about to record finds the target reached.
+            cap.target = cap.len;
+            self.recording_done();
+        }
+    }
+
+    /// Only from recording: a stop and the audio thread reaching the target can't finish the
+    /// same capture twice.
+    fn recording_done(&self) {
+        let _ = self.listen_state.compare_exchange(LISTEN_RECORDING, LISTEN_DONE, Ordering::AcqRel, Ordering::Relaxed);
     }
 
     /// Takes the finished capture (input, output) and returns to idle.
@@ -244,7 +263,7 @@ impl Shared {
         cap.len += k;
         self.listen_progress.store(cap.len, Ordering::Relaxed);
         if cap.len >= cap.target {
-            self.listen_state.store(LISTEN_DONE, Ordering::Release);
+            self.recording_done();
         }
     }
     /// Compiles the patch's chain and hands it to the audio thread. Non-audio threads only.
@@ -483,6 +502,7 @@ impl Default for ScriptFx {
                 listen_state: std::sync::atomic::AtomicU8::new(LISTEN_IDLE),
                 listen_progress: std::sync::atomic::AtomicUsize::new(0),
                 capture: Mutex::new(CaptureBuf { input: Vec::new(), output: Vec::new(), len: 0, target: 0 }),
+                assistant: Mutex::default(),
             }),
             graph: None,
             graph_rx,
@@ -720,3 +740,25 @@ impl Vst3Plugin for ScriptFx {
 
 nice_export_clap!(ScriptFx);
 nice_export_vst3!(ScriptFx);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stopping_a_listen_keeps_what_was_recorded() {
+        let shared = ScriptFx::default().shared;
+        shared.allocate_capture(48_000.0);
+        shared.start_listen(10.0);
+        shared.finish_listen();
+        assert!(shared.take_capture().is_none(), "nothing recorded yet");
+        let block = [[0.5; 2]; 64];
+        shared.capture_block(&block, &block);
+        shared.capture_block(&block, &block);
+        shared.finish_listen();
+        assert_eq!(shared.take_capture().unwrap().0.len(), 128);
+        shared.capture_block(&block, &block);
+        shared.finish_listen();
+        assert!(shared.take_capture().is_none(), "finished only once");
+    }
+}

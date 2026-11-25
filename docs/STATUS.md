@@ -77,6 +77,12 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
   and fills the window with the passive card; it is saved with the project (`FxParams::passive`).
   The host's track name arrives through `IcedNiceContext::new_track_info()` — no nice-plug patch
   needed — and titles the card.
+- **LLM, layer 1** (2026-11-25, `crates/llm`, `assistant.rs`): chat message + loaded patch +
+  values + attached capture (layer 1 still pastes the full analysis JSON) → reply and a validated patch change (edit or new), at most two repair
+  rounds, Undo. One structured answer instead of tools, the same for both backends. The worker only
+  proposes; the shell commits on the UI thread. An edit keeps the project's values except where a
+  default moved (`Session::change_files`). The chat lives in `Shared`: survives closing the editor,
+  not saved. Verified with the claude CLI in the standalone on Xvfb (edit, create, undo, cancel).
 - **Pointer locking** on X11 was tested; the Windows/macOS implementations now **compile** (the
   CD builds both, 2026-11-23) but have never run.
 - **Diagnostics build** (`--features diagnostics`, `crates/plugin/src/diag.rs`): a log file per
@@ -156,19 +162,12 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
    one folder per capture with a subfolder per track, `index.json`, `captures::read(id, track,
    stream, section)`, retention of the last 20), `analysis::digest()` (one line per stream,
    ~30 tokens), and **passive mode** (see below). **Open:** the instance registry, the selector
-   UI, the synchronised record start, and `get_analysis` itself (needs `crates/llm`).
-8. **LLM integration**: chat → patch generation (layer 1 with an attached capture), then layer-2
-   tools (`get_analysis`, `request_listen`). Validate generated patches with the strict loader and
-   `luau-lsp analyze`; feed errors back. Adapter decision (2026-11-19): own `Backend`/tool layer
-   in a new `crates/llm`, in-process HTTP or an installed CLI (`claude -p`, `codex exec`), ACP
-   later; research, candidates, the Claude subscription/ToS caveat:
-   [`research/llm-adapter.md`](research/llm-adapter.md). Still open: which cheap/free models.
-8. **LLM integration**: chat → patch generation (layer 1 with an attached capture), then layer-2
-   tools (`get_analysis`, `request_listen`). Validate generated patches with the strict loader and
-   `luau-lsp analyze`; feed errors back. Adapter decision (2026-11-19): own `Backend`/tool layer
-   in a new `crates/llm`, in-process HTTP or an installed CLI (`claude -p`, `codex exec`), ACP
-   later; research, candidates, the Claude subscription/ToS caveat:
-   [`research/llm-adapter.md`](research/llm-adapter.md). Still open: which cheap/free models.
+   UI, the synchronised record start, and `get_analysis` itself (layer 2 in `crates/llm`).
+8. **LLM integration, rest** (layer 1 built 2026-11-25, see above): layer-2 tools (`get_analysis`,
+   `request_listen`), streaming replies, saved/shared global chats, a diff view, Codex/ACP
+   ([`research/llm-adapter.md`](research/llm-adapter.md)). Check in a host, with a real API
+   provider (only tested against a fake server) and the keychain on all three platforms.
+   Still open: which cheap/free models.
 
 ## Vision
 
@@ -202,8 +201,8 @@ patches, informed by an analysis of the actual audio on the track (and the mix).
 | **Bind / Source** | what a component reads: `bind` = a Macro/Param object (value, draggable), `source` = a metered block or `Meters.IN/OUT` | `__ref`, `patch::Source` |
 | **Theme** | a patch's design tokens (colours, fonts, images); used by its ControlPanel, library card and macro surface, never by the rest of the shell | `Theme` |
 | **Listen / Capture / Analysis** | the action / recorded audio / analysis result | `listen.rs`, `crates/analysis` |
-| **Passive mode** | an instance with **no patch loaded** (passthrough, controls disabled, a "passive listener" card instead of the views) that exists to be a Listen target. Not built | — |
-| **Chat** | planned global conversation with the LLM, captures as attachments; today one in-memory chat per shell, no LLM | `shell/chat.rs` |
+| **Passive mode** | an instance with **no patch loaded** (passthrough, controls disabled, a "passive listener" card instead of the views) that exists to be a Listen target | `shell/passive.rs` |
+| **Chat** | planned global conversation with the LLM, captures as attachments; today one in-memory chat per instance | `shell/chat.rs`, `assistant.rs`, `crates/llm` |
 
 Avoid: "preset" (ambiguous between patch and snapshot), "editor"/"chrome" (use shell), "panel" alone
 (use ControlPanel, later surface), "slot" alone (host slot, modulation slot, or a container's slot such as a band split's bands), "master mode" (use
@@ -300,6 +299,13 @@ loads only safe data and shows a generic UI. See the research for the threat mod
   knob groups/choices the big blocks need are next steps 3 and 4. **Still to design:** switches
   (bypass, ping-pong), choices (filter type, LFO shape), maybe steppers — and `ms | sync` on block
   times.
+- **Chat: more feedback, rich elements** (Flemming, 2026-11-25; open what exactly). Candidates:
+  steps of a running turn (thinking → checking → repairing, with what failed), a change card (which
+  blocks/macros/values changed, code diff), before/after capture card instead of the table, A/B
+  between the versions, the panel's render as a thumbnail.
+- **Chat as a main view instead of a sheet** (Flemming, 2026-11-25: contemplating). More room; but the
+  sheet keeps the panel in sight. Proposal: a fourth stage view, conversation left, the turn's rich
+  elements right, the dock below stays playable. Mockup first.
 - **Global chats** (decided 2026-11-19): share chats between instances and persist them in the user
   data dir, with one default and optional additional chats. Today each shell has one in-memory
   "Main" chat. Store model auth/config as planned in `research/llm-adapter.md` (keys in the OS

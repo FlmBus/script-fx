@@ -6,12 +6,13 @@
 use nice_plug_iced::iced::{
     Border, Center, Element, Fill, Padding, Theme,
     alignment::Horizontal,
-    widget::{button, column, container, row, scrollable, space, text},
+    widget::{button, column, container, row, pick_list, scrollable, space, text, text_input},
 };
 
 use super::{icons, sheet, tabs, theme};
+use crate::assistant::Connection;
 use crate::captures;
-use crate::user_settings::{self, ThemeMode};
+use crate::user_settings::{self, Ai, Provider, ThemeMode};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -22,9 +23,26 @@ pub enum Message {
     TogglePassive,
     /// Delete every stored capture (audio + analyses).
     ClearCaptures,
+    SetProvider(Provider),
+    Ai(Field, String),
+    /// Enter in a field: check the connection again.
+    Probe,
+    SaveKey,
 }
 
-pub struct Props {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Field {
+    Model,
+    BaseUrl,
+    ClaudeDir,
+    /// Only held until it's saved to the keychain.
+    Key,
+}
+
+pub struct Props<'a> {
+    pub ai: &'a Ai,
+    pub ai_key: &'a str,
+    pub ai_connection: Connection,
     pub theme: ThemeMode,
     /// 1.0 = 100 %.
     pub ui_scale: f32,
@@ -35,7 +53,7 @@ pub struct Props {
     pub captures: captures::Usage,
 }
 
-pub fn view<'a>(p: Props) -> Element<'a, Message> {
+pub fn view<'a>(p: Props<'a>) -> Element<'a, Message> {
     // The newest `KEEP` captures are kept anyway; this is for getting the space back now.
     let captures_hint = format!("{} · the audio of each Listen, kept for the last {}", p.captures.label(), captures::KEEP);
     let passive_hint = if p.passive_available {
@@ -47,6 +65,8 @@ pub fn view<'a>(p: Props) -> Element<'a, Message> {
         sheet::section_title("Appearance · for you, in every project"),
         setting("Theme", "Auto follows your computer's setting", theme_switch(p.theme)),
         setting("Interface size", "resizes the plugin window", scale(p.ui_scale)),
+        space::vertical().height(4),
+        ai(&p),
         space::vertical().height(4),
         sheet::section_title("This instance"),
         setting("Passive listener", passive_hint, passive(&p)),
@@ -62,6 +82,116 @@ pub fn view<'a>(p: Props) -> Element<'a, Message> {
         sheet::divider(),
         scrollable(list).height(Fill).direction(theme::thin_scrollbar()).style(theme::paper_scrollbar),
     ])
+}
+
+/// Who answers in the chat, and its connection.
+fn ai<'a>(p: &Props<'a>) -> Element<'a, Message> {
+    let segments = row(Provider::ALL.into_iter().map(|v| {
+        let label = match v {
+            Provider::Off => "Off",
+            Provider::Claude => "Claude Code",
+            Provider::Api => "API",
+        };
+        button(container(text(label).size(11.5).font(theme::font::PAPER)).center_y(Fill))
+            .on_press(Message::SetProvider(v))
+            .height(24)
+            .padding(Padding { left: 9.0, right: 9.0, ..Padding::ZERO })
+            .style(segment_style(v == p.ai.provider))
+            .into()
+    }))
+    .spacing(2);
+    let hint = match p.ai.provider {
+        Provider::Off => "nothing is sent anywhere",
+        Provider::Claude => "uses your installed Claude Code and its login",
+        Provider::Api => "any OpenAI-compatible API or local server",
+    };
+    let mut list = column![sheet::section_title("AI · for you, in every project"), track(segments.into())].spacing(9);
+    list = list.push(text(hint).size(11).font(theme::font::PAPER).color(theme::c().paper_muted));
+    match p.ai.provider {
+        Provider::Off => return list.into(),
+        Provider::Claude => {
+            list = list
+                .push(model("Model (empty: your default)", &p.ai.claude_model, &p.ai_connection))
+                .push(field("Config folder (empty: default)", &p.ai.claude_config_dir, Field::ClaudeDir));
+        }
+        Provider::Api => {
+            list = list.push(field("Address", &p.ai.base_url, Field::BaseUrl)).push(model("Model", &p.ai.api_model, &p.ai_connection)).push(
+                row![
+                    field("Paste a new key", p.ai_key, Field::Key),
+                    sheet::small(sheet::label(if p.ai_key.is_empty() { "Remove key" } else { "Save key" }), Some(Message::SaveKey)),
+                ]
+                .spacing(6)
+                .align_y(Center),
+            );
+        }
+    }
+    list.push(text(p.ai_connection.status.clone()).size(11).font(theme::font::PAPER).color(theme::c().paper_ink_2))
+        .push(
+            text("Each message sends the chat, the loaded patch, its values and an attached analysis. Never audio.")
+                .size(11)
+                .font(theme::font::PAPER)
+                .color(theme::c().paper_muted),
+        )
+        .into()
+}
+
+/// An entry of the model list.
+#[derive(Clone, PartialEq)]
+struct Choice(llm::Model);
+
+impl std::fmt::Display for Choice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0.name)
+    }
+}
+
+/// The models the provider has; typed by hand while that isn't known.
+fn model<'a>(placeholder: &'a str, value: &'a str, c: &Connection) -> Element<'a, Message> {
+    if c.models.is_empty() {
+        return field(placeholder, value, Field::Model);
+    }
+    let mut choices: Vec<Choice> = c.models.iter().cloned().map(Choice).collect();
+    let mut picked = choices.iter().find(|m| m.0.id == value).cloned();
+    // A saved model the list doesn't have stays picked (and visible).
+    if picked.is_none() && !value.is_empty() {
+        let saved = Choice(llm::Model { id: value.into(), name: format!("{value} (not listed)") });
+        choices.insert(0, saved.clone());
+        picked = Some(saved);
+    }
+    pick_list(choices, picked, |m: Choice| Message::Ai(Field::Model, m.0.id))
+        .placeholder("Pick a model")
+        .width(Fill)
+        .menu_height(200)
+        .text_size(12)
+        .font(theme::font::PAPER)
+        .padding(Padding { top: 6.0, bottom: 6.0, left: 9.0, right: 9.0 })
+        .style(theme::paper_pick_list)
+        .menu_style(theme::paper_menu)
+        .into()
+}
+
+fn field<'a>(placeholder: &'a str, value: &'a str, f: Field) -> Element<'a, Message> {
+    let c = theme::c();
+    text_input(placeholder, value)
+        .on_input(move |s| Message::Ai(f, s))
+        .on_submit(if f == Field::Key { Message::SaveKey } else { Message::Probe })
+        .secure(f == Field::Key)
+        .size(12)
+        .font(theme::font::PAPER)
+        .padding(Padding { top: 6.0, bottom: 6.0, left: 9.0, right: 9.0 })
+        .style(move |_: &Theme, status| text_input::Style {
+            background: c.paper_raised.into(),
+            border: Border {
+                radius: theme::radius(theme::RADIUS_BUTTON),
+                width: 1.0,
+                color: if matches!(status, text_input::Status::Focused { .. }) { c.paper_muted } else { c.paper_line },
+            },
+            icon: c.paper_muted,
+            placeholder: c.paper_muted,
+            value: c.paper_ink,
+            selection: theme::alpha(c.signal, 0.3),
+        })
+        .into()
 }
 
 /// Name and hint on the left, the control on the right. The hint may be owned (built per view).
@@ -199,7 +329,7 @@ fn clear_captures<'a>(p: &Props) -> Element<'a, Message> {
 }
 
 /// A pill switch; disabled (dimmed knob, no press) while passive mode isn't built.
-fn passive<'a>(p: &Props) -> Element<'a, Message> {
+fn passive<'a>(p: &Props<'_>) -> Element<'a, Message> {
     let on = p.passive && p.passive_available;
     let c = theme::c();
     let knob_color = if !p.passive_available { theme::alpha(c.paper_muted, 0.6) } else if on { c.on_paper_ink } else { c.paper_ink };
