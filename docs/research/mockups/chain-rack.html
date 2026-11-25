@@ -1,0 +1,279 @@
+<!doctype html>
+<!-- Rough sketch: the chain top to bottom; blocks are big cards, splits are NOT cards but their own
+     element (a prism that fans out into lanes, a divider, or a tab row). Lanes are tinted columns.
+     Not a design; a playground for the idea. Open in a browser, no build. -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Chain sketch · rack, splits as their own element</title>
+<style>
+  body { font: 13px system-ui, sans-serif; margin: 16px; background: #fafafa; color: #222; }
+  .bar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  .bar button.on { font-weight: bold; }
+  .notes { max-width: 816px; color: #555; line-height: 1.5; }
+
+  #stage { width: var(--w, 816px); height: 480px; overflow-y: auto; border: 1px dashed #bbb;
+           background: #fff; padding: 14px; box-sizing: border-box; }
+  #stage.tall { height: auto; }
+
+  .chain { display: flex; flex-direction: column; gap: 8px; min-width: 0; flex: 1; }
+  .io { font-size: 11px; color: #999; text-align: center; letter-spacing: .1em; }
+
+  /* blocks: big, centred, no controls */
+  .card { border: 1px solid #d4d4d8; border-radius: 10px; background: #fff; min-height: var(--ch, 64px);
+          display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+          min-width: 0; padding: 0 8px; box-shadow: 0 1px 2px #0001; cursor: pointer; }
+  .card .name { font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .card .type { font-size: 11px; color: #a1a1aa; }
+  .card:hover { border-color: #888; }
+
+  /* lanes: tinted columns, no box */
+  .cols { display: grid; gap: 10px; }
+  .lane { display: flex; flex-direction: column; gap: 8px; min-width: 0; position: relative; }
+  .tint .lane { background: color-mix(in srgb, var(--c) 7%, transparent); border-radius: 12px; padding: 8px; }
+  .lane > .label { font-size: 11px; font-weight: 700; color: var(--c); text-align: center; white-space: nowrap;
+                   overflow: hidden; text-overflow: ellipsis; }
+  /* a lane with fewer blocks than its neighbours: a rail continues to the bottom */
+  .lane > .chain::after { content: ''; flex: 1; min-height: 0; align-self: center; width: 0;
+                          border-left: 2px dashed color-mix(in srgb, var(--c) 45%, transparent); }
+  .rails-off .lane > .chain::after { display: none; }
+  .thru { min-height: var(--ch, 64px); display: flex; align-items: center; justify-content: center;
+          font-size: 11px; color: var(--c); opacity: .7; }
+
+  /* split element: prism */
+  .pill { margin: 0 auto; width: var(--pw); min-width: 0; max-width: 100%; box-sizing: border-box;
+          border-radius: 999px; padding: 5px 14px; background: #18181b; color: #fff; font-size: 12px;
+          display: flex; gap: 8px; align-items: center; justify-content: center; cursor: pointer; white-space: nowrap; overflow: hidden; }
+  .pill .glyph { font-weight: 700; }
+  .pill .sum { opacity: .65; overflow: hidden; text-overflow: ellipsis; }
+  .pill.merge { background: #e4e4e7; color: #3f3f46; padding: 3px 12px; font-size: 11px; }
+  svg.fan { display: block; width: 100%; height: 26px; }
+
+  /* split element: divider */
+  .rule { display: flex; align-items: center; gap: 10px; font-size: 12px; color: #52525b; cursor: pointer; }
+  .rule::before, .rule::after { content: ''; flex: 1; height: 2px; background: #d4d4d8; }
+  .rule .glyph { font-weight: 700; }
+  .rule .sum { color: #a1a1aa; }
+
+  /* split element: tab row (the lane labels are the split) */
+  .tabs { display: grid; gap: 2px; border-radius: 10px; overflow: hidden; cursor: pointer; }
+  .tabs > div { background: var(--c); color: #fff; font-size: 11px; font-weight: 700; text-align: center;
+                padding: 5px 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tabs > .kind { background: #18181b; }
+  .tabfoot { height: 6px; border-radius: 0 0 10px 10px; background: linear-gradient(90deg, var(--g)); opacity: .5; }
+
+  .stripes { display: inline-flex; gap: 2px; }
+  .stripes i { display: block; width: 12px; height: 4px; border-radius: 2px; }
+
+  .group { border-left: 3px solid #a1a1aa; padding-left: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .group > .ghead { font-size: 12px; color: #71717a; font-weight: 600; cursor: pointer; }
+</style>
+</head>
+<body>
+
+<div class="bar"><b>Patch:</b> <span id="presets"></span></div>
+<div class="bar">
+  <b>Split style:</b>
+  <label><input type="radio" name="style" value="prism" checked> prism (pill fans out, funnels back)</label>
+  <label><input type="radio" name="style" value="rule"> divider</label>
+  <label><input type="radio" name="style" value="tabs"> tab row</label>
+</div>
+<div class="bar">
+  <label><input type="checkbox" id="tint" checked> tinted lanes</label>
+  <label><input type="checkbox" id="rails" checked> rails in short lanes</label>
+  <label><input type="checkbox" id="lowLeft" checked> band split: low on the left</label>
+  <label><input type="checkbox" id="tall"> full height (no scroll)</label>
+  <label>card height <select id="ch"><option>48</option><option selected>64</option><option>80</option></select></label>
+  <label>stage width <select id="width"><option>640</option><option selected>816</option><option>1024</option></select></label>
+</div>
+
+<div id="stage"></div>
+
+<div class="notes">
+  <p><b>Try:</b> click a split (pill / divider / tab row) to collapse it into one line, click again to
+  open it · switch the split style · "full height" shows how tall the patch really is.</p>
+</div>
+
+<script>
+// ---------- model (the tree) ----------
+const B = (name, type = '') => ({ t: 'block', name, type });
+const Y = (wet, dry, mix = 0.5) => ({ t: 'split', kind: 'y', name: 'Parallel', mix,
+  lanes: [{ label: 'wet', chain: wet }, { label: 'dry', chain: dry }] });
+const BAND = (xo, lanes) => ({ t: 'split', kind: 'band', name: 'Band split', xo, // lanes high → low
+  lanes: lanes.map(chain => ({ chain })) });
+const MS = (mid, side) => ({ t: 'split', kind: 'ms', name: 'Mid / Side',
+  lanes: [{ label: 'Mid', chain: mid }, { label: 'Side', chain: side }] });
+const LR = (l, r) => ({ t: 'split', kind: 'lr', name: 'Left / Right',
+  lanes: [{ label: 'Left', chain: l }, { label: 'Right', chain: r }] });
+const G = (name, chain) => ({ t: 'group', name, chain });
+
+const PRESETS = {
+  'Kitchen sink': () => [B('Gate', 'gate'),
+    MS([B('Comp', 'compressor'), BAND([4000], [[B('Saturate', 'saturator')], []])],
+       [B('Width', 'stereo'), Y([B('Chorus', 'chorus')], [B('EQ', 'eq')], 0.6)]),
+    LR([B('Delay ¼', 'delay')], [B('Delay ⅜', 'delay')]),
+    BAND([5000, 800, 150], [[B('De-ess', 'de-esser')], [], [B('Drive', 'saturator'), B('Tilt', 'eq')], [B('Comp', 'compressor'), B('Mono', 'stereo')]]),
+    B('Limiter', 'limiter')],
+  'Parallel comp': () => [B('Gate', 'gate'), B('Comp', 'compressor'), Y([B('Smash', 'compressor'), B('Saturate', 'saturator')], [], 0.35), B('EQ', 'eq'), B('Limiter', 'limiter')],
+  'Band split + nested': () => [B('Input', 'gain'),
+    BAND([3000, 200], [[B('Exciter', 'exciter')], [Y([B('Drive', 'saturator'), B('Cab', 'cabinet')], [])], [B('Comp', 'compressor')]]),
+    B('Echo', 'delay'), B('Reverb', 'reverb')],
+};
+let presetName = 'Kitchen sink';
+let chain = PRESETS[presetName]();
+
+// ---------- helpers ----------
+const LANE_COL = { band: ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444'], y: ['#a855f7', '#71717a'],
+  ms: ['#0ea5e9', '#ec4899'], lr: ['#14b8a6', '#eab308'] };
+const laneColor = (n, idx) => { // idx in n.lanes; bands are stored high → low, colours go low → high
+  const cols = LANE_COL[n.kind], i = n.kind === 'band' ? n.lanes.length - 1 - idx : idx;
+  return cols[i % cols.length];
+};
+const GLYPH = { y: 'Y', band: '≈', ms: 'M/S', lr: 'L/R' };
+const hz = (f) => f >= 1000 ? `${+(f / 1000).toFixed(1)}k` : `${Math.round(f)}`;
+const el = (tag, cls, html = '') => { const e = document.createElement(tag); if (cls) e.className = cls; e.innerHTML = html; return e; };
+const style = () => document.querySelector('input[name=style]:checked').value;
+function bandLabel(n, i) {
+  const hi = n.xo[i - 1], lo = n.xo[i];
+  if (i === 0) return `> ${hz(lo)}`;
+  if (i === n.lanes.length - 1) return `< ${hz(hi)}`;
+  return `${hz(lo)} – ${hz(hi)}`;
+}
+const laneLabel = (n, idx) => n.kind === 'band' ? bandLabel(n, idx) : n.lanes[idx].label;
+const summary = (n) => n.kind === 'band' ? [...n.xo].reverse().map(hz).join(' · ')
+  : n.kind === 'y' ? `mix ${Math.round(n.mix * 100)}%` : '';
+const shown = (n) => n.kind === 'band' && lowLeft.checked ? [...n.lanes].reverse() : n.lanes;
+const stripes = (n) => `<span class="stripes">${shown(n).map(l => `<i style="background:${laneColor(n, n.lanes.indexOf(l))}"></i>`).join('')}</span>`;
+
+// ---------- rendering ----------
+let fans = []; // svg fans to lay out once the DOM has sizes
+
+function renderChain(c) {
+  const box = el('div', 'chain');
+  for (const n of c) box.append(...renderNode(n));
+  return box;
+}
+
+function renderNode(n) {
+  if (n.t === 'block') return [el('div', 'card', `<span class="name">${n.name}</span><span class="type">${n.type}</span>`)];
+  if (n.t === 'group') {
+    const g = el('div', 'group');
+    const h = el('div', 'ghead', `${n.collapsed ? '▸' : '▾'} ${n.name}`);
+    h.onclick = () => { n.collapsed = !n.collapsed; render(); };
+    g.append(h); if (!n.collapsed) g.append(renderChain(n.chain));
+    return [g];
+  }
+  const toggle = (e) => { e.onclick = () => { n.collapsed = !n.collapsed; render(); }; return e; };
+  const lanes = shown(n);
+  const s = style();
+
+  // the opening element
+  let open;
+  if (s === 'prism') {
+    open = toggle(el('div', 'pill', `<span class="glyph">${GLYPH[n.kind]}</span><span>${n.name}</span><span class="sum">${summary(n)}</span>${n.collapsed ? stripes(n) : ''}`));
+    open.style.setProperty('--pw', '44%');
+  } else if (s === 'rule') {
+    open = toggle(el('div', 'rule', `<span class="glyph">${GLYPH[n.kind]}</span><span>${n.name}</span><span class="sum">${summary(n)}</span>${n.collapsed ? stripes(n) : ''}`));
+  } else {
+    open = toggle(el('div', 'tabs'));
+    open.style.gridTemplateColumns = n.collapsed ? 'auto 1fr' : `repeat(${lanes.length}, minmax(0, 1fr))`;
+    if (n.collapsed) {
+      open.append(el('div', 'kind', `${GLYPH[n.kind]} ${n.name}`), el('div', '', `${summary(n)} ${stripes(n)}`));
+      open.lastChild.style.setProperty('--c', '#52525b');
+    } else lanes.forEach(l => {
+      const i = n.lanes.indexOf(l);
+      const t = el('div', '', lanes.indexOf(l) === 0 ? `${GLYPH[n.kind]}  ${laneLabel(n, i)}` : laneLabel(n, i));
+      t.style.setProperty('--c', laneColor(n, i));
+      open.append(t);
+    });
+  }
+  if (n.collapsed) return [open];
+
+  // lanes
+  const cols = el('div', 'cols');
+  cols.style.gridTemplateColumns = `repeat(${lanes.length}, minmax(0, 1fr))`;
+  for (const l of lanes) {
+    const i = n.lanes.indexOf(l);
+    const lane = el('div', 'lane');
+    lane.style.setProperty('--c', laneColor(n, i));
+    if (s !== 'tabs') lane.append(el('div', 'label', laneLabel(n, i)));
+    const c = renderChain(l.chain);
+    if (!l.chain.length) c.prepend(el('div', 'thru', 'thru'));
+    lane.append(c);
+    cols.append(lane);
+  }
+
+  const out = [];
+  if (s === 'prism') {
+    const fanIn = el('div'); fanIn.innerHTML = '<svg class="fan"></svg>';
+    const fanOut = el('div'); fanOut.innerHTML = '<svg class="fan"></svg>';
+    const merge = el('div', 'pill merge', n.kind === 'y' ? `mix ${Math.round(n.mix * 100)}%` : 'sum');
+    merge.style.setProperty('--pw', n.kind === 'y' ? '22%' : '12%');
+    fans.push({ svg: fanIn.firstChild, pill: open, cols, n, lanes, down: true });
+    fans.push({ svg: fanOut.firstChild, pill: merge, cols, n, lanes, down: false });
+    // glue the pieces together: no gap between pill, fan and lanes
+    const wrap = el('div'); wrap.style.cssText = 'display:flex;flex-direction:column;min-width:0';
+    wrap.append(open, fanIn, cols, fanOut, merge);
+    out.push(wrap);
+  } else if (s === 'rule') {
+    const close = el('div', '');
+    close.style.cssText = 'height:2px;background:#d4d4d8';
+    out.push(open, cols, close);
+  } else {
+    const foot = el('div', 'tabfoot');
+    foot.style.setProperty('--g', lanes.map(l => laneColor(n, n.lanes.indexOf(l))).join(', '));
+    const wrap = el('div'); wrap.style.cssText = 'display:flex;flex-direction:column;gap:6px;min-width:0';
+    wrap.append(open, cols, foot);
+    out.push(wrap);
+  }
+  return out;
+}
+
+// prism fans: from the pill's width out to each column (or back in to the merge pill)
+function layoutFans() {
+  for (const f of fans) {
+    const W = f.svg.clientWidth, H = 26;
+    if (!W) continue;
+    f.svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    const pw = f.pill.getBoundingClientRect().width, p0 = (W - pw) / 2;
+    const gap = 10, n = f.lanes.length, cw = (W - gap * (n - 1)) / n;
+    let d = '';
+    f.lanes.forEach((l, k) => {
+      const t0 = p0 + pw * k / n + 1, t1 = p0 + pw * (k + 1) / n - 1;   // on the pill
+      const b0 = k * (cw + gap) + 6, b1 = b0 + cw - 12;                  // on the column
+      const [ya, yb, a0, a1, z0, z1] = f.down ? [0, H, t0, t1, b0, b1] : [0, H, b0, b1, t0, t1];
+      const m = H / 2;
+      d += `<path d="M${a0},${ya} L${a1},${ya} C${a1},${m} ${z1},${m} ${z1},${yb} L${z0},${yb} C${z0},${m} ${a0},${m} ${a0},${ya} Z"`
+        + ` fill="${laneColor(f.n, f.n.lanes.indexOf(l))}" fill-opacity="0.28"/>`;
+    });
+    f.svg.innerHTML = d;
+  }
+}
+
+function render() {
+  fans = [];
+  stage.classList.toggle('tall', tall.checked);
+  stage.classList.toggle('tint', tint.checked);
+  stage.classList.toggle('rails-off', !rails.checked);
+  stage.style.setProperty('--w', width.value + 'px');
+  stage.style.setProperty('--ch', ch.value + 'px');
+  stage.innerHTML = '';
+  stage.append(el('div', 'io', 'IN'), renderChain(chain), el('div', 'io', 'OUT'));
+  stage.children[1].style.margin = '8px 0';
+  requestAnimationFrame(layoutFans);
+}
+
+for (const name of Object.keys(PRESETS)) {
+  const b = el('button', name === presetName ? 'on' : '', name);
+  b.onclick = () => {
+    presetName = name; chain = PRESETS[name]();
+    document.querySelectorAll('#presets button').forEach(x => x.classList.toggle('on', x === b));
+    render();
+  };
+  presets.append(b);
+}
+document.querySelectorAll('input, select').forEach(i => i.addEventListener('change', render));
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,427 @@
+<!doctype html>
+<!-- Rough sketch: splits as forks in the signal line ("metro map") instead of nested cards,
+     and four ways to handle chains wider than the stage.
+     Not a design; a playground for the idea. Open in a browser, no build. -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Chain sketch · metro splits</title>
+<style>
+  body { font: 13px system-ui, sans-serif; margin: 16px; background: #fafafa; color: #222; }
+  .bar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  .bar button.on { font-weight: bold; }
+  svg { background: #fff; border: 1px solid #ccc; display: block; user-select: none; }
+  text { font: 11px system-ui, sans-serif; }
+  .notes { max-width: 816px; color: #555; line-height: 1.5; }
+  .hit { cursor: pointer; }
+  .drag { cursor: ns-resize; }
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <b>Patch:</b>
+  <span id="presets"></span>
+</div>
+<div class="bar">
+  <b>Wide chains:</b>
+  <label><input type="radio" name="mode" value="scale"> 1 · scale to fit</label>
+  <label><input type="radio" name="mode" value="wrap"> 2 · wrap rows (connectors)</label>
+  <label><input type="radio" name="mode" value="collapse"> 3 · wrap + auto-collapse (unfold in place)</label>
+  <label><input type="radio" name="mode" value="zoom" checked> 4 · wrap + auto-collapse + zoom into splits</label>
+</div>
+<div class="bar">
+  <b>Wires:</b>
+  <label><input type="radio" name="wire" value="curve" checked> curves</label>
+  <label><input type="radio" name="wire" value="bus"> bus (right angles)</label>
+  <label><input type="radio" name="wire" value="diag"> straight diagonals</label>
+  <span>|</span>
+  <label><input type="checkbox" id="live" checked> live levels</label>
+  <label><input type="checkbox" id="mixw" checked> mix → line weight</label>
+  <label><input type="checkbox" id="labels" checked> lane labels</label>
+  <label><input type="checkbox" id="lowTop"> band split: low on top</label>
+  <label><input type="checkbox" id="align"> align columns across lanes</label>
+</div>
+
+<!-- the dashed frame is the 816 × 480 stage; content scales down to fit if it is bigger -->
+<svg id="svg" width="840" height="520"></svg>
+
+<div class="notes">
+  <p><b>Try:</b> the "Very long (3×)" patch with each "wide chains" mode ·
+  click a split glyph to collapse it into a stack · click a stack to unfold it (mode 4: zoom into it,
+  "‹ back" at the top left leads out) · drag a crossover pill up/down · scroll on a merge dot (●) to
+  change a Y split's mix.</p>
+  <p><b>Glyphs:</b> Y = parallel · ≈ = band split · M/S · L/R · G = group (a named series
+  sub-chain: one lane, no split). ①②… = the wire continues on the next row. Rows break only between
+  top-level nodes, never inside a split.</p>
+</div>
+
+<script>
+// ---------- model (same shape as the tree: blocks + splits with lanes) ----------
+const B = (name) => ({ t: 'block', name });
+const Y = (wet, dry, mix = 0.5) => ({ t: 'split', kind: 'y', name: 'Parallel', mix,
+  lanes: [{ label: 'wet', chain: wet }, { label: 'dry', chain: dry }] });
+const BAND = (xo, lanes) => ({ t: 'split', kind: 'band', name: 'Band split', xo, // lanes high → low
+  lanes: lanes.map(chain => ({ chain })) });
+const MS = (mid, side) => ({ t: 'split', kind: 'ms', name: 'Mid/Side',
+  lanes: [{ label: 'M', chain: mid }, { label: 'S', chain: side }] });
+const LR = (l, r) => ({ t: 'split', kind: 'lr', name: 'Left/Right',
+  lanes: [{ label: 'L', chain: l }, { label: 'R', chain: r }] });
+const G = (name, chain) => ({ t: 'split', kind: 'group', name, lanes: [{ label: name, chain }] });
+
+const PRESETS = {
+  'Parallel comp': () => [B('Gate'), B('Comp'), Y([B('Smash'), B('Saturate')], [], 0.35), B('EQ'), B('Limiter')],
+  'Band split + nested': () => [B('Input'),
+    BAND([3000, 200], [[B('Exciter')], [Y([B('Drive'), B('Cab')], [])], [B('Comp')]]),
+    B('Echo'), B('Reverb')],
+  'Deep (kitchen sink)': () => [B('Gate'),
+    MS([B('Comp'), BAND([4000], [[B('Saturate')], []])],
+       [B('Width'), Y([B('Chorus')], [B('EQ')], 0.6)]),
+    LR([B('Delay ¼')], [B('Delay ⅜')]),
+    BAND([5000, 800, 150], [[B('De-ess')], [], [B('Drive'), B('Tilt')], [B('Comp'), B('Mono')]]),
+    B('Limiter')],
+  'Very long (3×)': () => [B('Gate'),
+    G('Pre', [B('HPF'), B('Comp'), B('De-ess')]),
+    B('EQ'),
+    Y([B('Smash'), B('Saturate')], [], 0.3),
+    G('Amp', [B('Drive'), B('Tone'), B('Cab')]),
+    BAND([3000, 200], [[B('Exciter'), B('Width')],
+      [Y([B('Drive'), B('Tilt'), B('Comp'), B('Sat')], []), B('Chorus'), B('Phaser')],
+      [B('Comp'), B('Mono')]]),
+    B('Echo'),
+    Y([B('Reverb'), B('EQ')], [], 0.25),
+    MS([B('Comp')], [B('Width')]),
+    B('Tape'), B('Limiter'), B('Meter')],
+};
+let presetName = 'Very long (3×)';
+let chain = PRESETS[presetName]();
+
+// ---------- options ----------
+const opt = () => ({
+  mode: document.querySelector('input[name=mode]:checked').value,
+  wire: document.querySelector('input[name=wire]:checked').value,
+  live: live.checked, mixw: mixw.checked, labels: labels.checked,
+  lowTop: lowTop.checked, align: align.checked,
+});
+
+// ---------- collapse state ----------
+// n.collapsed: the user collapsed it (glyph click). n.open: the user unfolded it (overrides auto).
+// auto: collapsed by the layout because it didn't fit. forced: the split we zoomed into.
+let auto = new Set(), forced = null;
+let focus = [];       // mode 4: stack of splits we zoomed into
+let zoomAt = -1e9;    // time of the last zoom, for the little zoom-in animation
+const isCollapsed = (n) => n.t === 'split' && n !== forced && !n.open && (n.collapsed || auto.has(n));
+
+// ---------- layout ----------
+const COL = 96, ROW = 54, FORK = 46, MERGE = 46, BW = 74, BH = 24, EMPTY = 60;
+const lanesShown = (s, o) => (s.kind === 'band' && o.lowTop) ? [...s.lanes].reverse() : s.lanes;
+
+function measureChain(c, o) {
+  let w = 0, h = ROW;
+  for (const n of c) { const m = measure(n, o); w += m.w; h = Math.max(h, m.h); }
+  return { w: Math.max(w, EMPTY), h };
+}
+function measure(n, o) {
+  if (n.t === 'block' || isCollapsed(n)) return { w: COL, h: ROW };
+  const ms = n.lanes.map(l => measureChain(l.chain, o));
+  let inner = Math.max(...ms.map(m => m.w));
+  if (o.align) inner = Math.ceil(inner / COL) * COL; // snap to whole columns
+  return { w: FORK + inner + MERGE, h: ms.reduce((a, m) => a + m.h, 0), ms, inner };
+}
+
+function splitsIn(n, acc = []) {
+  if (n.t !== 'split') return acc;
+  for (const l of n.lanes) for (const c of l.chain) { if (c.t === 'split') { acc.push(c); splitsIn(c, acc); } }
+  return acc;
+}
+// Collapse splits inside n until it fits `cap`: each step takes the split whose collapse narrows
+// n the most; if nothing inside helps, n itself becomes a stack.
+function autoCollapse(n, cap, o) {
+  while (measure(n, o).w > cap) {
+    const now = measure(n, o).w;
+    let best = null, bestW = now;
+    for (const c of splitsIn(n)) {
+      if (isCollapsed(c) || c.open) continue;
+      auto.add(c); const w = measure(n, o).w; auto.delete(c);
+      if (w < bestW) { best = c; bestW = w; }
+    }
+    if (best) auto.add(best);
+    else { if (n.t === 'split' && n !== forced && !n.open) auto.add(n); return; }
+  }
+}
+
+// greedy rows; a node wider than a row gets a row of its own (and overflows)
+function wrapRows(c, cap, o) {
+  const rows = []; let cur = [], w = 0;
+  for (const n of c) {
+    const mw = measure(n, o).w;
+    if (cur.length && w + mw > cap) { rows.push(cur); cur = []; w = 0; }
+    cur.push(n); w += mw;
+  }
+  if (cur.length) rows.push(cur);
+  return rows;
+}
+
+// prev/next sibling of a node in the tree (context shown when zoomed in)
+function siblings(c, node) {
+  const i = c.indexOf(node);
+  if (i >= 0) return { prev: c[i - 1], next: c[i + 1], found: true };
+  for (const n of c) if (n.t === 'split') for (const l of n.lanes) {
+    const r = siblings(l.chain, node);
+    if (r.found) return { prev: r.prev ?? { name: n.name + ' in' }, next: r.next ?? { name: n.name + ' out' }, found: true };
+  }
+  return { found: false };
+}
+
+// ---------- drawing ----------
+let out, hot; // svg strings, interactive handles
+const LANE_COL = { band: ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444'], y: ['#a855f7', '#999'],
+  ms: ['#0ea5e9', '#f472b6'], lr: ['#14b8a6', '#eab308'], group: ['#64748b'] };
+const GLYPH = { y: 'Y', band: '≈', ms: 'M/S', lr: 'L/R', group: 'G' };
+const t0 = performance.now();
+let forkX = NaN;
+
+function wire(x0, y0, x1, y1, o) {
+  if (Math.abs(y1 - y0) < 0.5) return `M${x0},${y0} H${x1}`;
+  if (o.wire === 'curve') { const m = (x0 + x1) / 2; return `M${x0},${y0} C${m},${y0} ${m},${y1} ${x1},${y1}`; }
+  if (o.wire === 'diag') return `M${x0},${y0} L${x1},${y1}`;
+  // bus: vertical at the fork/merge point, rounded corner
+  const r = Math.min(8, Math.abs(y1 - y0)), s = Math.sign(y1 - y0);
+  if (Math.abs(x0 - forkX) < 0.5) return `M${x0},${y0} V${y1 - s * r} Q${x0},${y1} ${x0 + r},${y1} H${x1}`;
+  return `M${x0},${y0} H${x1 - r} Q${x1},${y0} ${x1},${y0 + s * r} V${y1}`;
+}
+
+function stroke(level, color) {
+  return `stroke="${color}" stroke-width="${(1 + 4 * level).toFixed(2)}" stroke-opacity="${(0.35 + 0.65 * Math.min(1, level)).toFixed(2)}" fill="none"`;
+}
+
+// fake signal level per lane: slow wobble, a different speed per lane
+function liveLevel(id, o) {
+  if (!o.live) return 1;
+  const t = (performance.now() - t0) / 1000;
+  return 0.55 + 0.45 * Math.abs(Math.sin(t * (0.7 + (id % 7) * 0.37) + id));
+}
+
+let laneId = 0;
+function drawChain(c, x, cy, width, level, color, o) {
+  let cx = x;
+  for (const n of c) {
+    const m = measure(n, o);
+    if (n.t === 'block') drawBlock(n, cx, cy, level, color);
+    else if (isCollapsed(n)) drawStack(n, cx, cy, level, color, o);
+    else drawSplit(n, m, cx, cy, level, color, o);
+    cx += m.w;
+  }
+  if (cx < x + width) out.push(`<path d="M${cx},${cy} H${x + width}" ${stroke(level, color)}/>`);
+}
+
+function drawBlock(n, x, cy, level, color) {
+  out.push(`<path d="M${x},${cy} H${x + COL}" ${stroke(level, color)}/>`);
+  const bx = x + (COL - BW) / 2;
+  out.push(`<rect x="${bx}" y="${cy - BH / 2}" width="${BW}" height="${BH}" rx="5" fill="#fff" stroke="#444"/>`);
+  out.push(`<text x="${x + COL / 2}" y="${cy + 4}" text-anchor="middle">${n.name}</text>`);
+}
+
+function drawStack(n, x, cy, level, color, o) {
+  out.push(`<path d="M${x},${cy} H${x + COL}" ${stroke(level, color)}/>`);
+  const bx = x + (COL - BW) / 2, cols = LANE_COL[n.kind];
+  const id = hot.push(() => {
+    if (o.mode === 'zoom') { focus.push(n); zoomAt = performance.now(); }
+    else { n.collapsed = false; n.open = true; }
+  }) - 1;
+  const dashed = auto.has(n) && !n.collapsed ? ' stroke-dasharray="4 3"' : ''; // auto-collapsed
+  out.push(`<g class="hit" data-click="${id}"><rect x="${bx}" y="${cy - BH / 2 - 4}" width="${BW}" height="${BH + 8}" rx="5" fill="#f4f4f5" stroke="#444"${dashed}/>`);
+  n.lanes.forEach((_, i) => out.push(`<rect x="${bx + 6}" y="${cy - BH / 2 + i * 5}" width="10" height="3" fill="${cols[i % cols.length]}"/>`));
+  const what = n.kind === 'band' ? `${n.lanes.length} bands` : n.kind === 'group' ? n.name : GLYPH[n.kind];
+  out.push(`<text x="${bx + 22}" y="${cy + 4}">${what} ${o.mode === 'zoom' ? '⤢' : '▸'}</text></g>`);
+}
+
+function drawSplit(n, m, x, cy, level, color, o) {
+  const lanes = lanesShown(n, o), ms = (n.kind === 'band' && o.lowTop) ? [...m.ms].reverse() : m.ms;
+  const top = cy - m.h / 2, fx = x + 10, mx = x + m.w - 10;
+  const cols = LANE_COL[n.kind];
+  out.push(`<path d="M${x},${cy} H${fx}" ${stroke(level, color)}/>`);
+  out.push(`<path d="M${mx},${cy} H${x + m.w}" ${stroke(level, color)}/>`);
+  let acc = 0;
+  lanes.forEach((lane, i) => {
+    const lc = top + acc + ms[i].h / 2;
+    const idx = n.lanes.indexOf(lane);
+    const col = cols[idx % cols.length];
+    let lv = level * (n.kind === 'group' ? 1 : liveLevel(++laneId, o));
+    if (n.kind === 'y' && o.mixw) lv *= 0.25 + 1.5 * (idx === 0 ? n.mix : 1 - n.mix);
+    forkX = fx;
+    out.push(`<path d="${wire(fx, cy, x + FORK, lc, o)}" ${stroke(lv, col)}/>`);
+    drawChain(lane.chain, x + FORK, lc, m.inner, lv, col, o);
+    forkX = NaN;
+    out.push(`<path d="${wire(x + FORK + m.inner, lc, mx, cy, o)}" ${stroke(lv, col)}/>`);
+    if (o.labels || n.kind === 'group') {
+      const label = n.kind === 'band' ? bandLabel(n, idx) : lane.label;
+      out.push(`<text x="${x + FORK + 2}" y="${lc - BH / 2 - 4}" fill="${col}">${label}</text>`);
+    }
+    // crossover handle in the gap below this lane
+    if (n.kind === 'band' && i < lanes.length - 1) {
+      const gy = top + acc + ms[i].h;
+      const xi = o.lowTop ? idx - 1 : idx; // which crossover sits between these two lanes
+      const id = hot.push({ drag: n, xi }) - 1;
+      out.push(`<g class="drag" data-drag="${id}"><line x1="${x + FORK}" x2="${x + FORK + m.inner}" y1="${gy}" y2="${gy}" stroke="#bbb" stroke-dasharray="3 4"/>`
+        + `<rect x="${x + FORK + m.inner - 54}" y="${gy - 8}" width="54" height="16" fill="#fff" stroke="#bbb" rx="8"/>`
+        + `<text x="${x + FORK + m.inner - 27}" y="${gy + 4}" text-anchor="middle">${hz(n.xo[xi])}</text></g>`);
+    }
+    acc += ms[i].h;
+  });
+  if (n.kind === 'group') { // a light bracket instead of fork/merge dots
+    out.push(`<rect x="${x + 4}" y="${top + 4}" width="${m.w - 8}" height="${m.h - 8}" rx="10" fill="none" stroke="#cbd5e1" stroke-dasharray="2 4"/>`);
+  }
+  // fork glyph (click = collapse) and merge dot (wheel = mix)
+  const g = hot.push(() => { n.collapsed = true; n.open = false; }) - 1;
+  out.push(`<g class="hit" data-click="${g}"><circle cx="${fx}" cy="${cy}" r="11" fill="#fff" stroke="#222"/>`
+    + `<text x="${fx}" y="${cy + 4}" text-anchor="middle" style="font-size:${GLYPH[n.kind].length > 1 ? 8 : 12}px">${GLYPH[n.kind]}</text></g>`);
+  if (n.kind !== 'group') {
+    const w = hot.push({ wheel: n }) - 1;
+    out.push(`<g data-wheel="${w}"><circle cx="${mx}" cy="${cy}" r="7" fill="#222"/>`
+      + (n.kind === 'y' ? `<text x="${mx + 6}" y="${cy + 16}" fill="#888">mix ${Math.round(n.mix * 100)}%</text>` : '')
+      + `</g>`);
+  }
+}
+
+const hz = (f) => f >= 1000 ? `${+(f / 1000).toFixed(1)}k` : `${Math.round(f)}`;
+function bandLabel(n, i) { // lanes high → low; xo high → low
+  const hi = n.xo[i - 1], lo = n.xo[i];
+  if (i === 0) return `> ${hz(lo)}`;
+  if (i === n.lanes.length - 1) return `< ${hz(hi)}`;
+  return `${hz(lo)}–${hz(hi)}`;
+}
+
+// row ends: IN / OUT, a numbered connector, or (zoomed in) the neighbours outside the split
+function endCap(x, kind, label, left) {
+  if (kind === 'conn') {
+    out.push(`<circle cx="${x}" cy="0" r="9" fill="#fff" stroke="#444"/><text x="${x}" y="4" text-anchor="middle">${label}</text>`);
+  } else {
+    out.push(`<text x="${x}" y="4" text-anchor="${left ? 'end' : 'start'}" fill="${kind === 'ctx' ? '#999' : '#222'}">${label}</text>`);
+  }
+}
+
+const CAP = 40;   // room for an end cap on either side of a row
+const W = 816, H = 480, PAD = 24, TOP = 20, LEFT = 12;
+
+function render() {
+  const o = opt();
+  out = []; hot = []; laneId = 0; auto = new Set();
+  forced = focus.length ? focus[focus.length - 1] : null;
+  const root = forced ? [forced] : chain;
+
+  // layout according to the mode
+  const cap = W - 2 * PAD - 2 * CAP - 40;
+  const crumbH = forced ? 26 : 0;
+  const GAP = 26;
+  const layout = () => {
+    const rows = o.mode === 'scale' ? [root] : wrapRows(root, cap, o);
+    const ms = rows.map(r => measureChain(r, o));
+    const totalW = Math.max(...ms.map(m => m.w)) + 2 * CAP + 40;
+    const totalH = ms.reduce((a, m) => a + m.h, 0) + GAP * (rows.length - 1);
+    const s = Math.min(1, (W - 2 * PAD) / totalW, (H - 2 * PAD - crumbH) / totalH);
+    return { rows, ms, totalW, totalH, s };
+  };
+  if (o.mode === 'collapse' || o.mode === 'zoom') {
+    // 1. every row must fit the width
+    for (const n of root) autoCollapse(n, cap, o);
+    // 2. then the whole must fit the height: collapse whatever helps the scale most, until 100 %
+    for (let guard = 0; guard < 50 && layout().s < 0.999; guard++) {
+      const cands = root.flatMap(n => [n, ...splitsIn(n)])
+        .filter(c => c.t === 'split' && !isCollapsed(c) && !c.open && c !== forced);
+      let best = null, bestS = layout().s;
+      for (const c of cands) { auto.add(c); const s = layout().s; auto.delete(c); if (s > bestS + 1e-3) { best = c; bestS = s; } }
+      if (!best) break;
+      auto.add(best);
+    }
+  }
+  const { rows, ms, totalW, totalH, s } = layout();
+
+  out.push(`<rect x="${LEFT}" y="${TOP}" width="${W}" height="${H}" fill="none" stroke="#ccc" stroke-dasharray="6 4"/>`);
+  out.push(`<text x="16" y="14" fill="#999">stage 816 × 480 · scale ${Math.round(s * 100)}% · ${rows.length} row${rows.length > 1 ? 's' : ''}${auto.size ? ` · ${auto.size} auto-collapsed (dashed)` : ''}</text>`);
+
+  // breadcrumb when zoomed in
+  if (forced) {
+    const back = hot.push(() => { focus.pop(); zoomAt = performance.now(); }) - 1;
+    const path = ['Chain', ...focus.map(f => f.name)].join(' › ');
+    out.push(`<g class="hit" data-click="${back}"><rect x="${LEFT + 10}" y="${TOP + 8}" width="${16 + path.length * 6.2}" height="20" rx="10" fill="#f4f4f5" stroke="#bbb"/>`
+      + `<text x="${LEFT + 18}" y="${TOP + 22}">‹ ${path}</text></g>`);
+  }
+
+  // little zoom-in when entering/leaving a split
+  const k = Math.min(1, (performance.now() - zoomAt) / 220);
+  const zs = 0.8 + 0.2 * k;
+  const ox = LEFT + W / 2, oy = TOP + crumbH + (H - crumbH) / 2;
+  out.push(`<g opacity="${k}" transform="translate(${ox},${oy}) scale(${s * zs}) translate(${-totalW / 2},${-totalH / 2})">`);
+
+  const ctx = forced ? siblings(chain, forced) : null;
+  let y = 0;
+  rows.forEach((row, r) => {
+    const m = ms[r], cy = y + m.h / 2;
+    out.push(`<g transform="translate(0,${cy})">`);
+    const x0 = CAP + 20;
+    // left cap
+    if (r > 0) endCap(CAP - 6, 'conn', circled(r), true);
+    else if (ctx) endCap(x0 - 6, 'ctx', `◂ ${ctx.prev?.name ?? 'IN'}`, true);
+    else endCap(x0 - 6, 'io', 'IN', true);
+    out.push(`<path d="M${r > 0 ? CAP + 3 : x0 - 4},0 H${x0}" ${stroke(1, '#444')}/>`);
+    drawChain(row, x0, 0, m.w, 1, '#444', o);
+    const xe = x0 + m.w;
+    out.push(`<path d="M${xe},0 H${xe + 14}" ${stroke(1, '#444')}/>`);
+    // right cap
+    if (r < rows.length - 1) endCap(xe + 23, 'conn', circled(r + 1), false);
+    else if (ctx) endCap(xe + 18, 'ctx', `${ctx.next?.name ?? 'OUT'} ▸`, false);
+    else endCap(xe + 18, 'io', 'OUT', false);
+    out.push(`</g>`);
+    y += m.h + GAP;
+  });
+  out.push(`</g>`);
+  svg.innerHTML = out.join('');
+}
+const circled = (i) => '①②③④⑤⑥⑦⑧⑨'[i - 1] ?? i;
+
+// ---------- interaction ----------
+// the loop re-renders every frame, so act on pointerdown (a click's target may already be gone)
+let dragging = null;
+svg.addEventListener('pointerdown', (e) => {
+  const c = e.target.closest('[data-click]');
+  if (c) { hot[+c.dataset.click](); render(); return; }
+  const g = e.target.closest('[data-drag]');
+  if (g) { const h = hot[+g.dataset.drag]; dragging = { n: h.drag, xi: h.xi, y: e.clientY }; svg.setPointerCapture(e.pointerId); }
+});
+svg.addEventListener('pointermove', (e) => {
+  if (!dragging) return;
+  const { n, xi } = dragging, dy = e.clientY - dragging.y; dragging.y = e.clientY;
+  // dragging up raises the frequency (high on top), or lowers it when low is on top
+  const f = n.xo[xi] * Math.pow(2, (opt().lowTop ? dy : -dy) / 25);
+  const above = n.xo[xi - 1] ?? 20000, below = n.xo[xi + 1] ?? 20;
+  n.xo[xi] = Math.max(below * 1.2, Math.min(above / 1.2, f));
+});
+svg.addEventListener('pointerup', () => { dragging = null; });
+svg.addEventListener('wheel', (e) => {
+  const g = e.target.closest('[data-wheel]');
+  if (!g) return;
+  e.preventDefault();
+  const n = hot[+g.dataset.wheel].wheel;
+  if (n.kind === 'y') n.mix = Math.max(0, Math.min(1, n.mix - Math.sign(e.deltaY) * 0.05));
+}, { passive: false });
+
+// switching the mode or patch starts from a clean view
+document.querySelectorAll('input[name=mode]').forEach(r => r.addEventListener('change', () => {
+  focus = []; chain = PRESETS[presetName]();
+}));
+for (const name of Object.keys(PRESETS)) {
+  const b = document.createElement('button');
+  b.textContent = name;
+  b.onclick = () => {
+    presetName = name; chain = PRESETS[name](); focus = [];
+    document.querySelectorAll('#presets button').forEach(x => x.classList.toggle('on', x === b));
+  };
+  if (name === presetName) b.classList.add('on');
+  presets.append(b);
+}
+
+(function loop() { render(); requestAnimationFrame(loop); })();
+</script>
+</body>
+</html>
