@@ -1,6 +1,6 @@
 # ScriptFX: status, decisions & next steps
 
-_Last updated: 2026-11-21. Read this first when picking the project back up. How to build, run and
+_Last updated: 2026-11-25. Read this first when picking the project back up. How to build, run and
 write patches: [`README.md`](../README.md). What each session built: [`HISTORY.md`](HISTORY.md).
 Concepts, research and measurements: [`research/`](research/)._
 
@@ -25,7 +25,7 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
 - **Modulation**: two kinds of route, macro slots (`Patch::modulations`) and modulator
   assignments (`Patch::assignments`), one model for the shell (`patch::routes`: `Route`,
   `RouteSource`, add/remove). Normalized deltas sum onto the knob's base. Drag a macro's grip (the
-  "M3" tag in the rail) or a modulator tab's grip (drawer) onto a block page knob, or a modulator
+  "M3" tag in the rail) or a modulator tab's grip (drawer) onto a block modal's knob, or a modulator
   onto a macro in the rail; each route is a meta knob in its source's colour (up to 5, then "+N");
   right-click = menu with Remove. Changing routes or modulator settings rebuilds the graph once
   per frame and the new graph **adopts** the playing one's state (tails, LFO phases:
@@ -50,22 +50,36 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
   Butterworth stage Q's; `q` = resonance on the steepest stage). Params can be stepped
   (`ParamSpec::step`: values snap). The Matrix shows each route's source level and the
   destination's live value.
-- **Pointer locking** on X11 was tested; the Windows/macOS implementations have not been
-  compiled or tested.
+- **Captures and passive mode (2026-11-25).** Listen writes one folder per capture with a
+  subfolder per track (`captures.rs`: `capture.json`, `index.json`, `analysis.json` + the two
+  WAVs per track; the last `KEEP` = 20 are kept, and the settings sheet shows the folder's size
+  and clears it). The analysis is **fetched, not pasted**:
+  `analysis::digest()` is one line per stream (~30 tokens vs ~1.1 k for the whole analysis) and
+  `captures::read(id, track, stream, section)` serves single sections — the query the planned
+  `get_analysis` tool will call, tested already. Derived loudness values (crest, PLR, K-system)
+  left the JSON and became methods. **Passive mode** works: the switch in the settings sheet
+  (and the card's own button) unloads the patch, disables the library/macros/controls openers
+  and fills the window with the passive card; it is saved with the project (`FxParams::passive`).
+  The host's track name arrives through `IcedNiceContext::new_track_info()` — no nice-plug patch
+  needed — and titles the card.
+- **Pointer locking** on X11 was tested; the Windows/macOS implementations now **compile** (the
+  CD builds both, 2026-11-23) but have never run.
 - **Diagnostics build** (`--features diagnostics`, `crates/plugin/src/diag.rs`): a log file per
   process (macOS `~/Library/Logs/ScriptFX/`) with a system report, GPU/audio setup, patch errors,
   panics with backtraces and a 10 s heartbeat (audio callback timing vs. budget, frame timing).
   **CD** (`build.yml`): every push triggers tests and, if they pass, builds for Linux, Windows and
   macOS universal with symbols,
   the standalone, helper scripts (`.github/package/<platform>/`: install, run, collect a report
-  zip) and `test-patches/`; `main` → rolling pre-release "nightly", tags `v*` → releases. First
-  test on the studio's M4 Mac mini: 2026-11-21.
+  zip) and `test-patches/`; `main` → rolling pre-release "nightly", tags `v*` → releases. **All
+  three platforms build green** and the nightly pre-release publishes (last: `e804587`,
+  2026-11-23). The packages have not been installed and run anywhere yet; the first test on the
+  studio's M4 Mac mini was planned for 2026-11-21, result not recorded here.
 - **Dev builds:** dependencies are optimized in the dev profile (`[profile.dev.package."*"]`);
   unoptimized, a debug standalone rendered Tape Glow below 1 fps and looked frozen (2026-11-21).
   Ctrl+C in the standalone only sets a flag the GUI checks per frame; close the window instead.
 - **Open details:** macro value text and typed values use the target's default base and only that
   macro's contribution, not the edited base or other macros; beyond five routes a knob shows "+N"
-  (edit those in the Matrix); the block page's display slides under the notch while the drawer is
+  (edit those in the Matrix); the block modal's display slides under the notch while the drawer is
   open; test save/restore in a host and pointer warping under XWayland
   on Hyprland.
 
@@ -90,8 +104,9 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
    light mode, UI scale ≠ 100 %, a scrolled chain.
 4. **Blocks for professional chains** ([`research/blocks.md`](research/blocks.md) §4): next the
    sidechain (an internal detector chain on dynamics blocks, then an external key input), the
-   elementary layer (§5: DelayLine, TransientSplit, Feedback first), then the P2 list. Block pages need groups and choices for the bigger blocks (the compressor has 14
-   knobs; `phase` and `lookahead` aren't shown on the page yet).
+   elementary layer (§5: DelayLine, TransientSplit, Feedback first), then the P2 list. The big
+   blocks outgrow their modal: the compressor has 14 knobs, and `phase` and `lookahead` aren't
+   shown at all — they need the knob groups and choices from step 3.
 5. **Hands-on check in Reaper and Carla**: everything above plus knob drag/double-click on all
    panels, chat typing (Enter/Shift+Enter, selection, clipboard, dead keys), Listen, UI scale
    (live and reopening at ≠ 100 %, host accepts the resize), library wheel scrolling, controls
@@ -99,11 +114,37 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
    instances, HiDPI.
 6. **Snapshots** (saved values of a patch): the notch selector/save/load and the library rows are
    placeholders ("Init" = defaults) until then.
-7. **Passive mode**: bypass, keep a rolling ~30 s buffer; a track instance's listen pulls the
-   passive instance's audio for the same time window (host transport position) and adds "track vs.
-   mix" analysis. In-process registry first (Reaper/Studio One/Fender Studio run plugins
-   in-process); sandboxed hosts need IPC. Channel names: CLAP track-info / VST3 IInfoListener
-   (nice-plug has `track_info_updated`), fallback: user-named instances.
+7. **Multi-track Listen** (the real feature, with the chat; all decided 2026-11-25, Flemming).
+   Clicking Listen lets the user **choose which instances to record**, default: only the current
+   one. Every selected instance contributes its **input and output** with the **full** analysis
+   (~1.2–1.5 k tokens per stream, so a 4-track capture is ~10–12 k of JSON; see "Compressing the
+   analysis" in the backlog before that grows). Pieces:
+   - **Instance registry**, process-wide (`Weak<Shared>` per instance, dropped with it). Only
+     instances **in the same host process** are discoverable, so the selector lists ScriptFX
+     instances, not DAW tracks: a track joins the comparison by having a (passive) instance on it.
+     Same property as FabFilter Pro-Q's instance list. Sandboxed hosts would need IPC — not now.
+   - **Names and colours from the host**: `TrackInfo { name, color }`
+     (`vendor/nice-plug-core/src/plugin/track_info.rs`; VST3 `IInfoListener::setChannelContextInfos`,
+     CLAP track-info) arrives through `Editor::track_info_updated`, so it only lands once an
+     editor exists → cache it in `Shared` on first delivery and save it with the project;
+     fallback: a user-editable name. The colour tints the selector row like the DAW's track.
+   - **One common window**: the initiating instance's record start (ARMED→RECORDING on signal)
+     drives every selected instance immediately, bypassing their own signal threshold — a quiet
+     track must not stall the capture; it reports silence instead. Both ends stamp the transport
+     position so the analyses can be trimmed to the same window.
+   - **No rolling buffer** anywhere (see "Listening"): a capture only ever starts from a click.
+
+   **Done 2026-11-25:** the storage and the retrieval query under all of this (`captures.rs`:
+   one folder per capture with a subfolder per track, `index.json`, `captures::read(id, track,
+   stream, section)`, retention of the last 20), `analysis::digest()` (one line per stream,
+   ~30 tokens), and **passive mode** (see below). **Open:** the instance registry, the selector
+   UI, the synchronised record start, and `get_analysis` itself (needs `crates/llm`).
+8. **LLM integration**: chat → patch generation (layer 1 with an attached capture), then layer-2
+   tools (`get_analysis`, `request_listen`). Validate generated patches with the strict loader and
+   `luau-lsp analyze`; feed errors back. Adapter decision (2026-11-19): own `Backend`/tool layer
+   in a new `crates/llm`, in-process HTTP or an installed CLI (`claude -p`, `codex exec`), ACP
+   later; research, candidates, the Claude subscription/ToS caveat:
+   [`research/llm-adapter.md`](research/llm-adapter.md). Still open: which cheap/free models.
 8. **LLM integration**: chat → patch generation (layer 1 with an attached capture), then layer-2
    tools (`get_analysis`, `request_listen`). Validate generated patches with the strict loader and
    `luau-lsp analyze`; feed errors back. Adapter decision (2026-11-19): own `Backend`/tool layer
@@ -142,7 +183,7 @@ patches, informed by an analysis of the actual audio on the track (and the mix).
 | **Bind / Source** | what a component reads: `bind` = a Macro/Param object (value, draggable), `source` = a metered block or `Meters.IN/OUT` | `__ref`, `patch::Source` |
 | **Theme** | a patch's design tokens (colours, fonts, images); used by its ControlPanel, library card and macro surface, never by the rest of the shell | `Theme` |
 | **Listen / Capture / Analysis** | the action / recorded audio / analysis result | `listen.rs`, `crates/analysis` |
-| **Passive mode** | the instance only listens (no patch, passthrough) and shares its audio with other instances. Not built | — |
+| **Passive mode** | an instance with **no patch loaded** (passthrough, controls disabled, a "passive listener" card instead of the views) that exists to be a Listen target. Not built | — |
 | **Chat** | planned global conversation with the LLM, captures as attachments; today one in-memory chat per shell, no LLM | `shell/chat.rs` |
 
 Avoid: "preset" (ambiguous between patch and snapshot), "editor"/"chrome" (use shell), "panel" alone
@@ -162,7 +203,7 @@ passive mode).
 | Lua's role | **describes only** (params, macros, chain, theme) and renders the UI components (UI thread, sandboxed + instruction budget); never on the audio thread | real-time safety, LLM-friendly validation |
 | Patch model | **params** = the blocks' knobs (unlimited, base value saved with the project) + **macros** (max 16, host-automatable, each drives 1..n params) | 8–16 macros are enough when macros can drive many params; hosts can't handle changing parameter lists |
 | Modulation | **Serum's model** (2026-11-20, source of truth: [`research/serum-modulation.md`](research/serum-modulation.md)): every source → param link is a slot (amount −1…+1 of the knob's travel, uni/bi, curve, bypass; no invert, see "Modulation amount"); deltas sum on the knob's base in normalized space, clamped, then the param's scale; any number of slots per knob. Sources: macros and the modulators (Follow, LFO 1–3, Step). Slot edits saved per DAW project | the earlier unit-based from/to mappings didn't add up across lin/log knobs; Serum's model is proven and intuitive |
-| Chain editor | a **tree** with container slots (not a free graph); views: Surface, Chain (+ block pages), Matrix; concept: [`research/chain-editor.md`](research/chain-editor.md) | cable salad at mid-size patches in the free-graph mockup |
+| Chain editor | a **tree** with container slots (not a free graph); views: Surface, Chain (+ block modals), Matrix; concept: [`research/chain-editor.md`](research/chain-editor.md) | cable salad at mid-size patches in the free-graph mockup |
 | Host parameters | 16 fixed host slots, **names follow the patch** (patched nice-plug: VST3 `kParamTitlesChanged`, CLAP `RESCAN_INFO`). **Verified in Reaper.** Automation stays on the slot across patch changes (same contract as Serum's macros) | plugins can't delete host automation; renaming is safe because hosts key automation by ID |
 | DSP | declarative `chain` → `dsp::Graph` compiled off the audio thread, swapped lock-free (rtrb), old graphs freed off-thread | |
 | Patch UI | **reactive Luau components** → SVG → one cached layer each (resvg), fixed 840×560. Parked on 2026-11-18 for the raster plan, then revised and back: **still the plan**; raster layers / sprite sheets / shaders stay open ideas ([`research/raster-ui-plan.md`](research/raster-ui-plan.md)) | declarative, cached, sandboxed; the earlier SVG + bindings panel was removed |
@@ -174,8 +215,10 @@ passive mode).
 | Fonts | bundled Noto Sans (+ optional `<patch>/fonts/`) | system font scan took 7.5 s cold |
 | Factory patches | compiled into the binary, installed to `<data dir>/ScriptFX/patches`, **updated unless user-modified** (`.factory-manifest`) | |
 | Strict patches | unknown fields are errors | catches typos (`treshold`), important for LLM output |
-| Listen / analysis | user-triggered capture of the chain's **input and output** (10/20/30 s, silence skipped); planned LLM integration sends **all** analyses (~2.5–3k tokens). A summarising LLM pass is a later optimisation | |
-| Mix context | only **current track + master** (no buses: buses/sends would skew a track-vs-bus comparison). The master instance runs in **passive mode** | universally applicable, fewer options |
+| Listen / analysis | user-triggered capture of the chain's **input and output** (10/20/30 s, silence skipped), per selected instance (see "Mix context"); planned LLM integration sends **all** analyses (~2.5–3k tokens per stream). A summarising LLM pass is a later optimisation — and the first place to look once multi-track captures get big | |
+| Listening | **Explicit only**: every capture is one the user started, for a window they chose. **Rejected: a rolling ~30 s buffer** anywhere, including in passive mode (Flemming, 2026-11-25) | the user can't know what's in a hidden buffer most of the time; an explicit capture is something they can reason about and point the LLM at |
+| ARA | **No** (evaluated 2026-11-25). Revisit only as an *extra* source once the LLM loop works | ARA would make track analysis passive, but it reads a clip's **source audio**: not our chain's output (layer 2 needs that), not the plugins before us, nothing for the master (no clips), nothing for live input. So it wouldn't replace Listen, and the C++ SDK + document controller + a fifth nice-plug patch is a large, orthogonal build. Licensing is fine (Apache 2.0) and Reaper/Studio One do host ARA 2 |
+| Mix context | **the user picks the instances** a Listen records, default: only the current one (Flemming, 2026-11-25). Each contributes input + output, full analysis. Supersedes the earlier "current track + master only" rule, which stays as *guidance*: the master is the useful second target, and a bus or send skews a track-vs-bus comparison | the earlier fixed pair was a guess at what's useful; the selector costs one UI and makes "compare these two guitars" possible too. Only in-process instances are reachable, so the choice is limited to tracks that carry a ScriptFX |
 | Chat model (planned) | **Global chats**, stored in the user data dir (with model auth/config); one default chat, more allowed (decided 2026-11-19). Today there is one in-memory chat per shell | per-patch chats would have to be saved per patch; a chat can span several patches |
 | Patch kinds | **Graph patches** get a visual graph editor: a new, data-only chain definition next to the coded Luau patches (decided 2026-11-19; design open, see "Open directions") | Luau code can't be edited visually (loops/helpers don't round-trip) |
 | LLM integration (planned) | **Layer 1**: the user attaches a capture to the prompt. **Layer 2**: the LLM gets tools: `get_analysis(section, detail)` and `request_listen(where)` → closed loop: write a patch, listen to the output, compare, adjust | the LLM can't press play; the human always plays the track |
@@ -202,7 +245,7 @@ what the LLM writes:
 - macros/params in the graph (nodes, or a side panel);
 - what the LLM writes for which kind; the graph is easier to validate and diff;
 - editing the chain (block catalogue, adding/removing and routing blocks); the current Chain view
-  and block pages display the Luau result and edit parameter values, not the chain's source.
+  and block modals display the Luau result and edit parameter values, not the chain's source.
 
 The graph data must be the source of truth for visual editing: a `BlockSpec` tree is only the result
 of running Luau and cannot round-trip edits through loops, helpers and computed values.
@@ -233,11 +276,11 @@ loads only safe data and shows a generic UI. See the research for the threat mod
   anatomy, modulator panels. Reference:
   [`research/serum-modulation.md`](research/serum-modulation.md); pairs with the editable LFO
   shape (backlog "DSP / chain").
-- **Chain editor: more input types for block/modulator params** (Flemming, 2026-11-19). The
-  chain-editor mockup (claude.ai artifact "ScriptFX Chain Editor Mockup") uses knob cells only; a
-  knob cell may carry a pill group at its top for the knob's mode (e.g. `Hz | sync` on rate,
-  `ms | sync` on time). Still to design: block/modulator switches (bypass, ping-pong), choices
-  (filter type, LFO shape), maybe steppers.
+- **Chain editor: more input types for block/modulator params** (Flemming, 2026-11-19). Knob cells
+  and mode pills (`Hz | sync`) exist; the pills are wired up for modulator rates only, and the
+  knob groups/choices the big blocks need are next steps 3 and 4. **Still to design:** switches
+  (bypass, ping-pong), choices (filter type, LFO shape), maybe steppers — and `ms | sync` on block
+  times.
 - **Global chats** (decided 2026-11-19): share chats between instances and persist them in the user
   data dir, with one default and optional additional chats. Today each shell has one in-memory
   "Main" chat. Store model auth/config as planned in `research/llm-adapter.md` (keys in the OS
@@ -258,8 +301,8 @@ Principle (Flemming, 2026-11-19): patches are isolated from the shell and from e
   images and `theme` paths confined to the patch folder; panel SVG text uses a per-patch font
   database (bundled + the patch's `fonts/`); patch fonts in the shell get private family names
   (patch folder + content hash), so they can't restyle the shell or each other (fixed 2026-11-19).
-- **Not yet:** chat logs and attached captures are in memory per plugin instance; global chats still
-  need sharing and persistence. Captures use one shared folder and second-resolution names, so
+- **Not yet:** chat logs and attached captures are in memory per plugin instance (sharing and
+  persistence: "Global chats" above). Captures use one shared folder and second-resolution names, so
   concurrent captures can collide. Param values and slot settings are dropped on patch switch;
   per-patch state is needed once snapshots exist.
 - **Backlog: assets as a manifest** (discussed 2026-11-19, parked: the attack surface is small,
@@ -290,13 +333,16 @@ Principle (Flemming, 2026-11-19): patches are isolated from the shell and from e
   `tap("di_clean", { output = 2 })` after the punch/comp stage) to get a partly processed DI signal
   back into the DAW. Needs: aux output buses in the plugin layout (`AudioIOLayout.aux_output_ports`),
   a tap block in the chain spec, and host routing tests.
-- Crossfade on graph swap (no click on patch switch / hot reload)
-- Sidechain input (host aux bus): then `Ducker`, keyed compressors, "low band keyed by …".
-- **Sidechain in + out to/from other tracks** (Flemming, 2026-11-19; mechanism open). In: the
-  host's sidechain input bus (VST3/CLAP aux in, the DAW routes it), usable as a key or modulation
-  source anywhere in the chain. Out: aux output buses the DAW routes to other tracks (overlaps with
-  "multi-output taps"), and/or direct instance-to-instance sharing in-process (same registry as
-  passive mode). Check how each host routes plugin sidechains (Reaper, Studio One, Fender Studio).
+- Crossfade on graph swap: `Graph::adopt` already carries tails and phases over when only routing
+  changes, so route and modulator edits are clickless. A **changed chain** (patch switch, hot
+  reload) still swaps hard.
+- **Sidechain in + out to/from other tracks** (Flemming, 2026-11-19; mechanism open; the internal
+  detector chain on dynamics blocks is next step 4). **In:** the host's sidechain input bus
+  (VST3/CLAP aux in, the DAW routes it), usable as a key or modulation source anywhere in the
+  chain; unlocks `Ducker`, keyed compressors, "low band keyed by …". **Out:** aux output buses the
+  DAW routes to other tracks (same machinery as "multi-output taps" above), and/or direct
+  instance-to-instance sharing in-process (same registry as passive mode). Check how each host
+  routes plugin sidechains (Reaper, Studio One, Fender Studio).
 - Rider: relative target (follow the input level) instead of an absolute dBFS
 
 ### Idea: analysis / debug block
@@ -307,10 +353,11 @@ not only at the plugin's input/output.
 ### Platform / build
 - Upstream our patches: runtime param names (nice-plug), X11 frame pacing / poll-timer rate / app
   resize (baseview / iced_baseview), timestamp queries and the post-process pass (iced_wgpu). Re-vendor on nice-plug updates.
-- Verify the GitHub Actions builds and release packages; test on Windows (Fender Studio) and macOS
-  (Studio One 6, including Retina @2x performance).
-- Compile-check (and try) Windows and macOS: the pointer lock's FFI (`shell/pointer_lock.rs`) has
-  never been built there.
+- The GitHub Actions builds are green on all three platforms and the nightly pre-release publishes
+  (verified 2026-11-23). **Open:** install and run the packages — Windows (Fender Studio) and
+  macOS (Studio One 6, including Retina @2x performance).
+- Run the pointer lock's FFI (`shell/pointer_lock.rs`) on Windows and macOS: both compile in CI
+  now, but neither has been exercised.
 - Hide unused host slots in the host (needs another nice-plug patch; flags + rescan)
 - Licensing: nice-plug exports VST3 through the `vst3` crate (MIT/Apache-2.0), not `vst3-sys`
   (GPLv3): our binaries are no longer forced to be GPLv3. Check the remaining dependencies before

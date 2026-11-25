@@ -27,6 +27,9 @@ pub struct Meta {
     pub sample_rate_hz: f32,
 }
 
+/// Only *measured* values are serialized. Readings that are arithmetic on these (crest factor,
+/// PLR, the K-system values) are methods instead: the LLM can derive them, and leaving them out
+/// of the JSON keeps a multi-track capture smaller (2026-11-25, Flemming).
 #[derive(Debug, Clone, Serialize)]
 pub struct Loudness {
     pub integrated_lufs: Option<f32>,
@@ -36,14 +39,23 @@ pub struct Loudness {
     pub true_peak_dbtp: Option<f32>,
     pub sample_peak_dbfs: Option<f32>,
     pub rms_dbfs: Option<f32>,
-    /// Sample peak − RMS.
-    pub crest_factor_db: Option<f32>,
-    /// Peak-to-loudness ratio: true peak − integrated loudness.
-    pub plr_db: Option<f32>,
-    /// K-system readings (RMS relative to the K-20/14/12 zero point).
-    pub k20_db: Option<f32>,
-    pub k14_db: Option<f32>,
-    pub k12_db: Option<f32>,
+}
+
+impl Loudness {
+    /// Sample peak − RMS. Derived, so it isn't serialized (see `Loudness`).
+    pub fn crest_factor_db(&self) -> Option<f32> {
+        Some(self.sample_peak_dbfs? - self.rms_dbfs?)
+    }
+
+    /// Peak-to-loudness ratio: true peak − integrated loudness. Derived, not serialized.
+    pub fn plr_db(&self) -> Option<f32> {
+        Some(self.true_peak_dbtp? - self.integrated_lufs?)
+    }
+
+    /// K-system reading: RMS relative to the K-weighted zero point (`20`, `14` or `12`).
+    pub fn k_system_db(&self, zero: f32) -> Option<f32> {
+        Some(self.rms_dbfs? + zero)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -156,6 +168,60 @@ fn sorted(mut v: Vec<f32>) -> Vec<f32> {
     v
 }
 
+/// One line that characterises a stream, for the chat and for the LLM's context. The full
+/// analysis stays on disk and is fetched per section (`plugin::captures`), so this is what the
+/// model reads first and decides from — it names every section that has something to say.
+///
+/// e.g. `-18.4 LUFS · peak -4.5 dBTP · tilt -3.0 dB/oct · low-heavy · spread 3.3 dB · 3 resonances · mono-ish · D1-B1`
+pub fn digest(a: &Analysis) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(8);
+    let num = |v: Option<f32>| v.map(|v| format!("{v:.1}"));
+
+    if let Some(l) = num(a.loudness.integrated_lufs) {
+        parts.push(format!("{l} LUFS"));
+    }
+    if let Some(p) = num(a.loudness.true_peak_dbtp) {
+        parts.push(format!("peak {p} dBTP"));
+    }
+    if let Some(t) = num(a.spectrum.tilt_db_per_octave) {
+        parts.push(format!("tilt {t} dB/oct"));
+    }
+    parts.push(format!("{}-heavy", dominant_region(&a.spectrum.energy_share_percent)));
+    if let Some(s) = num(a.dynamics.level_spread_db) {
+        parts.push(format!("spread {s} dB"));
+    }
+    if !a.spectrum.resonances.is_empty() {
+        parts.push(format!("{} resonances", a.spectrum.resonances.len()));
+    }
+    parts.push(match (a.stereo.mono, a.stereo.correlation) {
+        (true, _) => "mono".to_owned(),
+        (_, Some(c)) if c > 0.95 => "mono-ish".to_owned(),
+        (_, Some(c)) if c < 0.0 => format!("out of phase ({c:.2})"),
+        (_, Some(c)) => format!("corr {c:.2}"),
+        _ => "stereo".to_owned(),
+    });
+    if let (Some(lo), Some(hi)) = (&a.pitch.lowest_note, &a.pitch.highest_note) {
+        parts.push(format!("{lo}-{hi}"));
+    }
+    parts.join(" · ")
+}
+
+/// The loudest of the six spectrum regions, named as the digest says it.
+fn dominant_region(s: &BandShares) -> &'static str {
+    [
+        ("sub", s.sub_20_60hz),
+        ("low", s.low_60_250hz),
+        ("low-mid", s.low_mid_250_500hz),
+        ("mid", s.mid_500_2khz),
+        ("presence", s.presence_2_6khz),
+        ("air", s.air_6_20khz),
+    ]
+    .into_iter()
+    .max_by(|a, b| a.1.total_cmp(&b.1))
+    .map(|(name, _)| name)
+    .unwrap_or("mid")
+}
+
 /// Analyzes a stereo capture.
 pub fn analyze(frames: &[Frame], sample_rate: f32) -> Analysis {
     let mono: Vec<f32> = frames.iter().map(|f| 0.5 * (f[0] + f[1])).collect();
@@ -207,11 +273,6 @@ fn loudness(frames: &[Frame], sr: f32) -> Loudness {
         true_peak_dbtp: r1(tp_db),
         sample_peak_dbfs: r1(sp_db),
         rms_dbfs: r1(rms_db),
-        crest_factor_db: r1(sp_db - rms_db),
-        plr_db: r1(tp_db - integrated),
-        k20_db: r1(rms_db + 20.0),
-        k14_db: r1(rms_db + 14.0),
-        k12_db: r1(rms_db + 12.0),
     }
 }
 
@@ -620,7 +681,7 @@ mod tests {
         assert!((l.integrated_lufs.unwrap() + 20.0).abs() < 0.2, "{l:?}");
         assert!((l.sample_peak_dbfs.unwrap() + 20.0).abs() < 0.1);
         assert!((l.rms_dbfs.unwrap() + 23.0).abs() < 0.1);
-        assert!((l.crest_factor_db.unwrap() - 3.0).abs() < 0.1);
+        assert!((l.crest_factor_db().unwrap() - 3.0).abs() < 0.1);
         assert!(a.stereo.mono && a.stereo.correlation.unwrap() > 0.99);
     }
 

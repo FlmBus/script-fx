@@ -48,6 +48,7 @@ mod matrix;
 mod meta_menu;
 mod motion;
 mod notch;
+mod passive;
 mod pointer_lock;
 mod routing;
 mod press;
@@ -74,6 +75,9 @@ use nice_plug_iced::{
     },
 };
 
+use nice_plug::context::gui::GuiContext;
+
+use crate::captures;
 use crate::listen::Listen;
 use crate::user_settings::{self, UserSettings};
 use crate::{FxParams, Shared};
@@ -140,8 +144,15 @@ pub struct Shell {
     now: Instant,
     /// Macro slot being dragged on the controls sheet (host gesture open).
     dragging_macro: Option<usize>,
-    /// Passive mode (not built yet: the top bar's switch is disabled).
+    /// Passive mode: no patch, controls disabled, the passive card instead of the views.
+    /// Mirrors `FxParams::passive` (saved with the project).
     passive: bool,
+    /// The track this instance sits on, as the host names it (`IcedNiceContext::new_track_info`,
+    /// VST3 `IInfoListener` / CLAP track-info). `None` = the host never told us.
+    track: Option<String>,
+    /// What the captures folder holds, for the settings sheet. Read when that sheet opens and
+    /// after clearing (it walks the folder, so not per frame).
+    captures: captures::Usage,
     /// Per-user settings (UI scale), saved on change.
     settings: UserSettings,
     dev_stats: bool,
@@ -194,6 +205,7 @@ pub enum Message {
     Controls(controls::Message),
     Settings(settings::Message),
     Empty(empty::Message),
+    Passive(passive::Message),
     Panel(stage::Pointer),
     DismissError,
     Entry(entry::Message),
@@ -223,6 +235,8 @@ impl Shell {
             now: Instant::now(),
             dragging_macro: None,
             passive: false,
+            track: None,
+            captures: captures::Usage::default(),
             settings: { let s = UserSettings::load(); apply_theme(s.theme); s },
             dev_stats: std::env::var_os("SCRIPTFX_DEV_STATS").is_some(),
             entry: None,
@@ -321,12 +335,22 @@ impl Shell {
                 // "System" follows the OS while open (read off-thread, see theme::system_is_light).
                 apply_theme(self.settings.theme);
                 self.now = now;
+                // The host names the track whenever it changes (and once after opening).
+                if let Some(info) = self.ctx.new_track_info() {
+                    let name = info.name().trim();
+                    self.track = (!name.is_empty()).then(|| name.to_owned());
+                }
                 if !self.restored {
                     self.restored = true;
-                    self.session.restore(ctx, &params, &shared);
+                    // Dev aid: SCRIPTFX_DEV_PASSIVE=1 opens in passive mode (off-screen checks).
+                    self.passive = *params.passive.read().unwrap() || std::env::var_os("SCRIPTFX_DEV_PASSIVE").is_some();
+                    if !self.passive {
+                        self.session.restore(ctx, &params, &shared);
+                    }
                     self.reveal_current();
-                    // A fresh instance has no patch: show the library to pick one.
-                    if self.session.current.is_none() {
+                    // A fresh instance has no patch: show the library to pick one. (Not in
+                    // passive mode: there is nothing to pick.)
+                    if self.session.current.is_none() && !self.passive {
                         self.set_library(true);
                     }
                     // Dev aid: SCRIPTFX_DEV_SHEET=chat|controls|settings|library|drawer|entry opens it at start.
@@ -363,7 +387,8 @@ impl Shell {
                 self.session.tick(ctx, &params, &shared);
                 self.drawer.tick(&self.session.values.modulators, &self.session.values.modulator_phases);
                 self.modal_tick();
-                if let Some(result) = self.listen.poll(&shared) {
+                let patch_name = self.session.current.as_ref().map(|c| c.folder.clone());
+                if let Some(result) = self.listen.poll(&shared, self.track.as_deref(), patch_name.as_deref()) {
                     self.chat.capture_done(result);
                     self.open_sheet(Some(Sheet::Chat));
                 }
@@ -446,7 +471,17 @@ impl Shell {
                 }
                 settings::Message::ScaleDown => self.set_ui_scale(self.settings.ui_scale - user_settings::UI_SCALE_STEP),
                 settings::Message::ScaleUp => self.set_ui_scale(self.settings.ui_scale + user_settings::UI_SCALE_STEP),
-                settings::Message::TogglePassive => self.passive = !self.passive,
+                settings::Message::TogglePassive => self.set_passive(!self.passive, ctx, &params, &shared),
+                settings::Message::ClearCaptures => {
+                    match captures::clear() {
+                        Ok(freed) => nice_plug::nice_log!("cleared {}", freed.label()),
+                        Err(e) => nice_plug::nice_log!("clearing captures failed: {e}"),
+                    }
+                    self.captures = captures::usage();
+                }
+            },
+            Message::Passive(msg) => match msg {
+                passive::Message::Leave => self.set_passive(false, ctx, &params, &shared),
             },
             Message::Empty(msg) => match self.empty.update(msg) {
                 Some(e) => match e {},
@@ -889,6 +924,27 @@ impl Shell {
         }
     }
 
+    /// Passive mode: the instance only listens. Turning it on **unloads the patch** (the Lua
+    /// runtime and the cached layers go with it, the signal passes through) and closes
+    /// everything that floats; turning it off leaves an instance without a patch, so the
+    /// library opens to pick one. Mirrored into the project (`FxParams::passive`).
+    fn set_passive(&mut self, on: bool, ctx: &GuiContext, params: &FxParams, shared: &Shared) {
+        if self.passive == on {
+            return;
+        }
+        self.passive = on;
+        *params.passive.write().unwrap() = on;
+        if on {
+            self.session.unload(ctx, params, shared);
+            self.page = None;
+            self.motion = None;
+            self.view = notch::View::Surface;
+            self.dismiss();
+        } else {
+            self.set_library(true);
+        }
+    }
+
     /// A press on the page (any view: surface, chain, block page, …) closes everything that
     /// floats over it: sheets on both sides, the macro rail, the drawer, a value entry. New
     /// floating things belong in here too.
@@ -937,6 +993,11 @@ impl Shell {
         self.sheet = s;
         if let Some(s) = s {
             self.shown = s;
+            // The settings sheet reports what the captures folder holds; walking it once per
+            // open is cheap, per frame would not be.
+            if s == Sheet::Settings {
+                self.captures = captures::usage();
+            }
         }
         // Switching between sheets swaps the content; only opening/closing slides.
         if was_open != s.is_some() {
@@ -949,7 +1010,22 @@ impl Shell {
         let s = &self.session;
         let gutters = Padding { top: theme::SPACE_GUTTER, right: theme::SPACE_GUTTER, left: theme::SPACE_GUTTER, bottom: 0.0 };
 
-        let main: Element<'_, Message> = match &s.current {
+        let main: Element<'_, Message> = if self.passive {
+            // Passive mode: no patch, no views, no notch — just the card (sheets still open
+            // over it, so the user can reach settings and the chat).
+            let card = passive::view(passive::Props {
+                track: self.track.as_deref(),
+                left: self.library_t() * library_width(),
+                right: self.slide_t() * sheet_width(),
+            })
+            .map(Message::Passive);
+            let mut layers = stack![container(card).padding(Padding { bottom: theme::SPACE_GUTTER, ..Padding::ZERO })].width(Fill).height(Fill);
+            for sheet in [self.library_layer(), self.sheet_layer()].into_iter().flatten() {
+                layers = layers.push(sheet);
+            }
+            container(layers).padding(gutters).into()
+        } else {
+            match &s.current {
             Some(_) => self.window(),
             None => {
                 // The card slides aside with open sheets, like the notch.
@@ -959,6 +1035,7 @@ impl Shell {
                     layers = layers.push(sheet);
                 }
                 container(layers.push(self.error_card())).padding(gutters).into()
+                }
             }
         };
 
@@ -970,6 +1047,7 @@ impl Shell {
             controls_open: self.sheet == Some(Sheet::Controls),
             chat_open: self.sheet == Some(Sheet::Chat),
             settings_open: self.sheet == Some(Sheet::Settings),
+            passive: self.passive,
         })
         .map(Message::TopBar);
         let window = container(column![top_bar, main]).style(theme::frame).width(Fill).height(Fill);
@@ -1256,7 +1334,8 @@ impl Shell {
                 theme: self.settings.theme,
                 ui_scale: self.settings.ui_scale,
                 passive: self.passive,
-                passive_available: false,
+                passive_available: true,
+                captures: self.captures,
             })
             .map(Message::Settings),
         };

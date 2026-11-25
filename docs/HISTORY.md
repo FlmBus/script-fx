@@ -82,7 +82,8 @@ planned; see [`STATUS.md`](STATUS.md) for the current state and open work.
   nih-plug → **nice-plug** first. Earlier shortlist was Slint + vizia; on
   recheck the Slint bridge is WIP/OpenGL-only and vizia's bridge is now third party (nightly).
   Independent of the patch UI plan (the shell only hosts the compositor's render hook).
-  Spike (`spikes/shell-iced`) → **built into the plugin** (see "New shell built" below).
+  Spike (`spikes/shell-iced`) → **built into the plugin** (see "New shell built" below); the
+  spike itself was deleted on 2026-11-25, it had served its purpose.
 
 ## 2026-11-19 · Polish pass on the shell
 
@@ -133,7 +134,7 @@ planned; see [`STATUS.md`](STATUS.md) for the current state and open work.
 ## 2026-11-18 · New shell built (iced on nice-plug)
 
 **New shell built** (iced on nice-plug, design system "ScriptFX Shell", skin Matte + Paper
-chat; prototype in `spikes/shell-iced`).
+chat; prototype in `spikes/shell-iced`, since deleted).
 - Framework moved **nih-plug → nice-plug 0.4.2** (vendored; our runtime-parameter-name patch
   ported, `vendor/nice-plug/PATCHES.md`). `initialize()` is `activate()` now.
 - `crates/plugin/src/shell/`: `library` (cards in the patch's colours), `notch` (snapshot

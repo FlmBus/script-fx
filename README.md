@@ -19,7 +19,6 @@ crates/xtask         `cargo xtask bundle` (nice-plug-xtask)
 vendor/nice-plug*    patched nice-plug (runtime parameter names), see vendor/nice-plug/PATCHES.md
 vendor/baseview      patched baseview (X11 frame pacing, app resize), see vendor/baseview/PATCHES.md
 vendor/iced_wgpu     patched iced_wgpu (frame timing, post-process pass for the zoom blur), see vendor/iced_wgpu/PATCHES.md
-spikes/shell-iced    the shell spike (throwaway, own workspace)
 patches/             factory patches: tape-glow, clean-gain, bass-helper (band split, live block meters),
                      neon-saturator, junkyard-amp (component UI stress/fire tests), kitchen-sink (every
                      block, every modulator, 12 macros; no ControlPanel)
@@ -55,9 +54,24 @@ Lua 5.4 files next to a `.luau` of the same name are renamed to `.lua.bak` (they
 
 **Listen** (chat sheet): waits for signal, records N seconds of the chain's input *and* output
 (silence skipped), analyses both off the audio thread, posts the result into the chat and attaches
-it to the next message. Saved to `<data dir>/ScriptFX/captures/capture-<time>/` (`analysis.json`,
-`input.wav`, `output.wav`). `cargo run --release -p analysis --example analyze -- file.wav`
-analyses a WAV from the command line.
+it to the next message. Captures are kept in `<data dir>/ScriptFX/captures/` (or
+`$SCRIPTFX_CAPTURES`), one folder per capture with a subfolder per track:
+
+```
+index.json                       every capture, newest first
+capture-<unix time>[-n]/
+  capture.json                   when, how long, patch, tracks + a one-line digest per stream
+  <track slug>/                  e.g. bass-di/, or track-1/ when the host names no track
+    analysis.json                { "input": …, "output": … }
+    input.wav  output.wav        f32 stereo at the host's rate
+```
+
+The last 20 captures are kept (`captures::KEEP`); audio is the expensive part, ~11.5 MB per
+30 s stream. The settings sheet shows what the folder holds and clears it on demand
+(**Listen · on this computer → Stored captures**). The **analysis data is meant to be fetched, not pasted**: the chat and the LLM see
+`analysis::digest()` (one line per stream) and read sections through `captures::read()` — the
+query the planned `get_analysis` tool calls. `cargo run --release -p analysis --example analyze
+-- file.wav` analyses a WAV from the command line and prints its digest.
 
 **Dev aids** (environment variables):
 
@@ -72,10 +86,15 @@ analyses a WAV from the command line.
 | `SCRIPTFX_DEV_STATS=1` | fps, render CPU, GPU time, panel stats |
 | `SCRIPTFX_FRAME_US=16667` | the shell's frame interval |
 | `SCRIPTFX_TEST_INPUT=file.wav` | float WAV at the host rate, looped as input |
+| `SCRIPTFX_CAPTURES=<folder>` | where Listen stores captures (default: the user data dir) |
 
 **Testing the UI on Linux:** run the standalone off-screen on Xvfb (`Xvfb :99`, then
 `DISPLAY=:99 WAYLAND_DISPLAY= WGPU_BACKEND=vulkan`); xdotool clicks and drags work there (they don't
 reach XWayland windows on the desktop), screenshots with `import -window root`.
+On a bare headless box (no desktop session) **`XDG_RUNTIME_DIR` must be set** — without it the
+window opens 1×1 and stays empty. Needed: `Xvfb`, `xdotool`, ImageMagick, `x11-utils`, and a
+Vulkan driver; Mesa's lavapipe (`libvulkan_lvp.so`) renders this fine in software, no GPU or
+window manager required.
 
 **CI/CD** (`.github/workflows/build.yml`, repo `github.com/FlmBus/script-fx`): pushes trigger tests
 and, if they pass, builds for Linux x86_64, Windows x86_64 and macOS universal: VST3 + CLAP +

@@ -10,6 +10,7 @@ use nice_plug_iced::iced::{
 };
 
 use super::{icons, sheet, tabs, theme};
+use crate::captures;
 use crate::user_settings::{self, ThemeMode};
 
 #[derive(Debug, Clone)]
@@ -19,6 +20,8 @@ pub enum Message {
     ScaleDown,
     ScaleUp,
     TogglePassive,
+    /// Delete every stored capture (audio + analyses).
+    ClearCaptures,
 }
 
 pub struct Props {
@@ -28,9 +31,13 @@ pub struct Props {
     pub passive: bool,
     /// False while passive mode isn't implemented.
     pub passive_available: bool,
+    /// What the captures folder holds (read when the sheet opens, not per frame).
+    pub captures: captures::Usage,
 }
 
 pub fn view<'a>(p: Props) -> Element<'a, Message> {
+    // The newest `KEEP` captures are kept anyway; this is for getting the space back now.
+    let captures_hint = format!("{} · the audio of each Listen, kept for the last {}", p.captures.label(), captures::KEEP);
     let passive_hint = if p.passive_available {
         "don't process; share this channel's audio with the other ScriptFX instances"
     } else {
@@ -43,6 +50,9 @@ pub fn view<'a>(p: Props) -> Element<'a, Message> {
         space::vertical().height(4),
         sheet::section_title("This instance"),
         setting("Passive listener", passive_hint, passive(&p)),
+        space::vertical().height(4),
+        sheet::section_title("Listen · on this computer"),
+        setting("Stored captures", captures_hint, clear_captures(&p)),
     ]
     .spacing(14)
     .padding(Padding { top: 14.0, bottom: 14.0, left: 16.0, right: 16.0 });
@@ -54,8 +64,13 @@ pub fn view<'a>(p: Props) -> Element<'a, Message> {
     ])
 }
 
-/// Name and hint on the left, the control on the right.
-fn setting<'a>(name: &'a str, hint: &'a str, control: Element<'a, Message>) -> Element<'a, Message> {
+/// Name and hint on the left, the control on the right. The hint may be owned (built per view).
+fn setting<'a>(
+    name: &'a str,
+    hint: impl Into<std::borrow::Cow<'a, str>>,
+    control: Element<'a, Message>,
+) -> Element<'a, Message> {
+    let hint = hint.into();
     row![
         column![
             text(name).size(12.5).font(theme::font::PAPER_SEMIBOLD).color(theme::c().paper_ink),
@@ -161,6 +176,26 @@ fn scale<'a>(ui_scale: f32) -> Element<'a, Message> {
         .align_y(Center)
         .into(),
     )
+}
+
+/// Deletes every stored capture. Disabled (and silent) when there is nothing to delete, so it
+/// can't be pressed hopefully; the hint next to it says how much there is.
+fn clear_captures<'a>(p: &Props) -> Element<'a, Message> {
+    let empty = p.captures.captures == 0;
+    let c = theme::c();
+    let label = text("Clear").size(12).font(theme::font::PAPER_SEMIBOLD).color(if empty { c.paper_muted } else { c.paper_ink });
+    button(container(label).padding(Padding { top: 5.0, bottom: 5.0, left: 11.0, right: 11.0 }))
+        .on_press_maybe((!empty).then_some(Message::ClearCaptures))
+        .padding(0)
+        .style(move |_: &Theme, status: button::Status| button::Style {
+            background: Some(match status {
+                button::Status::Hovered if !empty => c.paper_line.into(),
+                _ => c.paper_raised.into(),
+            }),
+            border: Border { radius: theme::radius(theme::RADIUS_BUTTON), width: 1.0, color: c.paper_line },
+            ..Default::default()
+        })
+        .into()
 }
 
 /// A pill switch; disabled (dimmed knob, no press) while passive mode isn't built.

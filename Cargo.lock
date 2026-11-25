@@ -3583,6 +3583,7 @@ dependencies = [
  "patch",
  "resvg 0.50.0",
  "rtrb",
+ "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",

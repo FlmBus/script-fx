@@ -14,6 +14,7 @@ use nice_plug_iced::IcedEditorState;
 use nice_plug_iced::iced::PollSubNotifier;
 use patch::{MACRO_SLOTS, ModEdits, ModSettings, Patch};
 
+mod captures;
 mod diag;
 mod listen;
 mod shell;
@@ -356,6 +357,12 @@ pub struct FxParams {
     #[persist = "mod-edits"]
     pub mod_edits: RwLock<ModEdits>,
 
+    /// Passive mode: this instance only listens. No patch is loaded (passthrough, the Lua
+    /// runtime and the cached layers are freed) and the controls are disabled. Per instance,
+    /// so it belongs to the project, not to the user's settings.
+    #[persist = "passive"]
+    pub passive: RwLock<bool>,
+
     /// Generic host-automatable slots. Hosts don't handle parameter lists that
     /// change at runtime, so patches map their macros onto these. Their names
     /// follow the patch via the patched nih-plug (`with_dynamic_name`).
@@ -374,6 +381,7 @@ impl Default for FxParams {
             param_values: RwLock::new(HashMap::new()),
             mod_settings: RwLock::new(HashMap::new()),
             mod_edits: RwLock::new(ModEdits::default()),
+            passive: RwLock::new(false),
             macros: std::array::from_fn(|i| MacroParams {
                 value: FloatParam::new(format!("Macro {}", i + 1), 0.0, FloatRange::Linear {
                     min: 0.0,

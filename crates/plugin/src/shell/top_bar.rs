@@ -30,13 +30,16 @@ pub struct Props {
     pub controls_open: bool,
     pub chat_open: bool,
     pub settings_open: bool,
+    /// Passive mode: no patch, so nothing to pick or control. Chat and settings stay reachable
+    /// (settings is where passive mode is switched off again).
+    pub passive: bool,
 }
 
 pub fn view<'a>(p: Props) -> Element<'a, Message> {
     let wordmark = text("ScriptFX").size(12.5).font(theme::font::SANS_SEMIBOLD).color(theme::c().frame_ink);
 
     let openers = row![
-        opener(icons::SLIDERS, Some("Controls"), p.controls_available.then_some(Message::ToggleControls), p.controls_open),
+        opener(icons::SLIDERS, Some("Controls"), (p.controls_available && !p.passive).then_some(Message::ToggleControls), p.controls_open),
         opener(icons::CHAT, Some("Chat"), Some(Message::ToggleChat), p.chat_open),
         opener(icons::GEAR, None, Some(Message::ToggleSettings), p.settings_open),
     ]
@@ -45,8 +48,8 @@ pub fn view<'a>(p: Props) -> Element<'a, Message> {
 
     // Equal-width sides keep the wordmark centred on the window, whatever sits on the right.
     let left = row![
-        opener(icons::LIBRARY, Some("Patches"), Some(Message::ToggleLibrary), p.library_open),
-        opener(icons::DIAL, Some("Macros"), p.macros_available.then_some(Message::ToggleMacros), p.macros_open),
+        opener(icons::LIBRARY, Some("Patches"), (!p.passive).then_some(Message::ToggleLibrary), p.library_open),
+        opener(icons::DIAL, Some("Macros"), (p.macros_available && !p.passive).then_some(Message::ToggleMacros), p.macros_open),
     ]
     .spacing(theme::SPACE_HAIR)
     .align_y(Center);

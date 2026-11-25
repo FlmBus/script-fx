@@ -16,6 +16,9 @@ fn main() {
     let t = std::time::Instant::now();
     let a = analyze(&frames, sr);
     eprintln!("analysis took {:?}", t.elapsed());
+    // The one line that goes into the chat and the LLM's context (the rest is fetched per
+    // section from the capture on disk, see the plugin's `captures` module).
+    eprintln!("digest: {}", analysis::digest(&a));
     println!("{}", serde_json::to_string_pretty(&a).unwrap());
 }
 
