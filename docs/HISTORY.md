@@ -5,6 +5,61 @@ _What earlier sessions built and found, newest first. Moved here from STATUS "Wh
 changed details (e.g. a patch's `panel` is now its `surface`, macros are Serum-style slots). Measurements
 and findings: [`research/findings.md`](research/findings.md)._
 
+## 2026-11-26 · Render diagnostics, the knob-drag fix, performance settings
+
+Flemming ran the packages: **Windows stutters** and mangles input while frames drop (a knob jumps
+to min or max, sometimes a release is lost), **macOS draws at 10–15 seconds per frame** with pink
+squares where the icons belong. Three problems, and only the third could be answered from the code
+alone — so the session started by making the plugin able to say what it is doing, instead of
+guessing at two machines nobody can attach a debugger to.
+
+**Diagnostics.** `frame_stats` (vendored `iced_wgpu`) now reports every presented frame to a hook,
+raw, split into the steps that make it up: the app's `view` plus iced's layout/draw, waiting for
+the swapchain image, encode+submit, `frame.present()`, and the idle rest — plus the GPU's own time,
+the images uploaded into the texture atlas, atlas growth, and uncaptured wgpu errors (previously a
+panic somewhere later; now logged and counted). `mark_frame_start` existed but was **never called**,
+so the one timing field we had always read 0. A `phase` marker says what the UI thread is doing, and
+a watchdog in `diag.rs` logs a frame that hangs *while it hangs*, naming the step — the difference
+between "10 s per frame" and "10 s per frame in `acquire swapchain image`". The compositor writes
+one greppable `gpu:` block (adapter, backend, driver, **`software adapter: true/false`**, surface
+format, present mode), and environment switches take each suspect out without a build (animation,
+the patch's art, the icons, the blur pass, MSAA, backend, present mode). `SCRIPTFX_DIAG_EXIT_AFTER`
+lets the standalone end itself, so each package ships a `render-check` script that runs the whole
+matrix unattended and logs it. All of it is compiled in regardless of the `diagnostics` feature.
+
+**The knob drag.** iced hands a frame the *whole batch* of events that piled up since the last one.
+`pointer_lock` assumed the opposite: it measured travel, warped the pointer back to the grab point
+and reset its reference there — so every queued move contributed the full travel again and N moves
+moved the value ≈N× too far. Now travel is measured between consecutive events, the pointer is only
+pinned back past 120 px (and put back where it was grabbed on release, which is what kept Serum's
+feel), the warp's own motion event is recognised and swallowed, and one event carries at most 300 px
+as a backstop. Releases are counted window-wide, so a drag whose release was swallowed ends itself —
+and ends the **host gesture** the lost release had left open, a second bug inside the same symptom.
+Reproduced on Linux with a new `SCRIPTFX_DIAG_SLOW_MS` (a stuttering machine on demand): the same
+40 px drag landed on 12.0 dB — the rail — before, 7.2 dB after, matching the 60 fps result. Four of
+the six new unit tests fail against the old algorithm; checked by reverting it.
+
+**Performance settings.** Minimum hardware came out as: the floor is the graphics API (DX12/Vulkan/
+Metal, so ~2013+), the audio engine is not the constraint (0.7 % of a core for an 11-block chain),
+and the editor is — mostly our own CPU rasterisation of the patch's components, 17.6 ms per frame at
+2× for an animated background. So: **Graphics** (High/Medium/Low) and a **frame rate** limiter
+(60/30/20) in the settings sheet, per user. Measured on tape-glow: no MSAA is 3× the GPU time back,
+Low additionally takes the patch raster from 4.9 ms to 0.2 ms and the uploads from 2/frame to 0.
+`always_redraw` is off, so the shell's clock is the only redraw trigger and the limiter limits; when
+nothing moves the editor **idles at 10 fps** and an event unparks the clock immediately. Honest
+limitation found by measuring: while the host calls `process` the modulators keep running, so the
+dock's displays really are animating and the editor stays at full rate — idling mostly helps with
+the transport stopped. And the patch's components were being rasterised and uploaded every frame
+*while the chain or the Matrix was on screen*, invisibly; `SurfaceId::shows_patch_ui` stops that.
+Flemming pushed back on that predicate being a `matches!` ("what if we add a page?"): the per-surface
+facts are now exhaustive matches, so a new surface is a compile error in all three places that must
+decide something about it — verified by adding a variant and reading the errors.
+
+Open: problems 1 and 2 still need the `render-check` logs from the two machines; iced evaluates a
+whole event batch against the *newest* cursor position, so a batched press/release can still be
+mis-targeted (fixing it means vendoring iced_baseview — measure first); and the automatic per-patch
+fallback is now a small step, since the frame reporting and the quality levels both exist.
+
 ## 2026-11-26 · Viewport terminology, the chain surface, `ui.Surface`
 
 Housekeeping with Flemming: a name for what the viewport shows. The proposal was three tiers

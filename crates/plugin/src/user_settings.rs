@@ -38,6 +38,67 @@ impl ThemeMode {
     }
 }
 
+/// How much the editor spends on looking good. Lower levels give a weak machine its frames back;
+/// what each one turns off is in `shell::quality`.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum Quality {
+    #[default]
+    High,
+    Medium,
+    Low,
+}
+
+impl Quality {
+    pub const ALL: [Quality; 3] = [Quality::High, Quality::Medium, Quality::Low];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Quality::High => "High",
+            Quality::Medium => "Medium",
+            Quality::Low => "Low",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Quality::High => "high",
+            Quality::Medium => "medium",
+            Quality::Low => "low",
+        }
+    }
+
+    fn from_key(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|q| q.key() == s)
+    }
+
+    /// Multisampling (iced's MSAA ×4). The single biggest thing the GPU does for us: measured at
+    /// 3× the GPU time per frame on a software renderer (`docs/research/render-performance.md`).
+    /// Only read when a window opens.
+    pub fn msaa(self) -> bool {
+        self == Quality::High
+    }
+
+    /// The renderer's blur pass (the block modal's zoom and backdrop).
+    pub fn blur(self) -> bool {
+        self != Quality::Low
+    }
+
+    /// Whether the patch's own UI keeps moving. Off, its components stop being re-rendered and
+    /// re-uploaded every frame.
+    pub fn animations(self) -> bool {
+        self != Quality::Low
+    }
+}
+
+/// Frames per second the editor aims for. The editor draws on a clock, so this is a limiter: it
+/// scales down every per-frame cost there is. (It idles below this when nothing moves.)
+pub const FRAME_RATES: [u32; 3] = [60, 30, 20];
+
+/// Clamps to one of [`FRAME_RATES`].
+pub fn snap_frame_rate(v: u32) -> u32 {
+    FRAME_RATES.into_iter().min_by_key(|r| r.abs_diff(v)).unwrap_or(60)
+}
+
 /// Who answers in the chat.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum Provider {
@@ -116,12 +177,16 @@ pub struct UserSettings {
     /// Size of the whole plugin window (1.0 = 1040×640 logical px).
     pub ui_scale: f32,
     pub theme: ThemeMode,
+    /// What the editor is allowed to spend per frame (`shell::quality`).
+    pub quality: Quality,
+    /// Frames per second the editor aims for, one of [`FRAME_RATES`].
+    pub frame_rate: u32,
     pub ai: Ai,
 }
 
 impl Default for UserSettings {
     fn default() -> Self {
-        Self { ui_scale: 1.0, theme: ThemeMode::System, ai: Ai::default() }
+        Self { ui_scale: 1.0, theme: ThemeMode::System, quality: Quality::default(), frame_rate: 60, ai: Ai::default() }
     }
 }
 
@@ -130,13 +195,17 @@ impl UserSettings {
         let Some(map) = read() else { return Self::default() };
         let ui_scale = map.get("ui_scale").and_then(Value::as_f64).map_or(1.0, |v| snap_ui_scale(v as f32));
         let theme = map.get("theme").and_then(Value::as_str).and_then(ThemeMode::from_key).unwrap_or_default();
-        Self { ui_scale, theme, ai: Ai::read(&map) }
+        let quality = map.get("quality").and_then(Value::as_str).and_then(Quality::from_key).unwrap_or_default();
+        let frame_rate = map.get("frame_rate").and_then(Value::as_u64).map_or(60, |v| snap_frame_rate(v as u32));
+        Self { ui_scale, theme, quality, frame_rate, ai: Ai::read(&map) }
     }
 
     pub fn save(&self) {
         let mut map = read().unwrap_or_default();
         map.insert("ui_scale".into(), json!(self.ui_scale));
         map.insert("theme".into(), json!(self.theme.key()));
+        map.insert("quality".into(), json!(self.quality.key()));
+        map.insert("frame_rate".into(), json!(self.frame_rate));
         self.ai.write(&mut map);
         let Some(path) = path() else { return };
         if let Some(dir) = path.parent() {
@@ -184,6 +253,26 @@ mod tests {
         assert_eq!(Ai::read(&map), ai);
     }
 
+
+    #[test]
+    fn quality_and_frame_rate_round_trip() {
+        let mut map = Map::new();
+        // An empty (or older) settings file means the defaults.
+        assert_eq!(map.get("quality").and_then(Value::as_str).and_then(Quality::from_key), None);
+        map.insert("quality".into(), json!(Quality::Low.key()));
+        assert_eq!(Quality::from_key(map["quality"].as_str().unwrap()), Some(Quality::Low));
+        assert_eq!(snap_frame_rate(59), 60);
+        assert_eq!(snap_frame_rate(31), 30);
+        assert_eq!(snap_frame_rate(1), 20);
+        assert_eq!(snap_frame_rate(1000), 60);
+    }
+
+    #[test]
+    fn levels_turn_the_right_things_off() {
+        assert!(Quality::High.msaa() && Quality::High.blur() && Quality::High.animations());
+        assert!(!Quality::Medium.msaa() && Quality::Medium.blur() && Quality::Medium.animations());
+        assert!(!Quality::Low.msaa() && !Quality::Low.blur() && !Quality::Low.animations());
+    }
 
     #[test]
     fn ui_scale_snaps_to_steps() {

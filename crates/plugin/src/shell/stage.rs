@@ -158,6 +158,16 @@ impl Surface {
                 }
             }
             Pointer::Moved(p) => {
+                // The button went up without the release reaching us (see `pointer_lock`): end
+                // the drag, and the host gesture a macro drag opened.
+                if self.drag.as_ref().is_some_and(|d| d.drag.ended()) {
+                    if let Some(Drag { target: Target::Macro(slot), .. }) = self.drag.take() {
+                        out.push(Change::EndMacro(slot));
+                    }
+                    self.drag = None;
+                    self.active = None;
+                    return out;
+                }
                 if let Some(d) = &mut self.drag {
                     let fine = if self.fine { FINE } else { 1.0 };
                     // Relative to the last event: the pointer stays locked where it grabbed.
@@ -272,6 +282,10 @@ fn target(_patch: &Patch, src: &Source) -> Option<Target> {
 }
 
 /// tiny-skia pixmaps are premultiplied; iced images are straight alpha.
+///
+/// One copy per changed layer per frame — a full-size layer at 2× is ~7.5 MB, which is why a
+/// layer that re-renders every frame is the most expensive thing the editor does. Unchanged
+/// layers keep their handle (and their place in the texture atlas) and don't come through here.
 pub(super) fn unpremultiply(data: &[u8]) -> Vec<u8> {
     let mut out = data.to_vec();
     for px in out.chunks_exact_mut(4) {
@@ -301,7 +315,10 @@ pub fn view<'a>(surface: &'a Surface, bg: Color) -> Element<'a, Pointer> {
     });
 
     let mut layers = stack![].width(Fill).height(Fill);
-    for (_, r, handle) in &surface.layers {
+    // `SCRIPTFX_DIAG_NO_PATCH_LAYERS`: the patch's own art is the biggest thing we push through
+    // the texture atlas, and the only part of it that changes every frame (`diag.rs`).
+    let draw_layers = !crate::diag::switches().no_patch_layers;
+    for (_, r, handle) in surface.layers.iter().filter(|_| draw_layers) {
         layers = layers.push(
             pin(image(handle.clone()).width(r.w * s).height(r.h * s).content_fit(ContentFit::Fill))
                 .x(offset.x + r.x * s)

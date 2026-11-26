@@ -59,6 +59,7 @@ mod press;
 mod session;
 mod settings;
 mod sheet;
+mod quality;
 mod slide;
 mod stage;
 mod default_surface;
@@ -82,8 +83,11 @@ use nice_plug_iced::{
 
 use nice_plug::context::gui::GuiContext;
 
+// Which step of the frame we are in, for the diagnostics log's stall watchdog (`diag.rs`).
+use iced_wgpu::frame_stats::phase;
+
 use crate::captures;
-use crate::listen::Listen;
+use crate::listen::{self, Listen};
 use crate::user_settings::{self, UserSettings};
 use crate::{FxParams, Shared};
 use session::Session;
@@ -100,13 +104,24 @@ pub fn create(
     params: Arc<FxParams>,
     shared: Arc<Shared>,
 ) -> Option<IcedEditor> {
-    // Frame pacing (see vendor/baseview/PATCHES.md): always_redraw draws on every baseview frame
-    // (its 15 ms frame timer); animated components and meters need that anyway. The poll timer
-    // also draws, and at its default 1/64 s it fired ~1000×/s here: keep it slow (the editor
-    // doesn't use iced's poll events; its own frame clock is `frames()`).
-    let settings = IcedNiceSettings::new().with_always_redraw(true).with_poll_interval(Duration::from_millis(250));
+    // Frame pacing (see vendor/baseview/PATCHES.md). `always_redraw` would draw on every baseview
+    // frame (its 15 ms timer) whether or not anything changed; since 2026-11-26 the shell's own
+    // clock (`frames()`) is the only trigger, so the frame rate is the one the user picked and a
+    // quiet editor idles (`quality`). The poll timer also draws, and at its default 1/64 s it
+    // fired ~1000×/s here: keep it slow (the editor doesn't use iced's poll events).
+    let settings = IcedNiceSettings::new().with_always_redraw(false).with_poll_interval(Duration::from_millis(250));
+    // Per-frame logging and the stall watchdog (`diag.rs`): from here on every presented frame is
+    // reported, whether or not this is a diagnostics build.
+    crate::diag::install();
+    // The user's quality level and frame rate. Multisampling has to be decided here: iced fixes
+    // it when it makes the compositor, so changing it needs the window reopened.
+    let user_settings = UserSettings::load();
+    quality::apply(&user_settings);
     create_iced_editor(editor_state, Plugin { params, shared }, notifier, settings, |persistent, ctx| {
         let mut app = application(persistent, ctx, Shell::new, Shell::update, Shell::view)
+            // iced defaults to MSAA ×4 and the shell is nearly all canvases: three times the GPU
+            // time per frame in our measurements, so it is what the quality levels drop first.
+            .antialiasing(quality::msaa())
             .theme(Shell::theme)
             .scale_factor(Shell::scale_factor)
             .style(Shell::style)
@@ -161,6 +176,9 @@ pub struct Shell {
     dev_stats: bool,
     /// Dev aid: `SCRIPTFX_DEV_RESCALE=1.5` sets the UI scale 1 s after opening (like −/+).
     dev_rescale: Option<(Instant, f32)>,
+    /// The values the last frame drew from (`quality::fingerprint`): when they stop changing and
+    /// nothing else happens, the editor idles.
+    fingerprint: u64,
     /// The open value entry (right-click on a knob).
     entry: Option<entry::Entry>,
     /// A shell knob or meta knob is being dragged (the cursor is hidden meanwhile).
@@ -219,6 +237,8 @@ pub enum Message {
 
 impl Shell {
     fn new(plugin: PersistentState<Plugin>, ctx: IcedNiceContext) -> Self {
+        // The compositor exists by now, so this logs the GPU report with the window's first line.
+        crate::diag::editor_open(true);
         Self {
             plugin,
             ctx,
@@ -254,6 +274,7 @@ impl Shell {
             dropped: None,
             tasks: Vec::new(),
             dev_rescale: std::env::var("SCRIPTFX_DEV_RESCALE").ok().and_then(|s| s.parse().ok()).map(|v| (Instant::now() + Duration::from_secs(1), v)),
+            fingerprint: 0,
         }
     }
 
@@ -322,7 +343,14 @@ impl Shell {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        let was = phase::enter(phase::UPDATE);
+        // Anything but the frame tick means the user (or the host) did something: draw at the
+        // full rate again (`quality`).
+        if !matches!(message, Message::Frame(_)) {
+            quality::note_activity();
+        }
         self.handle(message);
+        phase::enter(was);
         // Patch fonts found by a library scan: hand them to iced.
         let fonts = std::mem::take(&mut self.session.new_fonts);
         let fonts = fonts.into_iter().map(|bytes| iced::font::load(bytes).discard());
@@ -412,12 +440,38 @@ impl Shell {
                 }
                 icons::set_scale(self.ctx.window_size().scale_factor as f32);
                 let scale = stage::surface_fit().0 * self.ctx.window_size().scale_factor as f32;
+                // The patch's own UI is kept up to date only while its surface is the one on
+                // screen ([`viewport::SurfaceId::shows_patch_ui`]); in passive mode there is no
+                // patch loaded at all, so that case needs no question asked.
+                let shows_patch_ui = self.surface.shows_patch_ui();
                 let Session { current, values, .. } = &mut self.session;
-                if let Some(cur) = current {
-                    if let Some(surface) = &mut cur.surface {
-                        surface.update(&cur.patch, values, scale);
-                    }
+                let mut rasters = 0;
+                if shows_patch_ui
+                    && let Some(cur) = current
+                    && let Some(surface) = &mut cur.surface
+                {
+                    let was = phase::enter(phase::PATCH_RASTER);
+                    surface.update(&cur.patch, values, scale);
+                    phase::enter(was);
+                    let st = surface.stats();
+                    rasters = st.rasters;
+                    crate::diag::note_surface(st.total_us, st.rasters as u32, st.raster_px as u64);
                 }
+                // Did anything that drives the picture move? If not, the clock slows down
+                // (`quality`); a case we miss only costs frames, never correctness.
+                let listen_t = match self.listen.status(&shared) {
+                    listen::Status::Recording { seconds, .. } => 10.0 + seconds,
+                    listen::Status::Armed => 1.0,
+                    listen::Status::Analyzing => 2.0,
+                    listen::Status::Idle => 0.0,
+                };
+                let fingerprint =
+                    quality::fingerprint(&self.session.values, rasters, &[self.slide_t(), self.library_t(), listen_t]);
+                if fingerprint != self.fingerprint {
+                    self.fingerprint = fingerprint;
+                    quality::note_activity();
+                }
+                crate::diag::note_idling(quality::idling());
             }
             Message::TopBar(msg) => match msg {
                 top_bar::Message::ToggleLibrary => self.set_library(!self.library_open),
@@ -537,6 +591,18 @@ impl Shell {
                 }
                 settings::Message::ScaleDown => self.set_ui_scale(self.settings.ui_scale - user_settings::UI_SCALE_STEP),
                 settings::Message::ScaleUp => self.set_ui_scale(self.settings.ui_scale + user_settings::UI_SCALE_STEP),
+                settings::Message::SetQuality(q) => {
+                    self.settings.quality = q;
+                    self.settings.save();
+                    // Blur and the patch's clock follow right away; multisampling only when the
+                    // window is reopened (iced fixes it with the compositor).
+                    quality::apply(&self.settings);
+                }
+                settings::Message::SetFrameRate(r) => {
+                    self.settings.frame_rate = user_settings::snap_frame_rate(r);
+                    self.settings.save();
+                    quality::apply(&self.settings);
+                }
                 settings::Message::SetProvider(p) => {
                     self.settings.ai.provider = p;
                     self.settings.save();
@@ -901,6 +967,9 @@ impl Shell {
             .current
             .as_ref()
             .and_then(|cur| self.chain.look(&self.chain_ctx(&cur.patch)));
+        // The quality level (and `SCRIPTFX_DIAG_NO_POSTFX`) can take the renderer's extra
+        // full-frame pass out of the picture.
+        let look = look.filter(|_| quality::blur());
         iced_wgpu::postfx::set(look.map(|look| self.blur(&look)));
     }
 
@@ -1165,6 +1234,21 @@ impl Shell {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        // The frame starts here: `view` plus iced's layout and draw are the "view+iced" part of a
+        // frame line (`diag.rs`). The phase switches to `ICED_DRAW` when we hand the tree over.
+        iced_wgpu::frame_stats::mark_frame_start();
+        phase::enter(phase::VIEW);
+        // `SCRIPTFX_DIAG_SLOW_MS`: a stuttering machine, here. Events then pile up into batches,
+        // the way they do on a slow Windows or macOS frame.
+        if let Some(slow) = crate::diag::switches().slow_ms {
+            std::thread::sleep(slow);
+        }
+        let element = self.build_view();
+        phase::enter(phase::ICED_DRAW);
+        element
+    }
+
+    fn build_view(&self) -> Element<'_, Message> {
         let s = &self.session;
         let gutters = Padding { top: theme::SPACE_GUTTER, right: theme::SPACE_GUTTER, left: theme::SPACE_GUTTER, bottom: 0.0 };
 
@@ -1405,6 +1489,8 @@ impl Shell {
                 ai_connection: self.plugin.shared.assistant.lock().unwrap().connection(),
                 theme: self.settings.theme,
                 ui_scale: self.settings.ui_scale,
+                quality: self.settings.quality,
+                frame_rate: self.settings.frame_rate,
                 passive: self.passive,
                 passive_available: true,
                 captures: self.captures,
@@ -1465,6 +1551,13 @@ impl Shell {
     }
 }
 
+/// The window closed: the diagnostics log says so (and stops expecting frames).
+impl Drop for Shell {
+    fn drop(&mut self) {
+        crate::diag::editor_open(false);
+    }
+}
+
 /// Picks the palette for a theme mode.
 fn apply_theme(mode: user_settings::ThemeMode) {
     use user_settings::ThemeMode::*;
@@ -1496,14 +1589,21 @@ fn sheet_width() -> f32 {
     theme::SIZE_SHEET + 2.0 * theme::SPACE_2
 }
 
-/// ~60 Hz frame ticks from a helper thread (the thread-pool executor has no timers). The
-/// thread ends when the editor closes (the receiver is dropped).
+/// Frame ticks from a helper thread (the thread-pool executor has no timers), and the editor's
+/// only redraw trigger: one tick, one frame. The interval is the user's frame rate, or the idle
+/// rate when nothing has moved for a moment (`quality`). `SCRIPTFX_FRAME_US` overrides both.
+/// The thread ends when the editor closes (the receiver is dropped).
 fn frames() -> impl Stream<Item = Instant> {
     let (mut tx, rx) = mpsc::channel(1);
     std::thread::spawn(move || {
+        let forced = std::env::var("SCRIPTFX_FRAME_US").ok().and_then(|v| v.parse().ok());
+        quality::register_clock();
         loop {
-            let us = std::env::var("SCRIPTFX_FRAME_US").ok().and_then(|v| v.parse().ok()).unwrap_or(16_667);
-            std::thread::sleep(Duration::from_micros(us));
+            match forced {
+                Some(us) => std::thread::sleep(Duration::from_micros(us)),
+                // Waits out the frame, or less when the editor is woken from idle.
+                None => quality::wait(),
+            }
             if let Err(e) = tx.try_send(Instant::now()) {
                 if e.is_disconnected() {
                     break;

@@ -273,12 +273,18 @@ Also open: whether to support sharing patches, and a **locked-down mode** for fo
 loads only safe data and shows a generic UI. See the research for the threat model.
 
 ### Effects off switch + GPU safety (part of the raster/shader plan)
-- **Shell setting "Effects off":** disables shaders, effects and animations for all patches.
-  Fallback: layers without their effects, static frames, generated layers as a still image or plain
-  colour. Persisted per user (not per project).
+- **Built 2026-11-26:** the settings sheet has **Graphics** (High / Medium / Low) and a **frame
+  rate** limiter (60 / 30 / 20), per user. Medium drops multisampling (3× the GPU time in our
+  measurements), Low also drops the blur pass and freezes the patch's animation (its components
+  then stop being re-rendered and re-uploaded every frame). The editor now draws only on its own
+  clock — `always_redraw` is off — and **idles at 10 fps** when nothing moves
+  ([`research/render-performance.md`](research/render-performance.md), `shell/quality.rs`).
+  Still open from the original idea: shaders don't exist yet, and a patch that only *declares*
+  effects can't yet have them stripped individually.
 - **Automatic fallback per patch:** measure GPU time per frame; if a patch exceeds its budget, or a
   pass doesn't finish (fence timeout, e.g. a runaway shader), switch that patch to "effects off" and
-  show why, instead of retrying every frame.
+  show why, instead of retrying every frame. **Now implementable**: `iced_wgpu::frame_stats` reports
+  every frame's CPU and GPU cost, and `shell::quality` already owns the levels to drop to.
 - **Validation:** reject shader loops without a constant bound (or inject an iteration cap); cap
   passes per patch and the render scale.
 - Background: [`raster-ui-plan.md`](research/raster-ui-plan.md) (stress test, runaway shader test).
@@ -378,10 +384,24 @@ not only at the plugin's input/output.
 
 ### Platform / build
 - Upstream our patches: runtime param names (nice-plug), X11 frame pacing / poll-timer rate / app
-  resize (baseview / iced_baseview), timestamp queries and the post-process pass (iced_wgpu). Re-vendor on nice-plug updates.
+  resize (baseview / iced_baseview), timestamp queries, per-frame reporting / phase marker / GPU
+  report / wgpu error handler and the post-process pass (iced_wgpu). Re-vendor on nice-plug updates.
 - The GitHub Actions builds are green on all three platforms and the nightly pre-release publishes
-  (verified 2026-11-23). **Open:** install and run the packages — Windows (Fender Studio) and
-  macOS (Studio One 6, including Retina @2x performance).
+  (verified 2026-11-23). The packages have now been run: **both Windows and macOS render badly**
+  (2026-11-26) — see [`research/render-performance.md`](research/render-performance.md):
+  Windows stutters and **mangled input while frames drop** (a knob jumped to min/max, a release
+  could be lost) — **fixed 2026-11-26**: the pointer lock now measures travel between consecutive
+  events, recognises its own warp, caps one event's travel and counts releases window-wide, so a
+  swallowed release still ends the drag and its host gesture. Reproduced and verified with
+  `SCRIPTFX_DIAG_SLOW_MS` (a 40 px drag at 200 ms/frame: 12.0 dB = the rail before, 7.2 dB = the
+  same as at 60 fps after). Still open there: iced evaluates a whole event batch against the
+  *newest* cursor position, so a batched press/release can be mis-targeted;
+  macOS is at ~10–15 **seconds** per frame with pink squares where the icons belong (cause open).
+  **Next:** run the shipped `render-check` script on both machines and read the logs — the plugin
+  now reports every frame's cost by step, names the step a hanging frame is stuck in, logs the GPU
+  it got (software or not) and every wgpu error, and has environment switches that take the
+  suspects (animation, patch art, icons, the blur pass, MSAA, backend, present mode) out one at a
+  time (`crates/plugin/src/diag.rs`, dev aids in `README.md`). Then fix the input handling.
 - Run the pointer lock's FFI (`shell/pointer_lock.rs`) on Windows and macOS: both compile in CI
   now, but neither has been exercised.
 - Hide unused host slots in the host (needs another nice-plug patch; flags + rescan)

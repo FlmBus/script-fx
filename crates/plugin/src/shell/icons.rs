@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{LazyLock, Mutex};
 
+use iced_wgpu::frame_stats::phase;
 use nice_plug_iced::iced::{
     Color, Element,
     widget::image,
@@ -70,6 +71,12 @@ struct Key {
 
 fn raster(body: &str, size: f32, stroke: f32, color: Color, degrees: f32) -> image::Handle {
     static CACHE: LazyLock<Mutex<HashMap<Key, image::Handle>>> = LazyLock::new(Default::default);
+    // `SCRIPTFX_DIAG_NO_ICONS`: nothing in the texture atlas but the patch's layers (`diag.rs`).
+    // One shared handle, so this doesn't itself add an atlas entry per frame.
+    if crate::diag::switches().no_icons {
+        static BLANK: LazyLock<image::Handle> = LazyLock::new(|| image::Handle::from_rgba(1, 1, vec![0; 4]));
+        return BLANK.clone();
+    }
     let px = (size * f32::from_bits(SCALE.load(Ordering::Relaxed))).round().max(1.0) as u32;
     let rgba = color.into_rgba8();
     let key = Key { body: body.to_string(), px, stroke: stroke.to_bits(), rgba, degrees: degrees.to_bits() };
@@ -78,6 +85,16 @@ fn raster(body: &str, size: f32, stroke: f32, color: Color, degrees: f32) -> ima
 }
 
 fn render(body: &str, px: u32, stroke: f32, [r, g, b, a]: [u8; 4], degrees: f32) -> image::Handle {
+    // Counted and timed: in a steady state no icon should be rasterised at all, so a frame line
+    // that keeps reporting icon rasters means the cache key changes (scale, colour) every frame.
+    crate::diag::note_icon_raster();
+    let was = phase::enter(phase::ICON_RASTER);
+    let handle = render_inner(body, px, stroke, [r, g, b, a], degrees);
+    phase::enter(was);
+    handle
+}
+
+fn render_inner(body: &str, px: u32, stroke: f32, [r, g, b, a]: [u8; 4], degrees: f32) -> image::Handle {
     // `black` in a body (AUTO's filled half) means "the icon colour", like the stroke.
     let body = body.replace("\"black\"", "\"currentColor\"");
     let doc = format!(

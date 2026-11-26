@@ -178,6 +178,22 @@ impl Compositor {
 
             match result {
                 Ok((device, queue)) => {
+                    // PATCH(scriptfx): one greppable report of what we got, for the diagnostics
+                    // log, and every uncaptured error (validation, OOM, device lost) logged and
+                    // counted instead of only panicking somewhere later.
+                    crate::frame_stats::set_gpu_report(gpu_report(
+                        &instance,
+                        &adapter,
+                        &device,
+                        &settings,
+                        format,
+                        alpha_mode,
+                    ));
+                    device.on_uncaptured_error(std::sync::Arc::new(|error| {
+                        crate::frame_stats::wgpu_error();
+                        log::error!("wgpu error: {error}");
+                    }));
+
                     let engine = Engine::new(
                         &adapter,
                         device,
@@ -204,6 +220,67 @@ impl Compositor {
 
         Err(Error::RequestDeviceFailed(errors))
     }
+}
+
+/// PATCH(scriptfx): the GPU setup as one block, for `frame_stats::gpu_report`. Everything here is
+/// also in the `log::info!` lines above, but scattered and only at info level; a test machine
+/// sends back a log, so the facts that decide "is this hardware-accelerated, and with what" belong
+/// in one place.
+#[cfg(not(target_arch = "wasm32"))]
+fn gpu_report(
+    instance: &wgpu::Instance,
+    adapter: &wgpu::Adapter,
+    device: &wgpu::Device,
+    settings: &Settings,
+    format: wgpu::TextureFormat,
+    alpha_mode: wgpu::CompositeAlphaMode,
+) -> String {
+    use std::fmt::Write;
+
+    let info = adapter.get_info();
+    let limits = device.limits();
+    let mut s = String::new();
+    let _ = writeln!(s, "gpu: {} ({:?})", info.name, info.device_type);
+    let _ = writeln!(
+        s,
+        "gpu: backend {:?} · vendor 0x{:04x} device 0x{:04x} · driver {} {}",
+        info.backend, info.vendor, info.device, info.driver, info.driver_info
+    );
+    let _ = writeln!(
+        s,
+        "gpu: software adapter: {} (Cpu = no hardware acceleration)",
+        info.device_type == wgpu::DeviceType::Cpu
+    );
+    let _ = writeln!(
+        s,
+        "gpu: surface {format:?} · alpha {alpha_mode:?} · present {:?} · antialiasing {:?}",
+        settings.present_mode, settings.antialiasing
+    );
+    let _ = writeln!(
+        s,
+        "gpu: timestamp queries: {} · max texture 2d {} · max buffer {} MiB",
+        device.features().contains(crate::frame_stats::FEATURES),
+        limits.max_texture_dimension_2d,
+        limits.max_buffer_size / (1 << 20)
+    );
+    for other in instance.enumerate_adapters(settings.backends) {
+        let i = other.get_info();
+        let _ = writeln!(s, "gpu: available: {} · {:?} · {:?}", i.name, i.backend, i.device_type);
+    }
+    s.truncate(s.trim_end().len());
+    s
+}
+
+#[cfg(target_arch = "wasm32")]
+fn gpu_report(
+    _instance: &wgpu::Instance,
+    adapter: &wgpu::Adapter,
+    _device: &wgpu::Device,
+    _settings: &Settings,
+    format: wgpu::TextureFormat,
+    alpha_mode: wgpu::CompositeAlphaMode,
+) -> String {
+    format!("gpu: {:?} · surface {format:?} · alpha {alpha_mode:?}", adapter.get_info())
 }
 
 /// Creates a [`Compositor`] with the given [`Settings`] and window.
@@ -240,22 +317,36 @@ pub fn present(
             // Present the frame
             on_pre_present();
             frame.present();
+            crate::frame_stats::swap_done(); // PATCH(scriptfx)
 
             Ok(())
         }
-        Err(error) => match error {
-            wgpu::SurfaceError::Timeout => {
-                Err(compositor::SurfaceError::Timeout)
+        Err(error) => {
+            // PATCH(scriptfx): no frame happened, so don't leave the phase marker inside one (the
+            // plugin's watchdog would report a stall that is really a failed acquire), and say so:
+            // a surface that keeps failing looks like a frozen window.
+            let _ =
+                crate::frame_stats::phase::enter(crate::frame_stats::phase::IDLE);
+            log::warn!("surface error: {error:?}");
+
+            match error {
+                wgpu::SurfaceError::Timeout => {
+                    Err(compositor::SurfaceError::Timeout)
+                }
+                wgpu::SurfaceError::Outdated => {
+                    Err(compositor::SurfaceError::Outdated)
+                }
+                wgpu::SurfaceError::Lost => {
+                    Err(compositor::SurfaceError::Lost)
+                }
+                wgpu::SurfaceError::OutOfMemory => {
+                    Err(compositor::SurfaceError::OutOfMemory)
+                }
+                wgpu::SurfaceError::Other => {
+                    Err(compositor::SurfaceError::Other)
+                }
             }
-            wgpu::SurfaceError::Outdated => {
-                Err(compositor::SurfaceError::Outdated)
-            }
-            wgpu::SurfaceError::Lost => Err(compositor::SurfaceError::Lost),
-            wgpu::SurfaceError::OutOfMemory => {
-                Err(compositor::SurfaceError::OutOfMemory)
-            }
-            wgpu::SurfaceError::Other => Err(compositor::SurfaceError::Other),
-        },
+        }
     }
 }
 

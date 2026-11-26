@@ -515,7 +515,10 @@ impl Session {
         self.values.meter_out = level(shared.meter_out.load(std::sync::atomic::Ordering::Relaxed));
         shared.block_meters(&mut self.values.blocks);
         self.values.tempo = shared.tempo.load(std::sync::atomic::Ordering::Relaxed);
-        self.values.time = self.start.elapsed().as_secs_f32();
+        // Low quality (or `SCRIPTFX_DIAG_STILL`) freezes the clock: animated components stop
+        // changing, so their layers stop being re-rasterised and re-uploaded every frame — the
+        // biggest per-frame cost there is (`shell::quality`).
+        self.values.time = if super::quality::animations() { self.start.elapsed().as_secs_f32() } else { 0.0 };
     }
 
     fn poll_hot_reload(&mut self, ctx: &GuiContext, params: &FxParams, shared: &Shared) {

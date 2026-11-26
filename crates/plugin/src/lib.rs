@@ -16,7 +16,7 @@ use patch::{MACRO_SLOTS, ModEdits, ModSettings, Patch};
 
 mod assistant;
 mod captures;
-mod diag;
+pub mod diag;
 mod dialog;
 mod listen;
 mod shell;

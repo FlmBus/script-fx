@@ -138,6 +138,12 @@ fn input(state: &mut State, event: &Event, bounds: Rectangle, cursor: mouse::Cur
         Event::Mouse(mouse::Event::CursorMoved { position }) => {
             state.hover = cursor.is_over(bounds);
             let d = state.drag.as_mut()?;
+            // The button went up without us seeing the release (a batched release can be
+            // swallowed, see `pointer_lock`): end the drag and the host's gesture.
+            if d.ended() {
+                state.drag = None;
+                return Some(KnobEvent::End);
+            }
             let fine = if state.fine { FINE } else { 1.0 };
             // Relative to the last event (the pointer stays locked where it grabbed).
             Some(KnobEvent::Set(d.moved(position.y, fine / DRAG_RANGE, 0.0..=1.0)))
@@ -731,6 +737,12 @@ fn meta_input<M: From<(usize, KnobEvent)>>(
         Event::Mouse(mouse::Event::CursorMoved { position }) => {
             state.meta_hover = cursor.position_over(bounds).and_then(dial_at);
             let (k, drag) = state.meta_drag.as_mut()?;
+            // The release never reached us (see `pointer_lock`): end it ourselves.
+            if drag.ended() {
+                let k = *k;
+                state.meta_drag = None;
+                return publish(k, MetaEvent::End);
+            }
             let fine = if state.fine { FINE } else { 1.0 };
             // 200 px = the whole −100…+100 % span.
             let v = drag.moved(position.y, fine * 2.0 / DRAG_RANGE, -1.0..=1.0);

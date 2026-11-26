@@ -12,7 +12,7 @@ use nice_plug_iced::iced::{
 use super::{icons, sheet, tabs, theme};
 use crate::assistant::Connection;
 use crate::captures;
-use crate::user_settings::{self, Ai, Provider, ThemeMode};
+use crate::user_settings::{self, Ai, Provider, Quality, ThemeMode};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -20,6 +20,8 @@ pub enum Message {
     SetTheme(ThemeMode),
     ScaleDown,
     ScaleUp,
+    SetQuality(Quality),
+    SetFrameRate(u32),
     TogglePassive,
     /// Delete every stored capture (audio + analyses).
     ClearCaptures,
@@ -46,6 +48,9 @@ pub struct Props<'a> {
     pub theme: ThemeMode,
     /// 1.0 = 100 %.
     pub ui_scale: f32,
+    /// What the editor may spend per frame, and the frames per second it aims for.
+    pub quality: Quality,
+    pub frame_rate: u32,
     pub passive: bool,
     /// False while passive mode isn't implemented.
     pub passive_available: bool,
@@ -65,6 +70,10 @@ pub fn view<'a>(p: Props<'a>) -> Element<'a, Message> {
         sheet::section_title("Appearance · for you, in every project"),
         setting("Theme", "Auto follows your computer's setting", theme_switch(p.theme)),
         setting("Interface size", "resizes the plugin window", scale(p.ui_scale)),
+        space::vertical().height(4),
+        sheet::section_title("Performance · for you, in every project"),
+        setting("Graphics", super::quality::hint(p.quality), quality_switch(p.quality)),
+        setting("Frame rate", "the editor's upper limit; it draws slower when nothing moves", frame_rate_switch(p.frame_rate)),
         space::vertical().height(4),
         ai(&p),
         space::vertical().height(4),
@@ -271,6 +280,44 @@ fn theme_switch<'a>(mode: ThemeMode) -> Element<'a, Message> {
     let off = row(ThemeMode::ALL.into_iter().map(|m| segment(m, false))).spacing(2);
     let on = row(ThemeMode::ALL.into_iter().map(|m| segment(m, true))).spacing(2);
     let selected = ThemeMode::ALL.iter().position(|m| *m == mode);
+    let pill = tabs::Pill {
+        background: theme::c().paper_ink,
+        radius: theme::RADIUS_BUTTON - 2.0,
+        shadow: Default::default(),
+    };
+    track(tabs::tabs(off, on, selected, pill).into())
+}
+
+/// High | Medium | Low, the same pill switch as the theme.
+fn quality_switch<'a>(level: Quality) -> Element<'a, Message> {
+    pills(
+        Quality::ALL.map(|q| (q.label().to_string(), q == level, Message::SetQuality(q))).to_vec(),
+    )
+}
+
+/// 60 | 30 | 20 fps.
+fn frame_rate_switch<'a>(rate: u32) -> Element<'a, Message> {
+    pills(
+        user_settings::FRAME_RATES
+            .map(|r| (format!("{r} fps"), r == rate, Message::SetFrameRate(r)))
+            .to_vec(),
+    )
+}
+
+/// A row of segments with the highlight sliding between them (as `theme_switch`, text only).
+fn pills<'a>(items: Vec<(String, bool, Message)>) -> Element<'a, Message> {
+    let segment = |label: &str, selected: bool, msg: Message, on: bool| -> Element<'a, Message> {
+        let ink = if on { theme::c().on_paper_ink } else { theme::c().paper_ink };
+        button(container(text(label.to_string()).size(11.5).font(theme::font::PAPER).color(ink)).center_y(Fill))
+            .on_press_maybe((!selected).then_some(msg))
+            .height(24)
+            .padding(Padding { left: 9.0, right: 9.0, ..Padding::ZERO })
+            .style(tabs::style(on, segment_style(on)))
+            .into()
+    };
+    let off = row(items.iter().map(|(l, sel, m)| segment(l, *sel, m.clone(), false))).spacing(2);
+    let on = row(items.iter().map(|(l, sel, m)| segment(l, *sel, m.clone(), true))).spacing(2);
+    let selected = items.iter().position(|(_, sel, _)| *sel);
     let pill = tabs::Pill {
         background: theme::c().paper_ink,
         radius: theme::RADIUS_BUTTON - 2.0,

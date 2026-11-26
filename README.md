@@ -93,9 +93,40 @@ Without the plugin: `cargo run -p llm --example ask -- patches tape-glow "make i
 | `SCRIPTFX_DEV_AUTOLISTEN=10` | start a 10 s listen when the editor opens |
 | `SCRIPTFX_DEV_STATS=1` | fps, render CPU, GPU time, panel stats |
 | `SCRIPTFX_FRAME_US=16667` | the shell's frame interval |
+| `SCRIPTFX_LOG=info` | log filter (diagnostics builds), e.g. `info,iced_wgpu::image=debug` for every atlas allocation |
+| `SCRIPTFX_DIAG_FRAMES=auto` | the frame log: `auto` (first 20, the slow ones, a summary every 5 s), `all`, `off` |
+| `SCRIPTFX_SLOW_FRAME_MS=50` | a frame at least this slow gets a line |
+| `SCRIPTFX_STALL_MS=1000` | a frame unfinished for this long is logged *while it hangs*, naming the step |
+| `SCRIPTFX_DIAG_RUN=<name>` | names the run in the log (a matrix of runs stays readable) |
+| `SCRIPTFX_DIAG_EXIT_AFTER=15` | the **standalone** ends itself after N s (unattended runs) |
+| `SCRIPTFX_DIAG_STILL=1` | freeze animation: the patch's layers stop being re-rasterised and re-uploaded |
+| `SCRIPTFX_DIAG_NO_PATCH_LAYERS=1` | don't draw the patch's rasterised art |
+| `SCRIPTFX_DIAG_NO_ICONS=1` | draw no icon images |
+| `SCRIPTFX_DIAG_NO_POSTFX=1` | never set a post-process effect (the modal's blur) |
+| `SCRIPTFX_DIAG_NO_MSAA=1` | antialiasing off (iced defaults to MSAA ×4) |
+| `SCRIPTFX_DIAG_SLOW_MS=200` | sleep that long in every frame: a stuttering machine, here (input then arrives in batches) |
+| `WGPU_BACKEND`, `WGPU_POWER_PREF`, `ICED_PRESENT_MODE` | wgpu's and iced's own overrides (`vulkan`/`dx12`/`metal`/`gl`, `high`/`low`, `immediate`/`vsync`/`mailbox`…) |
 | `SCRIPTFX_TEST_INPUT=file.wav` | float WAV at the host rate, looped as input |
 | `SCRIPTFX_CAPTURES=<folder>` | where Listen stores captures (default: the user data dir) |
 | `SCRIPTFX_SNAPSHOTS=<folder>` | where snapshots are stored (default: `<data dir>/ScriptFX/snapshots`) |
+
+**On a weak machine:** the settings sheet has **Graphics** (High / Medium / Low) and a **frame
+rate** limiter (60 / 30 / 20 fps), saved per user. Medium turns multisampling off (it costs 3× the
+GPU time per frame; it only takes effect when the window is reopened, because iced fixes it with
+the compositor), Low also drops the modal's blur pass and freezes the patch's animation, which
+stops its components being re-rasterised and re-uploaded every frame. The editor draws only on its
+own clock, so the limiter really limits, and it **idles at 10 fps** when nothing moves
+(`shell/quality.rs`). What each level is worth is measured in
+[`docs/research/render-performance.md`](docs/research/render-performance.md).
+
+**When rendering is slow or wrong** (`crates/plugin/src/diag.rs`): every presented frame is
+reported through the log — where its time went (`view+iced` / `acquire` / `encode` / `swap` /
+`idle`, plus the GPU's own time), what it cost in images (atlas uploads, bytes, atlas growth), the
+patch surface's rasterisation, icon rasterisations, the input events the frame's batch carried, and
+wgpu errors. A frame that hangs is logged *while it hangs*, naming the step. The `gpu:` lines at
+the first frame say which adapter and backend we got and whether it is a software one. The bisect
+switches above take one suspect out at a time; the shipped packages have a `render-check` script
+(`.github/package/<platform>/`) that runs the whole matrix unattended, ~15 s per run.
 
 **Testing the UI on Linux:** run the standalone off-screen on Xvfb (`Xvfb :99`, then
 `DISPLAY=:99 WAYLAND_DISPLAY= WGPU_BACKEND=vulkan`); xdotool clicks and drags work there (they don't

@@ -3,14 +3,32 @@
 Vendored from crates.io: `iced_wgpu` 0.14.0 (MIT). Applied via `[patch.crates-io]`. Changes are
 marked `PATCH(scriptfx)`.
 
-## 1. Frame timing (`src/frame_stats.rs`, `src/lib.rs`, `src/window/compositor.rs`)
+## 1. Frame timing and render diagnostics (`src/frame_stats.rs`, `src/lib.rs`, `src/window/compositor.rs`, `src/image/atlas.rs`)
 
 - The device requests `TIMESTAMP_QUERY` + `TIMESTAMP_QUERY_INSIDE_ENCODERS` when the adapter has
   them (iced requests no optional features).
 - Each frame is wrapped in two GPU timestamps (read back a few frames late, no stall); CPU time of
   `Renderer::present` and the present interval are measured too.
-- `iced_wgpu::frame_stats::get()` returns them (dev readout `SCRIPTFX_DEV_STATS=1`). The per-patch
-  GPU budget of the raster UI plan needs GPU timing; unpatched iced can't provide it.
+- `iced_wgpu::frame_stats::get()` returns them smoothed (dev readout `SCRIPTFX_DEV_STATS=1`). The
+  per-patch GPU budget of the raster UI plan needs GPU timing; unpatched iced can't provide it.
+- **Per-frame reporting** (2026-11-26, for `crates/plugin/src/diag.rs`): `frame_stats::on_frame`
+  takes a hook that every presented frame is reported to, raw, as a `Frame`: the frame interval,
+  `ui` (the app's `view` plus iced's layout and draw, from `mark_frame_start` to the swapchain
+  image being asked for), `acquire` (waiting for that image), `render` (`Renderer::present`),
+  `swap` (`frame.present()`), the GPU's own time, the images uploaded into the texture atlas and
+  their size, how often the atlas grew (a grow copies all of it), the atlas's layers and live
+  allocations, whether a post-process effect was on, and the uncaptured wgpu errors so far.
+  The frame is reported from `swap_done`, after the image is handed over, so `swap` is included.
+- **`frame_stats::phase`**: a marker for what the UI thread is doing (the app sets its own steps;
+  the renderer sets `iced layout+draw`, `acquire`, `encode+submit`, `swap buffers`). The plugin's
+  watchdog reads it to name the step a hanging frame is stuck in.
+- **`frame_stats::gpu_report()`**: adapter, backend, driver, whether the adapter is a software one
+  (`DeviceType::Cpu`), surface format, alpha and present mode, antialiasing, timestamp support,
+  limits, and the other adapters that were available — one greppable block, built where the
+  compositor picks them. iced logs these facts too, but scattered and only at info level.
+- **Uncaptured wgpu errors** (`device.on_uncaptured_error`): logged at error level and counted,
+  instead of surfacing as a panic somewhere later. A failing texture upload is exactly the kind of
+  thing that shows up as garbage on screen on one platform only.
 
 ## 2. Post-process pass (`src/postfx.rs`, `src/lib.rs`)
 

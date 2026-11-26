@@ -16,6 +16,7 @@ What each file is and how current it is. The project's state and decisions are i
 | [`kontakt-ui.md`](kontakt-ui.md) | How Kontakt does instrument UIs | Background |
 | [`raster-ui-plan.md`](raster-ui-plan.md) | Raster layers, sprite sheets, shader layers, effects toggle | Its "scrap the components" decision was reversed; the rest are open ideas |
 | [`patch-fonts.md`](patch-fonts.md) | Image-based and SVG fonts for patches | Built for titles; ControlPanel text next |
+| [`render-performance.md`](render-performance.md) | Windows stutter + mangled input, macOS at 10–15 s per frame and pink squares: the reports, what the code says, and the render diagnostics built for it (frame lines, stall watchdog, GPU report, bisect switches) | **Current work** (2026-11-26); problem 3's cause found, 1 and 2 await the logs |
 | [`findings.md`](findings.md) | Measurements and lessons from the proofs of concept (resvg, chains, components, Linux) | Archive; numbers from the time |
 
 Images: `img/` (mockup screenshots in `img/chain-editor/`, spike screenshots).

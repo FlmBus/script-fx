@@ -65,7 +65,18 @@ impl<M: Clone> Widget<M, Theme, Renderer> for HideCursor<'_, M> {
         shell: &mut Shell<'_, M>,
         viewport: &Rectangle,
     ) {
+        // Every input event passes through here, so this is where the diagnostics log counts them
+        // (`diag.rs`): iced hands a frame the whole batch that piled up since the last one, so
+        // "events per frame" is how far behind input is running.
+        match event {
+            Event::Mouse(mouse::Event::CursorMoved { .. }) => crate::diag::note_event(true),
+            Event::Mouse(_) | Event::Keyboard(_) | Event::Touch(_) => crate::diag::note_event(false),
+            _ => {}
+        }
         if let Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) = event {
+            // Counted before the content sees it, so a control whose own release gets lost can
+            // still tell that the button went up (`pointer_lock::Drag::ended`).
+            super::pointer_lock::note_release();
             shell.publish(self.released.clone());
         }
         self.content.as_widget_mut().update(tree, event, layout, cursor, renderer, clipboard, shell, viewport);

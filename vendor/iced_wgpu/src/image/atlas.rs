@@ -153,6 +153,15 @@ impl Atlas {
             }
         }
 
+        // PATCH(scriptfx): counted per frame for the diagnostics log. Uploading a big image every
+        // frame (a re-rasterised patch layer) and growing the atlas (which copies all of it) are
+        // both invisible otherwise.
+        crate::frame_stats::image_uploaded(width, height);
+        crate::frame_stats::atlas_state(
+            self.layers.len(),
+            self.layers.iter().map(Layer::allocations).sum::<usize>(),
+        );
+
         if log::log_enabled!(log::Level::Debug) {
             log::debug!(
                 "Atlas layers: {} (busy: {}, allocations: {})",
@@ -178,6 +187,12 @@ impl Atlas {
                 }
             }
         }
+
+        // PATCH(scriptfx): keep the gauge the diagnostics log reads in step.
+        crate::frame_stats::atlas_state(
+            self.layers.len(),
+            self.layers.iter().map(Layer::allocations).sum::<usize>(),
+        );
     }
 
     fn allocate(&mut self, width: u32, height: u32) -> Option<Entry> {
@@ -538,5 +553,7 @@ impl Atlas {
                     ),
                 }],
             }));
+
+        crate::frame_stats::atlas_grew(self.layers.len()); // PATCH(scriptfx)
     }
 }
