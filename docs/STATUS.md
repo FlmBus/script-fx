@@ -1,7 +1,8 @@
 # ScriptFX: status, decisions & next steps
 
-_Last updated: 2026-11-25. Read this first when picking the project back up. How to build, run and
-write patches: [`README.md`](../README.md). What each session built: [`HISTORY.md`](HISTORY.md).
+_Last updated: 2026-11-26. Read this first when picking the project back up. How to build, run and
+write patches: [`README.md`](../README.md). What everything is called: [`GLOSSARY.md`](GLOSSARY.md).
+What each session built: [`HISTORY.md`](HISTORY.md).
 Concepts, research and measurements: [`research/`](research/)._
 
 ## Current state

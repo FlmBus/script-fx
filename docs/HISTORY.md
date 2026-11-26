@@ -2,8 +2,43 @@
 
 _What earlier sessions built and found, newest first. Moved here from STATUS "Where we left off"
 (2026-11-20) so STATUS stays about the current state; nothing was shortened. Later work may have
-changed details (e.g. the panel is now the "Surface" view, macros are Serum-style slots). Measurements
+changed details (e.g. a patch's `panel` is now its `surface`, macros are Serum-style slots). Measurements
 and findings: [`research/findings.md`](research/findings.md)._
+
+## 2026-11-26 · Viewport terminology, the chain surface, `ui.Surface`
+
+Housekeeping with Flemming: a name for what the viewport shows. The proposal was three tiers
+(viewport → view → page/surface); Flemming then asked why the built-ins and a patch's UI are
+differentiated at all, which collapsed it to two — **viewport → surface**, the chain and the
+Matrix being surfaces exactly as a patch's own UI is. `page` was retired (it had meant the block
+editor, the whole viewport content *and* a modal's knob groups), and `view` rejected as a noun
+because it is Iced's method name. Vocabulary moved out of STATUS into
+[`GLOSSARY.md`](GLOSSARY.md) so there is one place for it.
+
+The payoff was not multi-surface patches but ownership: `shell/viewport.rs` holds `SurfaceId` and
+the switcher list (per-view special cases became per-surface traits), and `shell/chain_surface.rs`
+took the chain's state out of the shell struct — the block modal, the camera, `chain_content`. The
+shell no longer knows what a block is; the seam is `Ctx` in, `Look` out, with the renderer's blur
+staying in the shell. `mod.rs` 1801 → 1515 lines.
+
+Then `main` turned out to be four commits ahead (mod dock, snapshots, llm) — a first `git fetch`
+had silently not reached the network, so the "nothing to merge" read was from stale refs; caught
+with `git ls-remote`. The merge took upstream's design and this branch's structure: the one-row
+notch and the corner icon switcher stayed but are driven by the surface list, and the chain
+surface was ported onto the dock (`editor_height`) and the backdrop blur. `modal_look` turned out
+byte-identical and `chain_content` differed only by the backdrop wrapper, so the port was small.
+`SurfaceId::wants_drawer` was dropped: upstream had removed the behaviour it modelled.
+
+Finally the Luau break, while there are six patches and no users: `panel = ui.Panel.new{…}` →
+`surface = ui.Surface.new{…}`, `has_panel` → `has_surface`, `stage::Panel` → `stage::Surface`,
+`shell/surface.rs` → `default_surface.rs`, and "ControlPanel" gone from the code. The Lua field was
+named in **six** independent places (validator spec, `PATCH_FIELDS`, the constructor, `Ui::reload`'s
+`patch.get`, `stage.rs`'s test bindings, five fixtures) and they surfaced one at a time over four
+test cycles — a `grep -rn "panel\s*="` first would have found most at once. Two were functional,
+not cosmetic: the assistant's system prompt (it would have written patches with the dead field) and
+the user-visible `(panel)` load error. A patch still declares at most one surface; the plural shape
+is deferred, the shell side already being list-driven. Verified: 201 tests green, and on Xvfb the
+three surfaces, the block modal and Tape Glow's own surface.
 
 ## 2026-11-25 · Snapshots
 
