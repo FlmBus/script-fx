@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Patch ControlPanel (Tape Glow, 960×540)</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<!-- The patch's own UI on the new 960 × 540 canvas (16:9, drawn 1:1) -->
+<div style="width: 960px; height: 540px; position: relative; overflow: hidden; background: #17141c; border-radius: 12px; font-family: Inter, system-ui, sans-serif; color: #f1e6dc">
+  <svg width="960" height="540" viewBox="0 0 960 540" aria-hidden="true">
+    <defs>
+      <radialGradient id="pack" cx="50%" cy="50%" r="50%"><stop offset="55%" stop-color="#4a3424"/><stop offset="100%" stop-color="#2a1c13"/></radialGradient>
+      <radialGradient id="glow" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#ff8a3d" stop-opacity="0.55"/><stop offset="100%" stop-color="#ff8a3d" stop-opacity="0"/></radialGradient>
+    </defs>
+    <rect x="16" y="16" width="928" height="508" rx="18" fill="#221c27" stroke="#3a3040" stroke-width="1.5"/>
+    <text x="48" y="64" fill="#f1e6dc" font-family="Inter" font-weight="600" font-size="26" letter-spacing="6">TAPE GLOW</text>
+    <text x="50" y="82" fill="#9a8f9e" font-family="Inter" font-size="9" letter-spacing="2.5">SATURATION · TONE · TAPE</text>
+    <rect x="40" y="98" width="880" height="226" rx="14" fill="#120f15" stroke="#3a3040"/>
+    <g>
+      <circle cx="250" cy="211" r="86" fill="#0b090d"/>
+      <circle cx="250" cy="211" r="78" fill="url(#pack)"/>
+      <g stroke="#b9b2c2" stroke-width="10" stroke-linecap="round"><line x1="250" y1="211" x2="198" y2="188"/><line x1="250" y1="211" x2="302" y2="183"/><line x1="250" y1="211" x2="248" y2="273"/></g>
+      <circle cx="250" cy="211" r="20" fill="#cfc7d6"/><circle cx="250" cy="211" r="7" fill="#17141c"/>
+    </g>
+    <g>
+      <circle cx="710" cy="211" r="86" fill="#0b090d"/>
+      <circle cx="710" cy="211" r="78" fill="url(#pack)"/>
+      <g stroke="#b9b2c2" stroke-width="10" stroke-linecap="round"><line x1="710" y1="211" x2="684" y2="153"/><line x1="710" y1="211" x2="769" y2="218"/><line x1="710" y1="211" x2="674" y2="263"/></g>
+      <circle cx="710" cy="211" r="20" fill="#cfc7d6"/><circle cx="710" cy="211" r="7" fill="#17141c"/>
+    </g>
+    <path d="M250 289 L390 302 L480 294 L570 302 L710 289" fill="none" stroke="#3d2a1c" stroke-width="3"/>
+    <circle cx="480" cy="298" r="64" fill="url(#glow)"/>
+    <rect x="460" y="288" width="40" height="22" rx="4" fill="#8d8696" stroke="#1a161d"/>
+    <rect x="390" y="116" width="180" height="120" rx="10" fill="#f3ead9"/>
+    <path d="M410 188 A74 74 0 0 1 550 188" fill="none" stroke="#2a2430" stroke-width="1.5"/>
+    <path d="M524 158 A74 74 0 0 1 550 188" fill="none" stroke="#d9472b" stroke-width="3"/>
+    <line x1="480" y1="224" x2="442" y2="168" stroke="#2a2430" stroke-width="2"/>
+    <text x="480" y="212" fill="#2a2430" font-family="Inter" font-weight="600" font-size="14" text-anchor="middle">VU</text>
+    <line x1="56" y1="344" x2="904" y2="344" stroke="#3a3040"/>
+    <g fill="none" stroke-linecap="round">
+      <circle cx="170" cy="418" r="42" stroke="#3a3040" stroke-width="5" stroke-dasharray="197.9 400" transform="rotate(135 170 418)"/>
+      <circle cx="170" cy="418" r="42" stroke="#ff8a3d" stroke-width="5" stroke-dasharray="197.9 400" transform="rotate(135 170 418)"/>
+      <circle cx="480" cy="418" r="42" stroke="#3a3040" stroke-width="5" stroke-dasharray="197.9 400" transform="rotate(135 480 418)"/>
+      <circle cx="480" cy="418" r="42" stroke="#ff8a3d" stroke-width="5" stroke-dasharray="59.4 400" transform="rotate(135 480 418)"/>
+      <circle cx="790" cy="418" r="42" stroke="#3a3040" stroke-width="5" stroke-dasharray="197.9 400" transform="rotate(135 790 418)"/>
+      <circle cx="790" cy="418" r="42" stroke="#ff8a3d" stroke-width="5" stroke-dasharray="99 400" transform="rotate(135 790 418)"/>
+    </g>
+    <g fill="#2c2532" stroke="#463b4c"><circle cx="170" cy="418" r="32"/><circle cx="480" cy="418" r="32"/><circle cx="790" cy="418" r="32"/></g>
+    <g stroke="#f1e6dc" stroke-width="3" stroke-linecap="round"><line x1="186" y1="434" x2="194" y2="442"/><line x1="464" y1="408" x2="454" y2="402"/><line x1="790" y1="402" x2="790" y2="392"/></g>
+    <g font-family="Inter" font-weight="600" font-size="12" letter-spacing="2" fill="#f1e6dc" text-anchor="middle"><text x="170" y="488">MIX</text><text x="480" y="488">CHARACTER</text><text x="790" y="488">OUTPUT</text></g>
+    <g font-family="Inter" font-size="10" fill="#9a8f9e" text-anchor="middle"><text x="170" y="504">100%</text><text x="480" y="504">30%</text><text x="790" y="504">0.0 dB</text></g>
+    <rect x="265" y="388" width="120" height="54" rx="10" fill="#1a151e" stroke="#3a3040"/>
+    <rect x="575" y="388" width="120" height="54" rx="10" fill="#1a151e" stroke="#3a3040"/>
+    <g font-family="Inter" text-anchor="middle"><text x="325" y="408" fill="#9a8f9e" font-size="9" letter-spacing="2">DRIVE</text><text x="325" y="430" fill="#ff8a3d" font-size="16" font-weight="600">5.4 dB</text><text x="635" y="408" fill="#9a8f9e" font-size="9" letter-spacing="2">TONE</text><text x="635" y="430" fill="#ff8a3d" font-size="16" font-weight="600">9168 Hz</text></g>
+  </svg>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":960,"height":540}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

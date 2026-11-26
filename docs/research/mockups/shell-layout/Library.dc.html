@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Library docked left</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<div style="width: 984px; height: 708px; position: relative; overflow: hidden; background: #0b0b0c; font-family: Inter, system-ui, sans-serif; color: #f4f4f5">
+  <div style="position: absolute; left: 0; top: 0">
+    <dc-import name="TopBar" open="library" hint-size="984px,40px"></dc-import>
+  </div>
+
+  <!-- library column, docked: as tall as the stage -->
+  <div style="position: absolute; left: 12px; top: 44px; width: 240px; height: 540px; background: #0b0b0c; box-sizing: border-box; display: flex; flex-direction: column; gap: 8px; padding: 6px 6px 6px 2px">
+    <div style="display: flex; align-items: center; justify-content: space-between">
+      <span style="font: 600 12.5px Inter">Patches <span style="color: #8b8b94; font-weight: 400">· 6</span></span>
+      <button style="width: 24px; height: 24px; border: 0; border-radius: 6px; background: none; color: #b4b4bc; font: 500 14px Inter; padding: 0" aria-label="Close library">×</button>
+    </div>
+    <label style="font: 400 10px Inter; color: #9b9ba3">Search
+      <input value="" placeholder="name, tag…" style="display: block; margin-top: 4px; width: 100%; box-sizing: border-box; background: #18181b; border: 0; border-radius: 10px; color: #d4d4d8; font: 400 11.5px Inter; padding: 7px 10px">
+    </label>
+    <div style="display: flex; flex-direction: column; gap: 6px">
+      <sc-for list="{{patches}}" as="p" hint-placeholder-count="6">
+        <div style="border-radius: 9px; background: {{p.bg}}; outline: {{p.outline}}; padding: 9px 10px; display: flex; flex-direction: column; gap: 6px">
+          <div style="display: flex; align-items: center; justify-content: space-between">
+            <span style="font: {{p.font}}; color: {{p.accent}}">{{p.name}}</span>
+            <span style="font: 400 9.5px Inter; color: #9b9ba3">{{p.meta}}</span>
+          </div>
+          <sc-if value="{{p.open}}" hint-placeholder-val="{{false}}">
+            <div style="display: flex; flex-direction: column; gap: 2px">
+              <span style="font: 500 10.5px Inter; color: #f4f4f5; background: rgba(255,138,61,0.15); border-radius: 5px; padding: 3px 7px">● Init</span>
+              <span style="font: 400 10.5px Inter; color: #b4b4bc; padding: 3px 7px">Warm bus</span>
+              <span style="font: 400 10.5px Inter; color: #b4b4bc; padding: 3px 7px">Crunchy keys</span>
+            </div>
+          </sc-if>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+
+  <!-- the stage, narrower: the panel scales to fit (74 %) -->
+  <div style="position: absolute; left: 260px; top: 44px; width: 712px; height: 540px; background: #17141c; border-radius: 12px; overflow: hidden">
+    <div style="position: absolute; left: 0; top: 70px; width: 960px; height: 540px; transform: scale(0.742); transform-origin: 0 0">
+      <dc-import name="PatchArt" hint-size="960px,540px"></dc-import>
+    </div>
+  </div>
+  <div style="position: absolute; left: 486px; top: 44px">
+    <dc-import name="Notch" hint-size="260px,36px"></dc-import>
+  </div>
+  <div style="position: absolute; left: 864px; top: 54px">
+    <dc-import name="ViewTabs" active="Surface" hint-size="98px,34px"></dc-import>
+  </div>
+
+  <div style="position: absolute; left: 12px; top: 592px">
+    <dc-import name="Dock" hint-size="960px,108px"></dc-import>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":984,"height":708}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const patches = [
+      { name: 'Bass Helper', accent: '#fbbf24', meta: '12 blocks' },
+      { name: 'Clean Gain', accent: '#4fd1c5', meta: '1 block' },
+      { name: 'Junkyard Amp', accent: '#f87171', meta: '5 blocks' },
+      { name: 'Kitchen Sink', accent: '#f59e0b', meta: '51 blocks' },
+      { name: 'Neon Saturator', accent: '#f472b6', meta: '6 blocks' },
+      { name: 'Tape Glow', accent: '#ff8a3d', meta: '3 blocks', open: true },
+    ].map((p) => ({
+      ...p,
+      open: !!p.open,
+      bg: p.open ? 'rgba(255,138,61,0.12)' : 'rgba(255,255,255,0.035)',
+      outline: 'none',
+      font: p.open ? '600 12px Inter' : '500 12px Inter',
+    }));
+    return { patches };
+  }
+}
+</script>
+</body>
+</html>

@@ -17,7 +17,7 @@ use nice_plug_iced::iced::{
 };
 use patch::{BlockSpec, Patch, Values};
 
-use super::{block_modal, chain_view, icons, knob, motion, notch, routing, stage, theme, zoom};
+use super::{backdrop, block_modal, chain_view, icons, knob, motion, notch, routing, stage, theme, zoom};
 
 /// What the chain surface reports to the shell.
 #[derive(Debug, Clone)]
@@ -39,8 +39,8 @@ pub struct Ctx<'a> {
     /// A macro or modulator being dragged onto a knob.
     pub source_drag: Option<&'a routing::SourceDrag>,
     pub now: Instant,
-    /// How far the drawer is out: the modal centres in the room it leaves.
-    pub drawer_height: f32,
+    /// The modulator editor's height over the stage: the modal centres in the room it leaves.
+    pub editor_height: f32,
 }
 
 /// The chain and its block modal.
@@ -87,6 +87,13 @@ impl ChainSurface {
         self.open = Some(next);
     }
 
+    /// Does the open modal point at params the patch no longer has? (It changed under the UI.)
+    pub fn targets_gone(&self, patch: Option<&Patch>) -> bool {
+        self.open.as_ref().is_some_and(|id| {
+            patch.is_none_or(|p| !p.params.iter().any(|param| param.id.starts_with(&format!("{id}."))))
+        })
+    }
+
     /// Drop the modal at once (switching surfaces, unloading a patch).
     pub fn clear(&mut self) {
         self.open = None;
@@ -114,21 +121,21 @@ impl ChainSurface {
         }
     }
 
-    /// Where the modal sits: centred in the room the notch and the drawer leave (it moves up as
-    /// the drawer opens).
-    fn target(&self, drawer_height: f32) -> iced::Rectangle {
+    /// Where the modal sits: centred in the room the notch and a modulator's editor leave (it
+    /// moves up as the editor rises).
+    fn target(&self, editor_height: f32) -> iced::Rectangle {
         let (w, h) = theme::stage_size();
         let size = block_modal::SIZE;
         let top = notch::size().1 + theme::SPACE_2;
-        let bottom = h - drawer_height - theme::SPACE_2;
+        let bottom = h - editor_height - theme::SPACE_2;
         let y = ((top + bottom - size.height) / 2.0).max(top);
         iced::Rectangle::new(iced::Point::new((w - size.width) / 2.0, y), size)
     }
 
     /// Block `id` in the chain (as last drawn); a small box in the middle until it has been.
-    fn node_rect(&self, id: &str, drawer_height: f32) -> iced::Rectangle {
+    fn node_rect(&self, id: &str, editor_height: f32) -> iced::Rectangle {
         chain_view::rect(id).unwrap_or_else(|| {
-            let c = self.target(drawer_height).center();
+            let c = self.target(editor_height).center();
             iced::Rectangle::new(iced::Point::new(c.x - 40.0, c.y - 15.0), iced::Size::new(80.0, 30.0))
         })
     }
@@ -137,8 +144,8 @@ impl ChainSurface {
     pub fn look(&self, ctx: &Ctx<'_>) -> Option<Look> {
         let id = self.open.as_deref()?;
         let block = find_block(&ctx.patch.chain, id)?;
-        let target = self.target(ctx.drawer_height);
-        let node = self.node_rect(id, ctx.drawer_height);
+        let target = self.target(ctx.editor_height);
+        let node = self.node_rect(id, ctx.editor_height);
         let container = chain_view::is_container(&block.kind);
         let still = Look {
             camera: motion::open(node, target, 1.0).camera,
@@ -181,7 +188,7 @@ impl ChainSurface {
             }
             motion::Kind::Pan { from, forward } => {
                 let e = motion::ease(p);
-                let from_rect = self.node_rect(from, ctx.drawer_height);
+                let from_rect = self.node_rect(from, ctx.editor_height);
                 let camera = motion::pan(from_rect, node, target, e);
                 let octaves = |r: iced::Rectangle| motion::octaves(motion::zoom_factor(r.size(), target.size()));
                 let grid = lerp(octaves(from_rect), octaves(node), e);
@@ -221,7 +228,7 @@ impl ChainSurface {
         };
         let chain = chain_view::view(patch, values, look.is_none(), hidden, look.is_none()).map(|chain_view::Event::Open(id)| Message::Open(id));
         let Some(look) = look else { return chain };
-        let target = self.target(ctx.drawer_height);
+        let target = self.target(ctx.editor_height);
         // The box's ground: the block's colour, solid (a container's card starts as the editor's
         // ground and turns into it).
         let ground = if is_card { mix(theme::c().frame_raised, theme::c().frame_node, (look.open / 0.5).clamp(0.0, 1.0)) } else { theme::c().frame_node };
@@ -250,7 +257,10 @@ impl ChainSurface {
         // A click beside the modal closes it.
         let veil = mouse_area(container(chain_view::zoom_dots(anchor, look.grid)).width(Fill).height(Fill).style(window(theme::alpha(ground_colour, fade))))
             .on_press(Message::Close);
-        let mut layers = stack![container(column![]).width(Fill).height(Fill).style(window(ground_colour)), world, veil, stage::corners()].width(Fill).height(Fill);
+        // The chain under the camera is the blur's backdrop; the box, content, label and arrows
+        // are drawn over it, sharp.
+        let under = stack![container(column![]).width(Fill).height(Fill).style(window(ground_colour)), world, veil, stage::corners()].width(Fill).height(Fill);
+        let mut layers = stack![backdrop::backdrop(under)].width(Fill).height(Fill);
 
         // The box: the block, grown. `Idle`: clicks on it don't fall through to the veil.
         let (r, a, radius) = (look.rect, look.box_alpha, look.radius);

@@ -14,7 +14,6 @@ use nice_plug_iced::iced::{
 #[derive(Debug, Clone)]
 pub enum Message {
     ToggleLibrary,
-    ToggleMacros,
     ToggleControls,
     ToggleChat,
     ToggleSettings,
@@ -22,9 +21,6 @@ pub enum Message {
 
 pub struct Props {
     pub library_open: bool,
-    /// The macro rail needs a patch with macros.
-    pub macros_available: bool,
-    pub macros_open: bool,
     /// The patch's controls exist only with a patch loaded.
     pub controls_available: bool,
     pub controls_open: bool,
@@ -47,10 +43,7 @@ pub fn view<'a>(p: Props) -> Element<'a, Message> {
     .align_y(Center);
 
     // Equal-width sides keep the wordmark centred on the window, whatever sits on the right.
-    let left = row![
-        opener(icons::LIBRARY, Some("Patches"), (!p.passive).then_some(Message::ToggleLibrary), p.library_open),
-        opener(icons::DIAL, Some("Macros"), (p.macros_available && !p.passive).then_some(Message::ToggleMacros), p.macros_open),
-    ]
+    let left = row![opener(icons::LIBRARY, Some("Patches"), (!p.passive).then_some(Message::ToggleLibrary), p.library_open)]
     .spacing(theme::SPACE_HAIR)
     .align_y(Center);
     let bar = row![

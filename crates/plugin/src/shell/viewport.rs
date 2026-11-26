@@ -6,9 +6,11 @@
 //! its own just grows the list.
 //!
 //! What used to be per-view special cases in the shell lives here as per-surface traits
-//! ([`SurfaceId::wants_drawer`], [`SurfaceId::owns_block_modal`], [`SurfaceId::DEFAULT`]).
+//! ([`SurfaceId::owns_block_modal`], [`SurfaceId::DEFAULT`]).
 
 use patch::Patch;
+
+use super::icons;
 
 /// Which surface the viewport shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,12 +27,6 @@ pub enum SurfaceId {
 impl SurfaceId {
     /// Where a patch load and leaving passive mode land: the patch's first surface.
     pub const DEFAULT: Self = Self::Patch(0);
-
-    /// Does the modulator drawer belong over this surface? The Matrix already *is* every route,
-    /// so the drawer would only duplicate it (and it closes when the Matrix opens).
-    pub fn wants_drawer(self) -> bool {
-        !matches!(self, Self::Matrix)
-    }
 
     /// Does this surface own the block modal (and its camera)? Only the chain has blocks to zoom
     /// into, so switching away from it closes the modal.
@@ -49,22 +45,24 @@ impl SurfaceId {
     }
 }
 
-/// One surface in the notch's switcher. `Copy`, so a built segment borrows only the label,
-/// not the list.
+/// One surface in the switcher. `Copy` with `&'static` text, so a built segment borrows nothing
+/// from the list.
 #[derive(Debug, Clone, Copy)]
-pub struct Entry<'a> {
+pub struct Entry {
     pub id: SurfaceId,
-    pub label: &'a str,
+    /// Shown as the icon's tooltip.
+    pub label: &'static str,
+    pub icon: &'static str,
 }
 
 /// The surfaces available for `patch`, in switcher order: its own first, then the built-ins.
 ///
 /// A patch without a surface of its own still gets the first entry — the shell's default macro
 /// surface stands in for it, so the switcher never changes shape.
-pub fn surfaces(_patch: &Patch) -> Vec<Entry<'_>> {
+pub fn surfaces(_patch: &Patch) -> Vec<Entry> {
     vec![
-        Entry { id: SurfaceId::DEFAULT, label: "Surface" },
-        Entry { id: SurfaceId::Chain, label: "Chain" },
-        Entry { id: SurfaceId::Matrix, label: "Matrix" },
+        Entry { id: SurfaceId::DEFAULT, label: "Surface", icon: icons::VIEW_SURFACE },
+        Entry { id: SurfaceId::Chain, label: "Chain", icon: icons::VIEW_CHAIN },
+        Entry { id: SurfaceId::Matrix, label: "Matrix", icon: icons::VIEW_MATRIX },
     ]
 }

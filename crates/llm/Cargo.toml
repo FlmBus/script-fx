@@ -1,0 +1,17 @@
+[package]
+name = "llm"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dirs = "7.0.0"
+dsp = { version = "0.1.0", path = "../dsp" }
+patch = { version = "0.1.0", path = "../patch" }
+# Async only so a request can be cancelled at once (see http.rs). rustls + ring: no C toolchain
+# or system OpenSSL on any platform.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1", features = ["rt", "time", "net", "macros"] }
+ui-components = { version = "0.1.0", path = "../ui-components" }

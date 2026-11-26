@@ -5,6 +5,9 @@ _2026-11-19. Worked out with Flemming in a long mockup session; the mockup is th
 Related: [`../STATUS.md`](../STATUS.md) ("Open directions", decision "Patch kinds"),
 [`patch-code-and-sharing.md`](patch-code-and-sharing.md)._
 
+> **Superseded in part (2026-11-25):** the drawer and the macro rail became the **mod dock**
+> below the stage ([`shell-layout.md`](shell-layout.md)); what this doc says about them is history.
+>
 > **Status (2026-11-21).** Built on `main` (see [`../STATUS.md`](../STATUS.md)):
 > the chain view (it now also snakes through rows), block pages with the zoom, the drawer's tab row,
 > the knob cell, macro modulation. **Changed since this concept:**

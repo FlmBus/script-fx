@@ -1,0 +1,295 @@
+<!doctype html>
+<!-- Rough sketch: the divider-style rack in the shell's design (tokens from shell/theme.rs).
+     Blocks are cards on a vertical wire; a split is a bus bar with its name on it, each lane drops
+     its own wire, a second bus bar joins them. Clicking a block or a split opens its detail view.
+     Not a design; a playground for the idea. Open in a browser, no build. -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Chain sketch · rack in the shell's style</title>
+<style>
+  @font-face { font-family: Inter; font-weight: 400; src: url(../../../crates/plugin/fonts/inter-400.ttf); }
+  @font-face { font-family: Inter; font-weight: 500; src: url(../../../crates/plugin/fonts/inter-500.ttf); }
+  @font-face { font-family: Inter; font-weight: 600; src: url(../../../crates/plugin/fonts/inter-600.ttf); }
+  @font-face { font-family: Inter; font-weight: 700; src: url(../../../crates/plugin/fonts/inter-700.ttf); }
+  @font-face { font-family: "JetBrains Mono"; src: url(../../../crates/plugin/fonts/jetbrains-mono-400.ttf); }
+
+  /* shell/theme.rs, DARK and LIGHT */
+  :root, .dark {
+    --frame: #0b0b0c; --raised: #141416; --node: #161618; --node-hover: #1d1d20;
+    --hair: rgba(255,255,255,.06); --hair-strong: rgba(255,255,255,.09); --wire: rgba(255,255,255,.18);
+    --ink: #fafafa; --ink-3: #d4d4d8; --muted: #a1a1aa; --subtle: #8b8b92; --dots: rgba(255,255,255,.07);
+    --led: #4ade80; --shadow: 0 1px 2px rgba(0,0,0,.5);
+  }
+  .light {
+    --frame: #e7e7ea; --raised: #f4f4f6; --node: #f7f7f9; --node-hover: #ffffff;
+    --hair: rgba(0,0,0,.06); --hair-strong: rgba(0,0,0,.10); --wire: rgba(0,0,0,.22);
+    --ink: #18181b; --ink-3: #3f3f46; --muted: #52525b; --subtle: #5f5f67; --dots: rgba(0,0,0,.08);
+    --led: #15803d; --shadow: 0 1px 2px rgba(0,0,0,.08);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: #050506; color: #cfcfd4; font: 12.5px Inter, system-ui, sans-serif;
+         -webkit-font-smoothing: antialiased; }
+  .bar { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  .bar button { background: #18181b; border: 1px solid #2a2a2f; color: #cfcfd4; border-radius: 6px; padding: 4px 9px; font: inherit; cursor: pointer; }
+  .bar button.on { background: #e9e9ec; color: #111; }
+  .bar select { background: #18181b; color: #cfcfd4; border: 1px solid #2a2a2f; border-radius: 6px; font: inherit; }
+  .notes { max-width: 816px; color: #8a8a92; line-height: 1.55; }
+
+  /* the stage */
+  #wrapS { position: relative; width: 816px; height: 480px; border-radius: 14px; overflow: hidden; }
+  #wrapS.tall { height: auto; }
+  #stage { position: absolute; inset: 0; overflow-y: auto; padding: 22px 28px 30px; background-color: var(--frame);
+           background-image: radial-gradient(var(--dots) 1px, transparent 1.3px); background-size: 18px 18px;
+           background-position: 9px 9px; color: var(--ink); scrollbar-width: thin; scrollbar-color: var(--wire) transparent; }
+  #wrapS.tall #stage { position: static; }
+  #stage.blur { filter: blur(6px) brightness(.6); }
+
+  .chain { display: flex; flex-direction: column; align-items: stretch; min-width: 0; }
+  .lane > .chain { flex: 1; }
+
+  /* the wire between two things in series (and the rest of a short lane) */
+  .link { height: var(--gap, 16px); position: relative; flex: none; }
+  .link.grow { flex: 1; min-height: var(--gap, 16px); }
+  .link::before { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 1.5px; margin-left: -.75px; background: var(--lw, var(--wire)); }
+  .arrows .link:not(.grow)::after { content: ''; position: absolute; left: 50%; bottom: 1px; width: 5px; height: 5px; margin-left: -3px;
+          border-right: 1.5px solid var(--lw, var(--wire)); border-bottom: 1.5px solid var(--lw, var(--wire)); transform: rotate(45deg); }
+
+  .io { display: flex; flex-direction: column; align-items: center; gap: 5px; font-size: 9.5px; letter-spacing: .14em;
+        color: var(--subtle); font-weight: 650; }
+  .io .port { width: 10px; height: 10px; border: 1.5px solid var(--subtle); border-radius: 50%; }
+
+  /* blocks */
+  .card { position: relative; min-height: var(--ch, 56px); border-radius: 12px; background: var(--node); border: 1px solid var(--hair-strong);
+          box-shadow: var(--shadow); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+          padding: 0 12px; min-width: 0; cursor: zoom-in; transition: background .12s, border-color .12s; }
+  .card:hover { background: var(--node-hover); border-color: var(--wire); }
+  .card .t { display: flex; align-items: center; gap: 7px; max-width: 100%; }
+  .card .led { width: 6px; height: 6px; border-radius: 50%; background: var(--led); flex: none; }
+  .card .name { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card .type { font-size: 11px; color: var(--subtle); }
+  .card .mods { position: absolute; right: 10px; top: 9px; display: flex; gap: 3px; }
+  .card .mods i { width: 6px; height: 6px; border-radius: 50%; background: var(--c); }
+  .card.mono .name { font-weight: 500; }
+
+  /* a split: two bus bars, lanes between them */
+  .split { --g: 14px; display: flex; flex-direction: column; min-width: 0; }
+  .bus { position: relative; height: 26px; display: flex; align-items: center; justify-content: center; }
+  .bus::before { content: ''; position: absolute; top: 50%; height: 1.5px; margin-top: -.75px; background: var(--wire);
+                 left: calc((100% - (var(--n) - 1) * var(--g)) / var(--n) / 2);
+                 right: calc((100% - (var(--n) - 1) * var(--g)) / var(--n) / 2); }
+  .bus .tag { position: relative; display: flex; align-items: center; gap: 7px; padding: 3px 11px; border-radius: 999px;
+              background: var(--raised); border: 1px solid var(--hair-strong); font-size: 11.5px; font-weight: 600; cursor: zoom-in; white-space: nowrap; }
+  .bus .tag:hover { border-color: var(--wire); }
+  .bus .tag .g { font-weight: 700; color: var(--muted); min-width: 12px; text-align: center; }
+  .bus .tag .s { font: 10.5px "JetBrains Mono", monospace; color: var(--subtle); font-weight: 400; }
+  .bus.end .tag { font-weight: 500; color: var(--muted); padding: 1px 9px; font-size: 10.5px; }
+  .bus.end.plain .tag { display: none; }
+  .bus.end.plain { height: 14px; }
+  .plainTop .bus.start .tag { background: var(--frame); border-color: transparent; }
+
+  .cols { display: grid; gap: var(--g); grid-template-columns: repeat(var(--n), minmax(0, 1fr)); }
+  .lane { display: flex; flex-direction: column; min-width: 0; --lw: color-mix(in srgb, var(--c) 70%, transparent); border-radius: 14px; position: relative; }
+  /* stubs from the bus bars (half their height) to the lane */
+  .lane::before, .lane::after { content: ''; position: absolute; left: 50%; width: 1.5px; margin-left: -.75px; height: 13px; background: var(--lw); }
+  .lane::before { top: -13px; }
+  .lane::after { bottom: -13px; }
+  .plainEnd .lane::after { height: 7px; bottom: -7px; }
+  .ground-tint .lane { background: color-mix(in srgb, var(--c) 6%, transparent); }
+  .ground-line .lane { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c) 22%, transparent); }
+  .lane .label { position: relative; height: 22px; flex: none; display: flex; align-items: center; justify-content: center; }
+  .lane .label::before { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 1.5px; margin-left: -.75px; background: var(--lw); }
+  .lane .label span { position: relative; padding: 1px 7px; border-radius: 999px; font-size: 10.5px; font-weight: 650; letter-spacing: .02em;
+                      color: var(--c); background: var(--frame); white-space: nowrap; }
+  .ground-tint .lane .label span { background: color-mix(in srgb, var(--c) 6%, var(--frame)); }
+  .lane .thru { text-align: center; font-size: 10px; color: var(--c); opacity: .75; position: relative; height: 18px; line-height: 18px; }
+  .lane .thru span { background: var(--frame); padding: 0 6px; position: relative; }
+  .ground-tint .lane .thru span { background: color-mix(in srgb, var(--c) 6%, var(--frame)); }
+  .lane .thru::before { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 1.5px; margin-left: -.75px; background: var(--lw); }
+
+  /* detail view (stand-in for the block modal) */
+  #modal { position: absolute; left: 50%; top: 50%; width: 626px; height: 266px; margin: -133px 0 0 -313px; border-radius: 14px;
+           background: var(--node); border: 1px solid var(--hair-strong); color: var(--ink); display: none; padding: 16px 18px; z-index: 3;
+           box-shadow: 0 20px 60px rgba(0,0,0,.6); }
+  #modal.on { display: block; }
+  #modal h3 { margin: 0 0 12px; font-size: 15px; font-weight: 650; display: flex; gap: 8px; align-items: center; }
+  #modal h3 .ty { font-size: 12px; color: var(--subtle); font-weight: 400; }
+  #modal .x { position: absolute; right: 14px; top: 12px; color: var(--subtle); cursor: pointer; font-size: 14px; }
+  #modal .row { display: flex; gap: 12px; }
+  #modal .disp { flex: 1; height: 190px; background: var(--raised); border-radius: 10px; position: relative; overflow: hidden; }
+  #modal .cells { display: grid; grid-template-columns: repeat(3, 64px); gap: 6px; align-content: start; }
+  #modal .cell { width: 64px; height: 92px; border-radius: 8px; background: color-mix(in srgb, var(--ink) 4%, transparent); display: flex;
+                 flex-direction: column; align-items: center; justify-content: flex-end; padding-bottom: 9px; gap: 12px; font-size: 10.5px; color: var(--muted); }
+  #modal .cell i { width: 30px; height: 30px; border-radius: 50%; border: 2px solid var(--wire); }
+  #scrim { position: absolute; inset: 0; z-index: 2; display: none; }
+  #scrim.on { display: block; }
+</style>
+</head>
+<body>
+
+<div class="bar"><b>Patch</b> <span id="presets"></span></div>
+<div class="bar">
+  <label>lanes <select id="ground"><option value="none">plain</option><option value="tint" selected>tinted</option><option value="line">outlined</option></select></label>
+  <label><input type="checkbox" id="arrows"> flow arrows</label>
+  <label><input type="checkbox" id="endTags" checked> tag on the joining bar (mix / sum)</label>
+  <label><input type="checkbox" id="mods" checked> modulator dots</label>
+  <label>card height <select id="ch"><option>44</option><option selected>56</option><option>72</option></select></label>
+  <label>gap <select id="gap"><option>10</option><option selected>16</option><option>24</option></select></label>
+  <label><input type="checkbox" id="lowLeft" checked> bands: low on the left</label>
+  <label><input type="checkbox" id="light"> light mode</label>
+  <label><input type="checkbox" id="tall"> full height</label>
+</div>
+
+<div id="wrapS">
+  <div id="stage"></div>
+  <div id="scrim"></div>
+  <div id="modal"></div>
+</div>
+
+<div class="notes">
+  <p><b>Try:</b> click a block or a split's tag to open its detail view (a stand-in for the block modal;
+  click outside or Esc to close) · "full height" shows the whole patch · the stage is the 816 × 480
+  patch window and scrolls.</p>
+</div>
+
+<script>
+// ---------- model (the tree) ----------
+const B = (name, type = '', mods = []) => ({ t: 'block', name, type, mods });
+const Y = (wet, dry, mix = 0.5) => ({ t: 'split', kind: 'y', name: 'Parallel', mix,
+  lanes: [{ label: 'wet', chain: wet }, { label: 'dry', chain: dry }] });
+const BAND = (xo, lanes) => ({ t: 'split', kind: 'band', name: 'Band split', xo, // lanes high → low
+  lanes: lanes.map(chain => ({ chain })) });
+const MS = (mid, side) => ({ t: 'split', kind: 'ms', name: 'Mid / Side',
+  lanes: [{ label: 'mid', chain: mid }, { label: 'side', chain: side }] });
+const LR = (l, r) => ({ t: 'split', kind: 'lr', name: 'Left / Right',
+  lanes: [{ label: 'left', chain: l }, { label: 'right', chain: r }] });
+
+const PRESETS = {
+  'Kitchen sink': () => [B('gate', 'Gate'),
+    MS([B('glue', 'Compressor', ['lfo1']), BAND([4000], [[B('air', 'Saturator')], []])],
+       [B('wide', 'Stereo'), Y([B('chorus', 'Chorus', ['lfo2'])], [B('tone', 'EQ')], 0.6)]),
+    LR([B('echo L', 'Delay')], [B('echo R', 'Delay')]),
+    BAND([5000, 800, 150], [[B('de-ess', 'De-esser')], [], [B('grit', 'Saturator', ['follow']), B('tilt', 'EQ')], [B('punch', 'Compressor', ['step']), B('mono', 'Stereo')]]),
+    B('limit', 'Limiter')],
+  'Parallel comp': () => [B('gate', 'Gate'), B('glue', 'Compressor'), Y([B('smash', 'Compressor', ['follow']), B('heat', 'Saturator')], [], 0.35), B('tone', 'EQ'), B('limit', 'Limiter')],
+  'Band split + nested': () => [B('input', 'Gain'),
+    BAND([3000, 200], [[B('air', 'Exciter', ['lfo1'])], [Y([B('grit', 'Saturator'), B('cab', 'Cabinet')], [])], [B('punch', 'Compressor')]]),
+    B('echo', 'Delay', ['lfo3']), B('space', 'Reverb')],
+};
+let presetName = 'Kitchen sink';
+let chain = PRESETS[presetName]();
+
+// ---------- helpers ----------
+const MOD = { follow: '#60a5fa', lfo1: '#2dd4bf', lfo2: '#f472b6', lfo3: '#a78bfa', step: '#a3e635' };
+// lane colours: bands low → high; the rest per kind (kept away from the modulator colours where possible)
+const LANE_COL = { band: ['#60a5fa', '#4ade80', '#fbbf24', '#f87171'], y: ['#c084fc', '#a1a1aa'],
+  ms: ['#38bdf8', '#f472b6'], lr: ['#2dd4bf', '#facc15'] };
+const laneColor = (n, idx) => { const c = LANE_COL[n.kind], i = n.kind === 'band' ? n.lanes.length - 1 - idx : idx; return c[i % c.length]; };
+const GLYPH = { y: 'Y', band: '≈', ms: 'M/S', lr: 'L/R' };
+const hz = (f) => f >= 1000 ? `${+(f / 1000).toFixed(1)}k` : `${Math.round(f)}`;
+const el = (tag, cls, html = '') => { const e = document.createElement(tag); if (cls) e.className = cls; e.innerHTML = html; return e; };
+function bandLabel(n, i) {
+  const hi = n.xo[i - 1], lo = n.xo[i];
+  if (i === 0) return `> ${hz(lo)}`;
+  if (i === n.lanes.length - 1) return `< ${hz(hi)}`;
+  return `${hz(lo)}–${hz(hi)}`;
+}
+const laneLabel = (n, i) => n.kind === 'band' ? bandLabel(n, i) : n.lanes[i].label;
+const settings = (n) => n.kind === 'band' ? [...n.xo].reverse().map(hz).join(' · ') : n.kind === 'y' ? `mix ${Math.round(n.mix * 100)}%` : '';
+const shown = (n) => n.kind === 'band' && lowLeft.checked ? [...n.lanes].reverse() : n.lanes;
+
+// ---------- rendering ----------
+function renderChain(c, inLane) {
+  const box = el('div', 'chain');
+  c.forEach((n, i) => {
+    if (i > 0) box.append(el('div', 'link'));
+    box.append(renderNode(n));
+  });
+  if (inLane) box.append(el('div', 'link grow')); // the lane's wire runs on to the joining bar
+  return box;
+}
+
+function renderNode(n) {
+  if (n.t === 'block') {
+    const card = el('div', 'card', `<div class="t"><span class="led"></span><span class="name">${n.name}</span></div><div class="type">${n.type}</div>`);
+    if (mods.checked && n.mods.length) card.append(el('div', 'mods', n.mods.map(m => `<i style="--c:${MOD[m]}"></i>`).join('')));
+    card.onclick = () => openDetail(n);
+    return card;
+  }
+  const lanes = shown(n);
+  const s = el('div', 'split');
+  s.style.setProperty('--n', lanes.length);
+
+  const top = el('div', 'bus start', `<span class="tag"><span class="g">${GLYPH[n.kind]}</span>${n.name}<span class="s">${settings(n)}</span></span>`);
+  top.querySelector('.tag').onclick = () => openDetail(n);
+
+  const cols = el('div', 'cols');
+  for (const l of lanes) {
+    const i = n.lanes.indexOf(l);
+    const lane = el('div', 'lane');
+    lane.style.setProperty('--c', laneColor(n, i));
+    lane.append(el('div', 'label', `<span>${laneLabel(n, i)}</span>`));
+    if (!l.chain.length) lane.append(el('div', 'thru', '<span>thru</span>'));
+    else lane.append(el('div', 'link'));
+    lane.append(renderChain(l.chain, true));
+    cols.append(lane);
+  }
+
+  const endText = n.kind === 'y' ? `mix ${Math.round(n.mix * 100)}%` : 'sum';
+  const bottom = el('div', 'bus end' + (endTags.checked ? '' : ' plain'), `<span class="tag">${endText}</span>`);
+  bottom.querySelector('.tag').onclick = () => openDetail(n);
+  s.append(top, cols, bottom);
+  return s;
+}
+
+// ---------- detail view (stand-in) ----------
+function openDetail(n) {
+  const isSplit = n.t === 'split';
+  const title = isSplit ? `<span style="color:var(--muted)">${GLYPH[n.kind]}</span> ${n.name}` : `<span class="led" style="width:7px;height:7px;border-radius:50%;background:var(--led);display:inline-block"></span> ${n.name} <span class="ty">${n.type}</span>`;
+  let disp = '';
+  if (isSplit && n.kind === 'band') {
+    // a spectrum, log 20 Hz … 20 kHz, one colour per band, crossover lines
+    const x = (f) => (Math.log10(f) - Math.log10(20)) / 3 * 100;
+    const xs = [20, ...[...n.xo].reverse(), 20000];
+    for (let k = 0; k < xs.length - 1; k++) {
+      const c = laneColor(n, n.lanes.length - 1 - k);
+      disp += `<div style="position:absolute;top:0;bottom:0;left:${x(xs[k])}%;width:${x(xs[k + 1]) - x(xs[k])}%;background:color-mix(in srgb, ${c} 14%, transparent)"></div>`;
+      disp += `<div style="position:absolute;bottom:10px;left:${(x(xs[k]) + x(xs[k + 1])) / 2}%;transform:translateX(-50%);font-size:10.5px;color:${c};font-weight:650">${bandLabel(n, n.lanes.length - 1 - k)}</div>`;
+      if (k > 0) disp += `<div style="position:absolute;top:0;bottom:0;left:${x(xs[k])}%;width:1.5px;background:var(--ink-3)"></div>`
+        + `<div style="position:absolute;top:10px;left:${x(xs[k])}%;transform:translateX(-50%);font:10.5px 'JetBrains Mono';background:var(--node);padding:1px 6px;border-radius:999px">${hz(xs[k])}</div>`;
+    }
+  } else if (isSplit) {
+    disp = n.lanes.map((l, i) => `<div style="display:flex;align-items:center;gap:10px;margin:18px 16px"><span style="width:10px;height:10px;border-radius:50%;background:${laneColor(n, i)}"></span>`
+      + `<b style="width:60px">${l.label}</b><span style="color:var(--subtle)">${l.chain.length ? l.chain.map(b => b.name ?? b.name).join(' → ') : 'thru'}</span></div>`).join('');
+  } else disp = `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--subtle)">display for ${n.type}</div>`;
+  const knobs = isSplit ? (n.kind === 'band' ? ['slope', 'phase', 'xo 1', 'xo 2', 'xo 3'].slice(0, 2 + n.xo.length) : n.kind === 'y' ? ['mix', 'dry', 'wet'] : ['width', 'balance'])
+    : ['amount', 'tone', 'mix', 'attack', 'release', 'out'];
+  modal.innerHTML = `<h3>${title}</h3><span class="x">✕</span><div class="row"><div class="disp">${disp}</div><div class="cells">${knobs.map(k => `<div class="cell"><i></i>${k}</div>`).join('')}</div></div>`;
+  modal.querySelector('.x').onclick = closeDetail;
+  modal.classList.add('on'); scrim.classList.add('on'); stage.classList.add('blur');
+}
+function closeDetail() { modal.classList.remove('on'); scrim.classList.remove('on'); stage.classList.remove('blur'); }
+scrim.onclick = closeDetail;
+addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDetail(); });
+
+function render() {
+  document.body.className = light.checked ? 'light' : 'dark';
+  wrapS.classList.toggle('tall', tall.checked);
+  stage.className = `ground-${ground.value}` + (arrows.checked ? ' arrows' : '') + (endTags.checked ? '' : ' plainEnd');
+  stage.style.setProperty('--ch', ch.value + 'px');
+  stage.style.setProperty('--gap', gap.value + 'px');
+  stage.innerHTML = '';
+  const body = renderChain(chain, false);
+  stage.append(el('div', 'io', 'IN<span class="port"></span>'), el('div', 'link'), body, el('div', 'link'), el('div', 'io', '<span class="port"></span>OUT'));
+}
+
+for (const name of Object.keys(PRESETS)) {
+  const b = el('button', name === presetName ? 'on' : '', name);
+  b.onclick = () => { presetName = name; chain = PRESETS[name](); document.querySelectorAll('#presets button').forEach(x => x.classList.toggle('on', x === b)); render(); };
+  presets.append(b);
+}
+document.querySelectorAll('.bar input, .bar select').forEach(i => i.addEventListener('change', render));
+render();
+</script>
+</body>
+</html>

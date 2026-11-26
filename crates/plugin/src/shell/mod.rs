@@ -1,13 +1,14 @@
 //! The shell: the plugin's own UI (iced), in the "ScriptFX Shell" design system.
-//! Top bar over the patch window (ControlPanel + notch at the top, drawer at the bottom, sheets
-//! floating over it on both sides).
+//! Top bar over the stage (the patch window: ControlPanel, chain or Matrix, the notch hanging
+//! into it, sheets floating over it on both sides), the mod dock below it.
 //!
 //! One module per section, each with its own state, `Message`, `update` and `view`:
 //! - `top_bar`      the wordmark, sheet openers (library left; controls, chat, settings right)
 //! - `library`      the patch library (sheet, left)
 //! - `notch`        view switch (Panel | Chain | Matrix); reload / snapshot selector, save, load
-//! - `drawer`       rises from the window's bottom edge: modulator tabs and the open modulator
-//! - `macro_rail`   the patch's macros, a card on the left under the top bar
+//! - `snapshot_menu` the notch's snapshot menu (recall, save as, rename, revert, export, delete)
+//! - `dock`         below the stage: macros, modulators (live mini displays), focus, and a
+//!                  modulator's editor (a panel rising over the stage's lower part)
 //! - `stage`        the patch window: the ControlPanel and its pointer input
 //! - `chain_view`   the audio tree (notch: Chain), in place of the ControlPanel
 //! - `matrix`       every modulation route as a table, add/remove (notch: Matrix)
@@ -19,9 +20,10 @@
 //! - `empty`        the window when no patch is loaded
 //! - `entry`        typing a value (right-click a knob)
 //!
-//! Drag & drop: pressing a macro's grip (rail) or a modulator tab's grip (drawer) starts a
-//! `SourceDrag`; a chip follows the pointer, knobs that can take it outline themselves, and a
-//! release over one adds the route (`Session::add_route`).
+//! Drag & drop: pressing a source's title bar in the dock (a macro or a modulator) starts a
+//! `SourceDrag`; once the pointer moves a chip follows it, knobs that can take it outline
+//! themselves, and a release over one adds the route (`Session::add_route`). Released without
+//! moving, it was a click: the dock focuses the source.
 //!
 //! `session` holds the non-UI state (library scan, loaded patch, hot reload, values).
 //! This file owns what several sections share (which sheet is open, the frame clock), routes
@@ -31,22 +33,23 @@
 pub mod theme;
 
 mod block_display;
+mod backdrop;
 mod block_modal;
 mod brand;
 mod chain_surface;
 mod chain_view;
 mod chat;
 mod controls;
-mod drawer;
+mod dock;
 mod knob;
 mod empty;
 mod entry;
 mod hide_cursor;
 mod icons;
 mod library;
-mod macro_rail;
 mod matrix;
 mod meta_menu;
+mod snapshot_menu;
 mod motion;
 mod notch;
 mod passive;
@@ -135,10 +138,6 @@ pub struct Shell {
     /// The library sheet (left slot) and its slide.
     library_open: bool,
     library_slide: Animation<bool>,
-    /// The macro rail (left, under the top bar) and its slide.
-    macros_open: bool,
-    macros_slide: Animation<bool>,
-    macro_rail: macro_rail::Rail,
     /// The open right-hand sheet; `shown` keeps the last one drawn while it slides out.
     sheet: Option<Sheet>,
     shown: Sheet,
@@ -157,6 +156,8 @@ pub struct Shell {
     captures: captures::Usage,
     /// Per-user settings (UI scale), saved on change.
     settings: UserSettings,
+    /// An API key being typed (settings sheet); goes to the keychain, never to disk.
+    ai_key: String,
     dev_stats: bool,
     /// Dev aid: `SCRIPTFX_DEV_RESCALE=1.5` sets the UI scale 1 s after opening (like −/+).
     dev_rescale: Option<(Instant, f32)>,
@@ -166,11 +167,15 @@ pub struct Shell {
     dragging: bool,
     /// A meta knob's menu (right-click on it).
     meta_menu: Option<meta_menu::MetaMenu>,
+    /// The snapshot menu (the notch's selector).
+    snapshot_menu: Option<snapshot_menu::Menu>,
+    /// Snapshot import/export dialogs.
+    dialogs: crate::dialog::Dialogs,
     /// What the patch window shows (the notch's view switch).
     surface: viewport::SurfaceId,
     /// The chain surface: the block tree, and the modal it zooms into. Owns its own state.
     chain: chain_surface::ChainSurface,
-    drawer: drawer::Drawer,
+    dock: dock::Dock,
     /// The Matrix's add row (the source picked).
     matrix: matrix::Matrix,
     /// A macro or modulator being dragged onto a knob.
@@ -187,8 +192,8 @@ pub enum Message {
     Frame(Instant),
     TopBar(top_bar::Message),
     Library(library::Message),
-    Macros(macro_rail::Message),
     MetaMenu(meta_menu::Message),
+    SnapshotMenu(snapshot_menu::Message),
     /// A press anywhere on the page (surface, chain, block page, …): close what floats.
     Dismiss,
     /// The pointer moved while a source is dragged (window coordinates).
@@ -199,7 +204,7 @@ pub enum Message {
     Notch(notch::Message),
     Matrix(matrix::Message),
     Chain(chain_surface::Message),
-    Drawer(drawer::Message),
+    Dock(dock::Message),
     Chat(chat::Message),
     Controls(controls::Message),
     Settings(settings::Message),
@@ -228,22 +233,22 @@ impl Shell {
             slide: Animation::new(false).duration(Duration::from_millis(260)).easing(Easing::EaseOutCubic),
             library_open: false,
             library_slide: Animation::new(false).duration(Duration::from_millis(260)).easing(Easing::EaseOutCubic),
-            macros_open: false,
-            macros_slide: Animation::new(false).duration(Duration::from_millis(260)).easing(Easing::EaseOutCubic),
-            macro_rail: macro_rail::Rail::new(),
             now: Instant::now(),
             dragging_macro: None,
             passive: false,
             track: None,
             captures: captures::Usage::default(),
             settings: { let s = UserSettings::load(); apply_theme(s.theme); s },
+            ai_key: String::new(),
             dev_stats: std::env::var_os("SCRIPTFX_DEV_STATS").is_some(),
             entry: None,
             meta_menu: None,
+            snapshot_menu: None,
+            dialogs: Default::default(),
             dragging: false,
             surface: viewport::SurfaceId::DEFAULT,
             chain: chain_surface::ChainSurface::default(),
-            drawer: drawer::Drawer::new(),
+            dock: dock::Dock::new(),
             matrix: matrix::Matrix::default(),
             source_drag: None,
             dropped: None,
@@ -351,16 +356,22 @@ impl Shell {
                     if self.session.current.is_none() && !self.passive {
                         self.set_library(true);
                     }
-                    // Dev aid: SCRIPTFX_DEV_SHEET=chat|controls|settings|library|drawer|entry opens it at start.
+                    // Dev aid: SCRIPTFX_DEV_SHEET=chat|controls|settings|library|editor|entry|snapshots|save
+                    // opens it at start (editor: LFO 1's, in the dock; save: the snapshot menu naming).
                     match std::env::var("SCRIPTFX_DEV_SHEET").as_deref() {
                         Ok("chat") => self.open_sheet(Some(Sheet::Chat)),
                         Ok("controls") => self.open_sheet(Some(Sheet::Controls)),
                         Ok("settings") => self.open_sheet(Some(Sheet::Settings)),
                         Ok("library") => self.set_library(true),
-                        Ok("macros") => self.set_macros(true),
-                        Ok("drawer") => self.drawer.set_open(true, Instant::now()),
+                        Ok("editor") => {
+                            let lfo1 = patch::RouteSource::Modulator(patch::ModulatorId::Lfo1);
+                            self.dock.select(lfo1, Instant::now());
+                            self.dock.select(lfo1, Instant::now());
+                        }
                         // The value entry of the first macro, as if right-clicked at Neon's Tape knob.
                         Ok("entry") => self.open_entry(stage::Target::Macro(0), iced::Point::new(165.0, 388.0)),
+                        Ok("snapshots") => self.snapshot_menu = Some(snapshot_menu::Menu::list()),
+                        Ok("save") => self.open_naming(snapshot_menu::Purpose::SaveAs, "Warm bus".into()),
                         _ => {}
                     }
                     // Dev aid: SCRIPTFX_DEV_SURFACE=chain|matrix starts on that surface.
@@ -381,12 +392,23 @@ impl Shell {
                     }
                 }
                 self.session.tick(ctx, &params, &shared);
-                self.drawer.tick(&self.session.values.modulators, &self.session.values.modulator_phases);
+                if let Some(picked) = self.dialogs.poll() {
+                    self.dialog_done(picked, ctx, &params, &shared);
+                }
+                self.dock.tick(&self.session.values.modulators, &self.session.values.modulator_phases);
                 self.modal_tick();
                 let patch_name = self.session.current.as_ref().map(|c| c.folder.clone());
                 if let Some(result) = self.listen.poll(&shared, self.track.as_deref(), patch_name.as_deref()) {
-                    self.chat.capture_done(result);
+                    shared.assistant.lock().unwrap().capture_done(result);
                     self.open_sheet(Some(Sheet::Chat));
+                }
+                let done = shared.assistant.lock().unwrap().poll();
+                if let Some(done) = done {
+                    self.turn_done(done, &params, &shared);
+                }
+                self.chat.sync(&shared.assistant.lock().unwrap());
+                if self.sheet == Some(Sheet::Chat) && self.chat.take_follow() {
+                    self.tasks.push(iced::widget::operation::snap_to_end(chat::Chat::log_id()));
                 }
                 icons::set_scale(self.ctx.window_size().scale_factor as f32);
                 let scale = stage::panel_fit().0 * self.ctx.window_size().scale_factor as f32;
@@ -399,14 +421,22 @@ impl Shell {
             }
             Message::TopBar(msg) => match msg {
                 top_bar::Message::ToggleLibrary => self.set_library(!self.library_open),
-                top_bar::Message::ToggleMacros => self.set_macros(!self.macros_open),
                 top_bar::Message::ToggleControls => self.toggle_sheet(Sheet::Controls),
                 top_bar::Message::ToggleChat => self.toggle_sheet(Sheet::Chat),
                 top_bar::Message::ToggleSettings => self.toggle_sheet(Sheet::Settings),
             },
             Message::Library(msg) => match self.library.update(msg) {
-                Some(library::Event::Load(folder)) => {
-                    self.session.load(ctx, &params, &shared, &folder, true);
+                Some(library::Event::Load(folder, snapshot)) => {
+                    self.snapshot_menu = None;
+                    let loaded = self.session.current.as_ref().is_some_and(|c| c.folder == folder);
+                    if !loaded || snapshot == crate::snapshots::INIT {
+                        self.session.load(ctx, &params, &shared, &folder, true);
+                    }
+                    if snapshot != crate::snapshots::INIT && self.session.current.as_ref().is_some_and(|c| c.folder == folder) {
+                        if let Err(e) = self.session.recall(ctx, &params, &shared, &snapshot) {
+                            self.snapshot_error(e);
+                        }
+                    }
                     self.reveal_current();
                 }
                 Some(library::Event::Unload) => {
@@ -422,15 +452,52 @@ impl Shell {
             Message::Notch(msg) => match msg {
                 notch::Message::Reload => self.session.reload(ctx, &params, &shared),
                 notch::Message::Surface(id) => self.set_surface(id),
+                notch::Message::Bypass(on) => {
+                    let setter = self.ctx.nice_context.param_setter();
+                    setter.begin_set_parameter(&params.bypass);
+                    setter.set_parameter(&params.bypass, on);
+                    setter.end_set_parameter(&params.bypass);
+                }
+                notch::Message::Step(forward) => {
+                    self.snapshot_menu = None;
+                    let cycle = self.session.snapshot_cycle();
+                    let at = cycle.iter().position(|n| *n == self.session.snapshot(&params)).unwrap_or(0);
+                    let next = if forward { (at + 1) % cycle.len() } else { (at + cycle.len() - 1) % cycle.len() };
+                    if let Err(e) = self.session.recall(ctx, &params, &shared, &cycle[next]) {
+                        self.snapshot_error(e);
+                    }
+                }
+                notch::Message::Menu => {
+                    if self.snapshot_menu.take().is_none() {
+                        self.entry = None;
+                        self.meta_menu = None;
+                        self.snapshot_menu = Some(snapshot_menu::Menu::list());
+                    }
+                }
+                notch::Message::Save => {
+                    let name = self.session.snapshot(&params);
+                    if name == crate::snapshots::INIT {
+                        self.open_naming(snapshot_menu::Purpose::SaveAs, String::new());
+                    } else {
+                        // Saving over the selected snapshot.
+                        match self.session.save_snapshot(&params, &name, true) {
+                            Ok(_) => self.snapshot_menu = None,
+                            Err(e) => self.snapshot_error(e),
+                        }
+                    }
+                }
+                notch::Message::Import => self.dialogs.import(),
             },
+            Message::SnapshotMenu(msg) => self.snapshot_menu_message(msg, ctx, &params, &shared),
             Message::Matrix(msg) => self.matrix.update(&mut self.session, &params, &shared, msg),
-            Message::Drawer(msg) => {
+            Message::Dock(msg) => {
                 self.now = Instant::now();
                 let mods = self.session.current.as_ref().map_or(&[][..], |c| &c.patch.modulators[..]);
-                match self.drawer.update(msg, self.now, mods) {
-                    Some(drawer::Event::Grab(id)) => self.start_source_drag(patch::RouteSource::Modulator(id)),
-                    Some(drawer::Event::Set(spec)) => self.session.set_modulator(&params, spec),
-                    Some(drawer::Event::Dragging(on)) => self.dragging = on,
+                match self.dock.update(msg, self.now, mods) {
+                    Some(dock::Event::Macro(slot, e)) => self.macro_knob(slot, e, &params, &shared),
+                    Some(dock::Event::Grab(source, at)) => self.start_source_drag(source, at),
+                    Some(dock::Event::Set(spec)) => self.session.set_modulator(&params, spec),
+                    Some(dock::Event::Dragging(on)) => self.dragging = on,
                     None => {}
                 }
             }
@@ -440,17 +507,20 @@ impl Shell {
                 }
             }
             Message::Surface(surface::Message::Macro(slot, e)) => self.macro_knob(slot, e, &params, &shared),
-            Message::Macros(msg) => {
-                self.now = Instant::now();
-                match self.macro_rail.update(msg, self.now) {
-                    Some(macro_rail::Event::Macro(slot, e)) => self.macro_knob(slot, e, &params, &shared),
-                    Some(macro_rail::Event::Close) => self.set_macros(false),
-                    None => {}
-                }
-            }
             Message::Chat(msg) => match self.chat.update(msg) {
                 Some(chat::Event::Close) => self.open_sheet(None),
+                Some(chat::Event::Send(text)) => {
+                    // Also when it fails: the reason is the newest entry.
+                    self.chat.to_end();
+                    if self.send(text, false, &params, &shared) {
+                        self.chat.sent();
+                    }
+                }
+                Some(chat::Event::Cancel) => shared.assistant.lock().unwrap().cancel(),
+                Some(chat::Event::Undo(i)) => self.undo_change(i, &params, &shared),
+                Some(chat::Event::Detach) => shared.assistant.lock().unwrap().attached = None,
                 Some(chat::Event::Listen) => self.listen.start(&shared),
+                Some(chat::Event::StopListen) => self.listen.stop(&shared),
                 Some(chat::Event::CancelListen) => self.listen.cancel(&shared),
                 Some(chat::Event::CycleLength) => {
                     self.listen.seconds = if self.listen.seconds >= 30.0 { 10.0 } else { self.listen.seconds + 10.0 };
@@ -467,6 +537,34 @@ impl Shell {
                 }
                 settings::Message::ScaleDown => self.set_ui_scale(self.settings.ui_scale - user_settings::UI_SCALE_STEP),
                 settings::Message::ScaleUp => self.set_ui_scale(self.settings.ui_scale + user_settings::UI_SCALE_STEP),
+                settings::Message::SetProvider(p) => {
+                    self.settings.ai.provider = p;
+                    self.settings.save();
+                    self.ai_key.clear();
+                    shared.assistant.lock().unwrap().probe(&self.settings.ai);
+                }
+                settings::Message::Ai(field, value) => {
+                    let ai = &mut self.settings.ai;
+                    match field {
+                        settings::Field::Model if ai.provider == user_settings::Provider::Claude => ai.claude_model = value,
+                        settings::Field::Model => ai.api_model = value,
+                        settings::Field::BaseUrl => {
+                            ai.base_url = value;
+                            shared.assistant.lock().unwrap().forget_connection();
+                        }
+                        settings::Field::ClaudeDir => ai.claude_config_dir = value,
+                        settings::Field::Key => {
+                            self.ai_key = value;
+                            return;
+                        }
+                    }
+                    self.settings.save();
+                }
+                settings::Message::Probe => shared.assistant.lock().unwrap().probe(&self.settings.ai),
+                settings::Message::SaveKey => {
+                    let key = std::mem::take(&mut self.ai_key);
+                    shared.assistant.lock().unwrap().save_key(&self.settings.ai, key);
+                }
                 settings::Message::TogglePassive => self.set_passive(!self.passive, ctx, &params, &shared),
                 settings::Message::ClearCaptures => {
                     match captures::clear() {
@@ -480,14 +578,29 @@ impl Shell {
                 passive::Message::Leave => self.set_passive(false, ctx, &params, &shared),
             },
             Message::Empty(msg) => match self.empty.update(msg) {
-                Some(e) => match e {},
+                Some(empty::Event::Build(text)) => {
+                    if self.send(text, true, &params, &shared) {
+                        self.empty = empty::Empty::default();
+                    }
+                    self.open_sheet(Some(Sheet::Chat));
+                }
+                Some(empty::Event::Listen) => {
+                    self.listen.start(&shared);
+                    self.open_sheet(Some(Sheet::Chat));
+                }
                 None => {}
             },
             Message::Dismiss => self.dismiss(),
             Message::Released => {
                 self.dragging = false;
                 if let Some(d) = self.source_drag.take() {
-                    self.dropped = Some((d, Instant::now()));
+                    if d.moved() {
+                        self.dropped = Some((d, Instant::now()));
+                    } else {
+                        // Pressed and released in place: a click on the source.
+                        self.now = Instant::now();
+                        self.dock.select(d.source, self.now);
+                    }
                 }
             }
             Message::Panel(ev) => {
@@ -539,20 +652,116 @@ impl Shell {
             }
             Message::MetaMenu(meta_menu::Message::OpenMatrix) => self.set_surface(viewport::SurfaceId::Matrix),
             Message::Escape => {
-                if self.entry.take().is_none() && self.meta_menu.take().is_none() {
-                    // Closes what floats first; with nothing open, closes a block's modal.
-                    let open = self.library_open || self.macros_open || self.sheet.is_some() || self.drawer.is_open();
+                // The snapshot menu steps back from naming/confirming first, then closes.
+                if let Some(m) = &mut self.snapshot_menu {
+                    if matches!(m.mode, snapshot_menu::Mode::List) {
+                        self.snapshot_menu = None;
+                    } else {
+                        m.mode = snapshot_menu::Mode::List;
+                        m.error = None;
+                    }
+                } else if self.entry.take().is_none() && self.meta_menu.take().is_none() {
+                    // Closes what floats first, then the dock's editor and focus, then a block's modal.
+                    let open = self.library_open || self.sheet.is_some();
                     self.set_library(false);
-                    self.set_macros(false);
                     self.open_sheet(None);
-                    self.close_drawer();
-                    if !open {
+                    if !open && !self.dock.escape(Instant::now()) {
                         self.now = Instant::now();
                         self.chain.close_modal(self.now);
                     }
                 }
             }
             Message::DismissError => self.session.error = None,
+        }
+    }
+
+    /// Sends a chat message with the loaded patch (`fresh`: as a new chat). False: nothing was sent.
+    fn send(&mut self, text: String, fresh: bool, params: &FxParams, shared: &Shared) -> bool {
+        let current = self.session.describe(params);
+        shared.assistant.lock().unwrap().send(&self.settings.ai, text, current, fresh)
+    }
+
+    /// The assistant answered: post it, apply its change.
+    fn turn_done(&mut self, done: Result<llm::Outcome, llm::Error>, params: &FxParams, shared: &Shared) {
+        use crate::assistant::{Change, Item};
+        let outcome = match done {
+            Ok(o) => o,
+            Err(e) => {
+                let text = match e {
+                    llm::Error::Cancelled => "Cancelled.".to_string(),
+                    llm::Error::Failed(text) => text,
+                };
+                shared.assistant.lock().unwrap().log.push(Item::Error(text));
+                return;
+            }
+        };
+        let mut items = vec![Item::Reply(outcome.reply)];
+        if let Some(p) = outcome.proposal {
+            let ctx = &self.ctx.nice_context.clone();
+            let root = crate::patches_root();
+            let previous = self.session.current.as_ref().map(|c| c.folder.clone());
+            match self.session.change_files(ctx, params, shared, &p.folder, || p.commit(&root)) {
+                Ok(applied) => {
+                    if applied.is_new {
+                        // A new patch from the chat ends passive mode (it would load behind the card).
+                        if self.passive {
+                            self.passive = false;
+                            *params.passive.write().unwrap() = false;
+                        }
+                        self.session.load(ctx, params, shared, &p.folder, true);
+                        self.reveal_current();
+                        self.set_library(false);
+                    }
+                    self.forget_targets();
+                    items.push(Item::Change(Change { applied, previous, undone: false }));
+                }
+                Err(e) => items.push(Item::Error(format!("Couldn't write the patch: {e}"))),
+            }
+        }
+        shared.assistant.lock().unwrap().log.extend(items);
+    }
+
+    fn undo_change(&mut self, index: usize, params: &FxParams, shared: &Shared) {
+        use crate::assistant::Item;
+        let (applied, previous) = match shared.assistant.lock().unwrap().log.get(index) {
+            Some(Item::Change(c)) if !c.undone => (c.applied.clone(), c.previous.clone()),
+            _ => return,
+        };
+        let ctx = &self.ctx.nice_context.clone();
+        let root = crate::patches_root();
+        let loaded = self.session.current.as_ref().is_some_and(|c| c.folder == applied.folder);
+        let result = if applied.is_new {
+            applied.undo(&root).map(|()| {
+                if loaded {
+                    self.session.unload(ctx, params, shared);
+                    if let Some(folder) = previous {
+                        self.session.load(ctx, params, shared, &folder, true);
+                    }
+                }
+                self.session.reload(ctx, params, shared);
+            })
+        } else {
+            self.session.change_files(ctx, params, shared, &applied.folder, || applied.undo(&root))
+        };
+        self.forget_targets();
+        let mut a = shared.assistant.lock().unwrap();
+        match result {
+            Ok(()) => {
+                if let Some(Item::Change(c)) = a.log.get_mut(index) {
+                    c.undone = true;
+                }
+            }
+            Err(e) => a.log.push(Item::Error(format!("Couldn't undo: {e}"))),
+        }
+    }
+
+    /// The patch changed under the UI: close what points at its params, routes and blocks.
+    fn forget_targets(&mut self) {
+        self.entry = None;
+        self.meta_menu = None;
+        if self.chain.targets_gone(self.session.current.as_ref().map(|c| &c.patch)) {
+            self.chain.clear();
+            iced_wgpu::postfx::set(None);
         }
     }
 
@@ -563,9 +772,6 @@ impl Shell {
         self.entry = None;
         self.chain.clear();
         iced_wgpu::postfx::set(None);
-        if !id.wants_drawer() {
-            self.close_drawer();
-        }
     }
 
     fn controls(&mut self, msg: controls::Message, params: &FxParams, shared: &Shared) {
@@ -595,7 +801,7 @@ impl Shell {
         }
     }
 
-    /// Input on one of the drawer's macro knobs.
+    /// Input on a macro's knob (the dock, the macro surface).
     fn macro_knob(&mut self, slot: usize, e: knob::KnobEvent, params: &FxParams, shared: &Shared) {
         use stage::Change::*;
         match e {
@@ -614,15 +820,20 @@ impl Shell {
                 }
             }
             knob::KnobEvent::Entry(at) => self.open_entry(stage::Target::Macro(slot), window_to_panel(at)),
-            knob::KnobEvent::Grab => self.start_source_drag(patch::RouteSource::Macro(slot)),
+            knob::KnobEvent::Grab(at) => self.start_source_drag(patch::RouteSource::Macro(slot), at),
             // A modulator dropped on the macro: it modulates the macro (and so all it drives).
             knob::KnobEvent::Drop => {
                 let Some(source) = self.take_drop() else { return };
                 let Some(id) = self.session.current.as_ref().and_then(|c| c.patch.macros.get(slot)).map(|m| m.id.clone()) else { return };
                 self.session.add_route(params, source, patch::ModDestination::Macro(id));
             }
-            // Macro cells have no meta knobs or modes.
-            knob::KnobEvent::Meta(..) | knob::KnobEvent::Mode(_) => {}
+            // The k-th meta knob is the macro's k-th route (`routing::macro_metas`).
+            knob::KnobEvent::Meta(k, ev) => {
+                let Some(p) = self.session.current.as_ref().map(|c| &c.patch) else { return };
+                let Some(&route) = routing::macro_metas(p, slot).0.get(k) else { return };
+                self.meta_event(route, ev, params, shared);
+            }
+            knob::KnobEvent::Mode(_) => {}
         }
     }
 
@@ -643,21 +854,27 @@ impl Shell {
                 // The knob's k-th meta knob is its k-th route (`routing::metas`).
                 let Some(p) = self.session.current.as_ref().map(|c| &c.patch) else { return };
                 let Some(&route) = routing::metas(p, i).0.get(k) else { return };
-                let (Some(current), Some(reset)) = (p.route_settings(route), p.route_reset(route)) else { return };
-                match ev {
-                    knob::MetaEvent::Begin => self.dragging = true,
-                    knob::MetaEvent::End => self.dragging = false,
-                    knob::MetaEvent::Amount(a) => self.session.set_route(params, shared, route, patch::ModSettings { amount: a, ..current }),
-                    knob::MetaEvent::Reset => self.session.set_route(params, shared, route, reset),
-                    knob::MetaEvent::Menu(at) => self.meta_menu = Some(meta_menu::MetaMenu { route, at }),
-                }
+                self.meta_event(route, ev, params, shared);
             }
             knob::KnobEvent::Drop => {
                 let Some(source) = self.take_drop() else { return };
                 self.session.add_route(params, source, patch::ModDestination::Param(spec.id.clone()));
             }
             // Block knobs have no grip, and no modes yet.
-            knob::KnobEvent::Grab | knob::KnobEvent::Mode(_) => {}
+            knob::KnobEvent::Grab(_) | knob::KnobEvent::Mode(_) => {}
+        }
+    }
+
+    /// Input on a route's meta knob (on a block knob or a macro).
+    fn meta_event(&mut self, route: patch::Route, ev: knob::MetaEvent, params: &FxParams, shared: &Shared) {
+        let Some(p) = self.session.current.as_ref().map(|c| &c.patch) else { return };
+        let (Some(current), Some(reset)) = (p.route_settings(route), p.route_reset(route)) else { return };
+        match ev {
+            knob::MetaEvent::Begin => self.dragging = true,
+            knob::MetaEvent::End => self.dragging = false,
+            knob::MetaEvent::Amount(a) => self.session.set_route(params, shared, route, patch::ModSettings { amount: a, ..current }),
+            knob::MetaEvent::Reset => self.session.set_route(params, shared, route, reset),
+            knob::MetaEvent::Menu(at) => self.meta_menu = Some(meta_menu::MetaMenu { route, at }),
         }
     }
 
@@ -670,13 +887,12 @@ impl Shell {
             values: &self.session.values,
             source_drag: self.source_drag.as_ref(),
             now: self.now,
-            drawer_height: self.drawer.height(self.now),
+            editor_height: self.editor_height(),
         }
     }
 
     /// Every frame: let the chain surface age its transition, then set the renderer's zoom blur
-    /// from the modal's `Look` (none at rest). The blur stays here: only the shell knows what else
-    /// is on screen and has to stay sharp.
+    /// from the modal's `Look` (none at rest). The blur stays here: it drives the renderer.
     fn modal_tick(&mut self) {
         let patch = self.session.current.as_ref().map(|c| &c.patch);
         self.chain.tick(patch, self.surface.owns_block_modal(), self.now);
@@ -688,47 +904,26 @@ impl Shell {
         iced_wgpu::postfx::set(look.map(|look| self.blur(&look)));
     }
 
-    /// The renderer's blur for this frame of the modal.
+    /// The renderer's blur for this frame of the modal: the chain under the camera only (it's
+    /// drawn as the `backdrop`; the modal, its arrows and everything over the stage are drawn
+    /// after it and stay sharp). `rect` keeps the samples inside the stage.
     fn blur(&self, look: &chain_surface::Look) -> iced_wgpu::postfx::RadialBlur {
         let (w, h) = theme::stage_size();
         let (x, y) = (theme::SPACE_GUTTER, theme::SIZE_TOP_BAR + theme::SPACE_GUTTER);
-        let at = |r: iced::Rectangle| [x + r.x, y + r.y, r.width, r.height];
         let c = look.rect.center();
-        // The chevrons stay sharp once the camera rests (only their stroke: a larger area would
-        // show the unblurred chain behind them).
-        let chevron = |r: iced::Rectangle| {
-            if look.velocity > 0.0 { return [0.0; 4] }
-            let c = r.center();
-            [x + c.x - 7.0, y + c.y - 12.0, 14.0, 24.0]
-        };
-        let (left, right) = look.arrows();
-        // What floats over the chain stays sharp: the notch (top centre), the drawer at its current
-        // height (bottom centre, it may be sliding), the macro rail (top left), the modal and its
-        // arrows, and whatever floats anywhere (a menu, a value entry, a dragged chip: no soft
-        // blur then, they can sit over the chain).
-        let (nw, nh) = notch::size();
-        let dw = theme::drawer_width() + 2.0 * theme::RADIUS_WINDOW;
-        let dh = self.drawer.height(self.now);
-        let rail = if self.macros_t() > 0.0 { [x, y, macros_width(), macro_rail::HEIGHT + 2.0 * theme::SPACE_2] } else { [0.0; 4] };
-        let library = self.library_t() * library_width();
-        let sheet = self.slide_t() * sheet_width();
         iced_wgpu::postfx::RadialBlur {
             center: [x + c.x, y + c.y],
             rect: [x, y, w, h],
             // strongest mid-way, none at the ends
             amount: chain_surface::Look::BLUR * look.velocity,
             soft: 0.0,
-            keep: [
-                [x + (w - nw + library - sheet) / 2.0, y, nw, nh],
-                [x + (w - dw) / 2.0, y + h - dh, dw, dh],
-                rail,
-                at(look.rect),
-                chevron(left),
-                chevron(right),
-                [x, y, library, h],
-                [x + w - sheet, y, sheet, h],
-            ],
+            keep: [[0.0; 4]; iced_wgpu::postfx::KEEP],
         }
+    }
+
+    /// The modulator editor's height over the stage now (0 while closed or stepped aside).
+    fn editor_height(&self) -> f32 {
+        if self.source_drag.as_ref().is_some_and(routing::SourceDrag::moved) { 0.0 } else { self.dock.editor_height(self.now) }
     }
 
     /// Applies a param change: macros go to the host (automation gestures), free params into
@@ -799,24 +994,11 @@ impl Shell {
     fn set_library(&mut self, open: bool) {
         if open {
             self.open_sheet(None);
-            self.set_macros(false);
         }
         if self.library_open != open {
             self.library_open = open;
             self.now = Instant::now();
             self.library_slide.go_mut(open, self.now);
-        }
-    }
-
-    /// The macro rail shares the left side with the library: opening one closes the other.
-    fn set_macros(&mut self, open: bool) {
-        if open {
-            self.set_library(false);
-        }
-        if self.macros_open != open {
-            self.macros_open = open;
-            self.now = Instant::now();
-            self.macros_slide.go_mut(open, self.now);
         }
     }
 
@@ -840,39 +1022,116 @@ impl Shell {
         }
     }
 
-    /// A press on the page (any view: surface, chain, block page, …) closes everything that
-    /// floats over it: sheets on both sides, the macro rail, the drawer, a value entry. New
-    /// floating things belong in here too.
-    /// A press on the page closes what floats over it: the library, a sheet, the drawer, the value
-    /// entry, the meta menu. The macro rail stays (a tool for the page: turn a macro, drag it onto
-    /// a knob); it closes with its own button and Escape.
+    /// A press on the page (any view: surface, chain, block modal, …) closes what floats over it:
+    /// the library, a sheet, the value entry, the meta menu. New floating things belong in here
+    /// too. The dock stays as it is (its editor and focus close with Escape).
     fn dismiss(&mut self) {
         self.set_library(false);
         self.open_sheet(None);
-        self.close_drawer();
         self.entry = None;
         self.meta_menu = None;
+        self.snapshot_menu = None;
     }
 
-    /// A macro's or modulator's grip was pressed: drag it (onto a knob).
-    fn start_source_drag(&mut self, source: patch::RouteSource) {
+    // ---- snapshots ------------------------------------------------------------------------------
+
+    fn snapshot_menu_message(&mut self, msg: snapshot_menu::Message, ctx: &GuiContext, params: &FxParams, shared: &Shared) {
+        use snapshot_menu::{Message as M, Mode, Purpose};
+        let current = self.session.snapshot(params);
+        let Some(menu) = &mut self.snapshot_menu else { return };
+        menu.error = None;
+        match msg {
+            M::Recall(name) => {
+                self.snapshot_menu = None;
+                if let Err(e) = self.session.recall(ctx, params, shared, &name) {
+                    self.snapshot_error(e);
+                }
+            }
+            M::Revert => {
+                self.snapshot_menu = None;
+                if let Err(e) = self.session.recall(ctx, params, shared, &current) {
+                    self.snapshot_error(e);
+                }
+            }
+            M::SaveAs => self.open_naming(Purpose::SaveAs, String::new()),
+            M::Rename => self.open_naming(Purpose::Rename(current.clone()), current),
+            M::Delete => menu.mode = Mode::ConfirmDelete(current),
+            M::ConfirmDelete => {
+                let Mode::ConfirmDelete(name) = &menu.mode else { return };
+                match self.session.delete_snapshot(params, &name.clone()) {
+                    Ok(()) => self.snapshot_menu = Some(snapshot_menu::Menu::list()),
+                    Err(e) => self.snapshot_error(e),
+                }
+            }
+            M::Export => {
+                self.snapshot_menu = None;
+                self.dialogs.export(&current);
+            }
+            M::Edit(t) => {
+                if let Mode::Name { text, .. } = &mut menu.mode {
+                    *text = t;
+                }
+            }
+            M::Submit => {
+                let Mode::Name { purpose, text } = &menu.mode else { return };
+                let result = match purpose.clone() {
+                    Purpose::SaveAs => self.session.save_snapshot(params, &text.clone(), false),
+                    Purpose::Rename(from) => self.session.rename_snapshot(params, &from, &text.clone()),
+                };
+                match result {
+                    Ok(_) => self.snapshot_menu = None,
+                    Err(e) => {
+                        if let Some(m) = &mut self.snapshot_menu {
+                            m.error = Some(e);
+                        }
+                        self.tasks.push(iced::widget::operation::focus(snapshot_menu::input_id()));
+                    }
+                }
+            }
+            M::Back => menu.mode = Mode::List,
+        }
+    }
+
+    /// The snapshot menu with a name field, focused and selected.
+    fn open_naming(&mut self, purpose: snapshot_menu::Purpose, text: String) {
+        self.entry = None;
+        self.meta_menu = None;
+        self.snapshot_menu = Some(snapshot_menu::Menu::naming(purpose, text));
+        self.tasks.push(iced::widget::operation::focus(snapshot_menu::input_id()));
+        self.tasks.push(iced::widget::operation::select_all(snapshot_menu::input_id()));
+    }
+
+    /// A snapshot action failed: say so in the snapshot menu (opened if needed).
+    fn snapshot_error(&mut self, e: String) {
+        nice_plug::nice_log!("snapshot: {e}");
+        let menu = self.snapshot_menu.get_or_insert_with(snapshot_menu::Menu::list);
+        menu.mode = snapshot_menu::Mode::List;
+        menu.error = Some(e);
+    }
+
+    /// A file dialog answered (import or export).
+    fn dialog_done(&mut self, picked: crate::dialog::Picked, ctx: &GuiContext, params: &FxParams, shared: &Shared) {
+        let result = match picked {
+            crate::dialog::Picked::Import(path) => self.session.import_snapshot(ctx, params, shared, &path).map(|_| ()),
+            crate::dialog::Picked::Export(path) => self.session.export_snapshot(params, &path),
+        };
+        if let Err(e) = result {
+            self.snapshot_error(e);
+        }
+    }
+
+    /// A source's title bar was pressed (at this window point): drag it (onto a knob).
+    fn start_source_drag(&mut self, source: patch::RouteSource, start: iced::Point) {
         self.meta_menu = None;
         self.entry = None;
         self.dropped = None;
-        self.source_drag = Some(routing::SourceDrag { source, at: None });
+        self.source_drag = Some(routing::SourceDrag { source, start, at: None });
     }
 
     /// A knob reported a drop: the drag that just ended (if it was this recent), once.
     fn take_drop(&mut self) -> Option<patch::RouteSource> {
         let (d, at) = self.dropped.take()?;
         (at.elapsed() < Duration::from_millis(500)).then_some(d.source)
-    }
-
-    fn close_drawer(&mut self) {
-        if self.drawer.is_open() {
-            self.now = Instant::now();
-            self.drawer.set_open(false, self.now);
-        }
     }
 
     fn toggle_sheet(&mut self, s: Sheet) {
@@ -888,10 +1147,14 @@ impl Shell {
         self.sheet = s;
         if let Some(s) = s {
             self.shown = s;
+            if s == Sheet::Chat {
+                self.chat.to_end();
+            }
             // The settings sheet reports what the captures folder holds; walking it once per
             // open is cheap, per frame would not be.
             if s == Sheet::Settings {
                 self.captures = captures::usage();
+                self.plugin.shared.assistant.lock().unwrap().probe(&self.settings.ai);
             }
         }
         // Switching between sheets swaps the content; only opening/closing slides.
@@ -936,8 +1199,6 @@ impl Shell {
 
         let top_bar = top_bar::view(top_bar::Props {
             library_open: self.library_open,
-            macros_available: s.current.as_ref().is_some_and(|c| !c.patch.macros.is_empty()),
-            macros_open: self.macros_open,
             controls_available: s.current.is_some(),
             controls_open: self.sheet == Some(Sheet::Controls),
             chat_open: self.sheet == Some(Sheet::Chat),
@@ -957,7 +1218,7 @@ impl Shell {
 
     /// The dragged source's chip, next to the pointer: a dot in its colour and its name.
     fn drag_chip(&self) -> Option<Element<'_, Message>> {
-        let d = self.source_drag.as_ref()?;
+        let d = self.source_drag.as_ref().filter(|d| d.moved())?;
         let at = d.at?;
         let patch = &self.session.current.as_ref()?.patch;
         let colour = routing::colour(d.source);
@@ -977,62 +1238,83 @@ impl Shell {
         Some(pin(chip).x(at.x + 14.0).y(at.y + 10.0).into())
     }
 
-    /// The patch window with the shell's intrusions: the notch and the sheets.
+    /// The stage with the shell's intrusions (the notch, the sheets), the dock below it. The
+    /// stage's content is laid out at its full size and drawn scaled into the room the dock
+    /// leaves (`fit`); the notch and the sheets aren't scaled.
     fn window(&self) -> Element<'_, Message> {
         let Some(cur) = &self.session.current else { return column![].into() };
         let bg = session::hex(cur.patch.theme.color("bg")).unwrap_or(theme::c().frame_raised);
 
         // While sheets are open the notch centres on the part of the window they leave visible,
         // gliding along with them.
+        let snapshot = self.session.snapshot(&self.plugin.params);
         let notch = notch::view(notch::Props {
-            surfaces: viewport::surfaces(&cur.patch),
-            current: self.surface,
-            snapshot: "Init",
+            snapshot: snapshot.clone(),
+            modified: self.session.modified,
+            can_step: !self.session.snapshot_names().is_empty(),
+            menu_open: self.snapshot_menu.is_some(),
             sync: if self.session.error.is_some() { notch::Sync::Error } else { notch::Sync::Ok },
+            bypassed: self.plugin.params.bypass.value(),
         })
         .map(Message::Notch);
+        // The view switch: three icons in the stage's top-right corner (left of a sheet).
+        let surfaces = viewport::surfaces(&cur.patch);
+        let switch = container(notch::surface_switch(&surfaces, self.surface).map(Message::Notch))
+            .width(Fill)
+            .padding(Padding { top: SWITCH_INSET, right: SWITCH_INSET + self.slide_t() * sheet_width(), ..Padding::ZERO })
+            .align_x(alignment::Horizontal::Right);
         let notch = container(notch)
             .width(Fill)
             .padding(Padding { left: self.library_t() * library_width(), right: self.slide_t() * sheet_width(), ..Padding::ZERO })
             .align_x(alignment::Horizontal::Center);
 
-        // The drawer hangs into the window from its bottom edge, centred (sheets slide over it).
-        let drawer = container(self.drawer.view(self.now, &cur.patch.modulators).map(Message::Drawer))
-            .width(Fill)
-            .height(Fill)
-            .align_x(alignment::Horizontal::Center)
-            .align_y(alignment::Vertical::Bottom);
-
-        let content: Element<'_, Message> = match self.surface {
+        let (content, ground): (Element<'_, Message>, iced::Color) = match self.surface {
             viewport::SurfaceId::Chain => {
                 let ctx = self.chain_ctx(&cur.patch);
                 let look = self.chain.look(&ctx);
-                self.chain.view(&ctx, look).map(Message::Chain)
+                (self.chain.view(&ctx, look).map(Message::Chain), theme::c().frame_raised)
             }
-            viewport::SurfaceId::Matrix => self.matrix.view(&cur.patch, &self.session.values).map(Message::Matrix),
+            viewport::SurfaceId::Matrix => (self.matrix.view(&cur.patch, &self.session.values).map(Message::Matrix), theme::c().frame_raised),
             // A patch surface: the patch's own, or the shell's default macro surface.
             viewport::SurfaceId::Patch(_) => match &cur.panel {
-                Some(panel) => stage::view(panel, bg).map(Message::Panel),
+                Some(panel) => (stage::view(panel, bg).map(Message::Panel), bg),
                 None => {
                     let brand = self.session.library.iter().find(|p| p.folder == cur.folder).map(|p| &p.brand);
-                    surface::view(&cur.patch, brand, &self.session.values).map(Message::Surface)
+                    (surface::view(&cur.patch, brand, &self.session.values, self.source_drag.as_ref().and_then(routing::SourceDrag::macro_drop)).map(Message::Surface), bg)
                 }
             },
         };
-        let content = press::on_any_press(content, Message::Dismiss);
-        let mut layers = stack![content, notch, drawer].width(Fill).height(Fill);
-        for layer in [self.macros_layer(), self.library_layer(), self.sheet_layer()].into_iter().flatten() {
-            layers = layers.push(layer);
-        }
+        // The stage's content, in its own coordinates: the page, a value entry, the meta menu.
+        let mut stage = stack![press::on_any_press(content, Message::Dismiss)].width(Fill).height(Fill);
         if let Some(e) = &self.entry {
             // Right of the click point, clamped into the stage.
             let (s, offset) = stage::panel_fit();
             let (w, h) = theme::stage_size();
             let x = (offset.x + e.at.x * s + 14.0).min(w - entry::SIZE.0 - 8.0).max(8.0);
             let y = (offset.y + e.at.y * s - entry::SIZE.1 / 2.0).min(h - entry::SIZE.1 - 8.0).max(8.0);
-            layers = layers.push(pin(e.view().map(Message::Entry)).x(x).y(y));
+            stage = stage.push(pin(e.view().map(Message::Entry)).x(x).y(y));
         }
         if let Some(layer) = self.meta_menu_layer() {
+            stage = stage.push(layer);
+        }
+        let stage = container(stage).width(Fill).height(Fill).style(move |_: &Theme| container::Style {
+            background: Some(ground.into()),
+            border: Border { radius: theme::radius(theme::RADIUS_WINDOW), ..Default::default() },
+            ..Default::default()
+        });
+
+        let mut layers = stack![stage, notch, switch].width(Fill).height(Fill);
+        if let Some(menu) = self.snapshot_menu_layer(&snapshot) {
+            layers = layers.push(menu);
+        }
+        // The modulator's editor rises from the dock over the stage's lower part; it steps aside
+        // while a source is dragged (so whatever is under it takes the drop).
+        if self.editor_height() > 0.0 {
+            if let Some(editor) = self.dock.editor_view(self.now, &cur.patch.modulators) {
+                layers = layers.push(container(editor.map(Message::Dock)).width(Fill).height(Fill).align_y(alignment::Vertical::Bottom));
+            }
+        }
+        for layer in [self.library_layer(), self.sheet_layer()].into_iter().flatten() {
             layers = layers.push(layer);
         }
         layers = layers.push(self.error_card());
@@ -1040,7 +1322,9 @@ impl Shell {
             layers = layers.push(self.stats());
         }
 
-        container(layers)
+        let dock = self.dock.view(&cur.patch, &self.session.values, self.source_drag.as_ref()).map(Message::Dock);
+        column![container(layers).width(Fill).height(theme::stage_size().1), dock]
+            .spacing(theme::SPACE_2)
             .padding(Padding { top: theme::SPACE_GUTTER, right: theme::SPACE_GUTTER, left: theme::SPACE_GUTTER, bottom: theme::SPACE_GUTTER })
             .width(Fill)
             .height(Fill)
@@ -1058,37 +1342,6 @@ impl Shell {
         self.library_slide.interpolate(0.0, 1.0, self.now)
     }
 
-    /// 0 = macro rail hidden, 1 = fully in.
-    fn macros_t(&self) -> f32 {
-        self.macros_slide.interpolate(0.0, 1.0, self.now)
-    }
-
-    /// The macro rail, over the left side of the window, under the top bar.
-    fn macros_layer(&self) -> Option<Element<'_, Message>> {
-        let t = self.macros_t();
-        if t <= 0.0 {
-            return None;
-        }
-        let cur = self.session.current.as_ref()?;
-        let values = &self.session.values;
-        let macros = (0..cur.patch.macros.len())
-            .map(|slot| {
-                let v = values.macros[slot];
-                knob::Macro {
-                    slot,
-                    label: &cur.patch.macros[slot].name,
-                    value_text: cur.patch.macro_text(slot, v),
-                    value: v,
-                    default: cur.patch.macro_default(slot),
-                    drop: self.source_drag.as_ref().and_then(routing::SourceDrag::macro_drop),
-                }
-            })
-            .collect();
-        let rail = self.macro_rail.view(self.now, macros).map(Message::Macros);
-        let rail = container(rail).height(Fill).padding(theme::SPACE_2);
-        Some(slide::slide_left(rail, macros_width(), (1.0 - t) * macros_width()).into())
-    }
-
     /// The meta knob's menu, right of the click, clamped into the stage.
     fn meta_menu_layer(&self) -> Option<Element<'_, Message>> {
         let menu = self.meta_menu.as_ref()?;
@@ -1103,6 +1356,25 @@ impl Shell {
         Some(pin(menu.view(title, settings, reset).map(Message::MetaMenu)).x(x).y(y).into())
     }
 
+    /// The snapshot menu, hanging under the notch (centred like it).
+    fn snapshot_menu_layer(&self, current: &str) -> Option<Element<'_, Message>> {
+        let menu = self.snapshot_menu.as_ref()?;
+        let cycle = self.session.snapshot_cycle();
+        let card = menu.view(cycle, current, self.session.modified).map(Message::SnapshotMenu);
+        Some(
+            container(card)
+                .width(Fill)
+                .padding(Padding {
+                    top: notch::size().1 + theme::SPACE_HAIR,
+                    left: self.library_t() * library_width(),
+                    right: self.slide_t() * sheet_width(),
+                    ..Padding::ZERO
+                })
+                .align_x(alignment::Horizontal::Center)
+                .into(),
+        )
+    }
+
     /// The library sheet, over the left side of the window.
     fn library_layer(&self) -> Option<Element<'_, Message>> {
         let t = self.library_t();
@@ -1110,7 +1382,8 @@ impl Shell {
             return None;
         }
         let s = &self.session;
-        let sheet = self.library.view(&s.library, s.current.as_ref().map(|c| c.folder.as_str())).map(Message::Library);
+        let snapshot = s.snapshot(&self.plugin.params);
+        let sheet = self.library.view(&s.library, s.current.as_ref().map(|c| (c.folder.as_str(), snapshot))).map(Message::Library);
         let sheet = container(sheet).height(Fill).padding(theme::SPACE_2);
         Some(slide::slide_left(sheet, library_width(), (1.0 - t) * library_width()).into())
     }
@@ -1127,6 +1400,9 @@ impl Shell {
             (Sheet::Controls, Some(cur)) => controls::view(&cur.patch, &self.session.values, self.session.hot_reload).map(Message::Controls),
             (Sheet::Controls, None) => return None,
             (Sheet::Settings, _) => settings::view(settings::Props {
+                ai: &self.settings.ai,
+                ai_key: &self.ai_key,
+                ai_connection: self.plugin.shared.assistant.lock().unwrap().connection(),
                 theme: self.settings.theme,
                 ui_scale: self.settings.ui_scale,
                 passive: self.passive,
@@ -1200,7 +1476,6 @@ fn apply_theme(mode: user_settings::ThemeMode) {
 }
 
 
-
 /// A window point → panel coordinates (where the value entry is placed): minus the patch
 /// window's origin, minus the panel's offset, unscaled.
 fn window_to_panel(at: iced::Point) -> iced::Point {
@@ -1209,14 +1484,11 @@ fn window_to_panel(at: iced::Point) -> iced::Point {
     iced::Point::new((p.x - offset.x) / s, (p.y - offset.y) / s)
 }
 
-/// The library sheet plus its margin.
+/// The view switch's distance from the stage's top-right corner.
+const SWITCH_INSET: f32 = 10.0;
+
 fn library_width() -> f32 {
     theme::SIZE_LIBRARY + 2.0 * theme::SPACE_2
-}
-
-/// The macro rail plus its margin.
-fn macros_width() -> f32 {
-    macro_rail::WIDTH + 2.0 * theme::SPACE_2
 }
 
 /// A right-hand sheet plus its margin.

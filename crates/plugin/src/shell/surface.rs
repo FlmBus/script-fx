@@ -16,7 +16,7 @@
 use patch::{Patch, Values};
 
 use super::brand::{self, Brand};
-use super::{knob, session, theme};
+use super::{knob, routing, session, theme};
 use nice_plug_iced::iced::{
     Border, Center, Color, Element, Fill, Padding, Theme,
     widget::{Column, Row, column, container, text},
@@ -36,12 +36,13 @@ impl From<(usize, knob::KnobEvent)> for Message {
 
 const PER_ROW: usize = 4;
 const GAP: f32 = 12.0;
-/// Room above for the notch, below for the collapsed drawer.
-const NOTCH_CLEARANCE: f32 = 84.0;
-const DRAWER_CLEARANCE: f32 = theme::SIZE_DRAWER_BAR + 16.0;
+/// Room above for the notch, a margin below (the dock is outside the stage).
+const NOTCH_CLEARANCE: f32 = 56.0;
+const BOTTOM_CLEARANCE: f32 = 24.0;
 
 /// `brand`: the patch's title font / logo, as the library loaded them.
-pub fn view<'a>(patch: &'a Patch, brand: Option<&'a Brand>, values: &'a Values) -> Element<'a, Message> {
+/// `drop`: a modulator is being dragged (its colour): the macro knobs take it.
+pub fn view<'a>(patch: &'a Patch, brand: Option<&'a Brand>, values: &'a Values, drop: Option<Color>) -> Element<'a, Message> {
     let colour = |name: &str| session::hex(patch.theme.color(name));
     let bg = colour("bg").unwrap_or(theme::c().frame_raised);
     let accent = colour("accent").unwrap_or(theme::c().frame_ink);
@@ -69,10 +70,10 @@ pub fn view<'a>(patch: &'a Patch, brand: Option<&'a Brand>, values: &'a Values) 
                         label: &patch.macros[slot].name,
                         value_text: patch.macro_text(slot, v),
                         value: v,
-                        effective: v,
+                        effective: routing::macro_effective(patch, values, slot),
                         default: patch.macro_default(slot),
-                        mods: Vec::new(),
-                        drop: None,
+                        mods: routing::macro_metas(patch, slot).1,
+                        drop,
                         modes: None,
                         colours: Some(colours),
                     },
@@ -87,7 +88,7 @@ pub fn view<'a>(patch: &'a Patch, brand: Option<&'a Brand>, values: &'a Values) 
     let content = column![title, body].spacing(24).align_x(Center);
     container(content)
         .center(Fill)
-        .padding(Padding { top: NOTCH_CLEARANCE, bottom: DRAWER_CLEARANCE, ..Padding::ZERO })
+        .padding(Padding { top: NOTCH_CLEARANCE, bottom: BOTTOM_CLEARANCE, ..Padding::ZERO })
         .style(move |_: &Theme| container::Style {
             background: Some(bg.into()),
             border: Border { radius: theme::radius(theme::RADIUS_WINDOW), ..Default::default() },

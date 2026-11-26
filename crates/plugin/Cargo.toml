@@ -9,6 +9,11 @@ analysis = { version = "0.1.0", path = "../analysis" }
 dirs = "7.0.0"
 dsp = { version = "0.1.0", path = "../dsp" }
 hound = "3.5.1"
+# API keys (never in settings.json or plugin state). Pure Rust on Linux (Secret Service over zbus).
+keyring = { version = "3.6", features = ["apple-native", "windows-native", "async-secret-service", "async-io", "crypto-rust"] }
+# Snapshot import/export dialogs. XDG portal on Linux (no GTK in the plugin); 0.18 needs Rust 1.92.
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+llm = { version = "0.1.0", path = "../llm" }
 include_dir = "0.7.4"
 # Vendored + patched (runtime parameter names), see vendor/nice-plug/PATCHES.md.
 nice-plug = { version = "0.4.2", features = ["standalone", "assert_process_allocs"] }

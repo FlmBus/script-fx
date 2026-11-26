@@ -1,5 +1,5 @@
 //! The window when no patch is loaded: build a patch from a description. No notch: there is
-//! nothing to control. Building needs the LLM, so those controls are disabled and say why.
+//! nothing to control. Building goes through the chat; without an AI (Settings) it says so there.
 //! (Passive mode lives in the top bar.)
 
 use super::theme;
@@ -17,14 +17,24 @@ pub struct Empty {
 #[derive(Debug, Clone)]
 pub enum Message {
     Describe(String),
+    Build,
+    Listen,
 }
 
-pub enum Event {}
+pub enum Event {
+    Build(String),
+    Listen,
+}
 
 impl Empty {
     pub fn update(&mut self, message: Message) -> Option<Event> {
         match message {
             Message::Describe(s) => self.describe = s,
+            Message::Build => {
+                let text = self.describe.trim();
+                return (!text.is_empty()).then(|| Event::Build(text.to_string()));
+            }
+            Message::Listen => return Some(Event::Listen),
         }
         None
     }
@@ -41,17 +51,20 @@ impl Empty {
         let build = column![
             text_input("Describe a new patch, e.g. warm up a thin DI bass", &self.describe)
                 .on_input(Message::Describe)
+                .on_submit(Message::Build)
                 .size(12.5)
                 .padding(Padding { top: 10.0, bottom: 10.0, left: 12.0, right: 12.0 })
                 .style(theme::frame_input),
             row![
-                text("needs the LLM (not connected yet)").size(11).color(theme::c().frame_subtle),
+                text("the assistant builds it in the chat").size(11).color(theme::c().frame_subtle),
                 space::horizontal(),
                 button(text("Listen first").size(12.5))
+                    .on_press(Message::Listen)
                     .height(32)
                     .padding(Padding { top: 8.0, bottom: 8.0, left: 13.0, right: 13.0 })
                     .style(rounded(theme::frame_ghost(true))),
                 button(text("Build patch").size(12.5).font(theme::font::SANS_SEMIBOLD))
+                    .on_press_maybe((!self.describe.trim().is_empty()).then_some(Message::Build))
                     .height(32)
                     .padding(Padding { top: 8.0, bottom: 8.0, left: 15.0, right: 15.0 })
                     .style(rounded(theme::frame_primary)),

@@ -28,6 +28,9 @@ pub struct Listen {
     pending: Option<Arc<Mutex<Option<CaptureResult>>>>,
 }
 
+/// Shorter recordings aren't worth analysing: Stop is disabled until then.
+pub const MIN_SECONDS: f32 = 1.0;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Status {
     Idle,
@@ -82,6 +85,11 @@ impl Listen {
         }
     }
 
+    /// Ends the recording early and analyses what there is.
+    pub fn stop(&mut self, shared: &Shared) {
+        shared.finish_listen();
+    }
+
     pub fn cancel(&mut self, shared: &Shared) {
         shared.cancel_listen();
     }
@@ -104,6 +112,20 @@ impl Listen {
 }
 
 impl CaptureResult {
+    /// The whole analysis for the LLM (layer 1 pastes it into the message). Once the
+    /// `get_analysis` tool exists, the model gets `analysis::digest()` + `id` and fetches sections.
+    pub fn llm_json(&self) -> String {
+        serde_json::to_string_pretty(&serde_json::json!({
+            "capture": {
+                "seconds_of_signal": (self.seconds * 10.0).round() / 10.0,
+                "note": "input = the track before the ScriptFX chain, output = after it (current patch)",
+            },
+            "input": self.input,
+            "output": self.output,
+        }))
+        .unwrap_or_default()
+    }
+
     /// "10.0 s · −14.2 LUFS" (output loudness).
     pub fn label(&self) -> String {
         let lufs = self.output.loudness.integrated_lufs.map_or("—".into(), |v| format!("{v:.1}").replace('-', "−"));

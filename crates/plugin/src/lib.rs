@@ -14,10 +14,13 @@ use nice_plug_iced::IcedEditorState;
 use nice_plug_iced::iced::PollSubNotifier;
 use patch::{MACRO_SLOTS, ModEdits, ModSettings, Patch};
 
+mod assistant;
 mod captures;
 mod diag;
+mod dialog;
 mod listen;
 mod shell;
+mod snapshots;
 mod user_settings;
 
 /// Listen/capture states (`Shared::listen_state`).
@@ -40,10 +43,10 @@ pub struct CaptureBuf {
 }
 
 /// Editor window size (logical px), fixed.
-/// 836 × 598: the patch window is exactly the 840×560 panel's 3:2 at 816×544 (see
-/// `theme::stage_size`). The library floats over it as a sheet, so it takes no column; notch
-/// and drawer hang into it, so they take no row.
-pub const WINDOW_SIZE: (f32, f32) = (836.0, 598.0);
+/// 836 × 714: the patch window is exactly the 840×560 panel's 3:2 at 816×544 (see
+/// `theme::stage_size`), the mod dock (108) below it. The library floats over it as a sheet, so
+/// it takes no column; the notch hangs into it, so it takes no row.
+pub const WINDOW_SIZE: (f32, f32) = (836.0, 714.0);
 const PEAK_DECAY_MS: f32 = 300.0;
 const GRAPH_QUEUE: usize = 16;
 
@@ -182,6 +185,8 @@ pub struct Shared {
     pub listen_progress: std::sync::atomic::AtomicUsize,
     /// Audio thread only ever `try_lock`s this (never blocks).
     pub capture: Mutex<CaptureBuf>,
+    /// The chat and its LLM worker. The audio thread never touches it.
+    pub assistant: Mutex<assistant::Assistant>,
 }
 
 impl Shared {
@@ -200,6 +205,22 @@ impl Shared {
 
     pub fn cancel_listen(&self) {
         self.listen_state.store(LISTEN_IDLE, Ordering::Release);
+    }
+
+    /// Ends a running capture early, keeping what was recorded.
+    pub fn finish_listen(&self) {
+        let mut cap = self.capture.lock().unwrap();
+        if cap.len > 0 {
+            // A block the audio thread is just about to record finds the target reached.
+            cap.target = cap.len;
+            self.recording_done();
+        }
+    }
+
+    /// Only from recording: a stop and the audio thread reaching the target can't finish the
+    /// same capture twice.
+    fn recording_done(&self) {
+        let _ = self.listen_state.compare_exchange(LISTEN_RECORDING, LISTEN_DONE, Ordering::AcqRel, Ordering::Relaxed);
     }
 
     /// Takes the finished capture (input, output) and returns to idle.
@@ -244,7 +265,7 @@ impl Shared {
         cap.len += k;
         self.listen_progress.store(cap.len, Ordering::Relaxed);
         if cap.len >= cap.target {
-            self.listen_state.store(LISTEN_DONE, Ordering::Release);
+            self.recording_done();
         }
     }
     /// Compiles the patch's chain and hands it to the audio thread. Non-audio threads only.
@@ -343,6 +364,10 @@ pub struct FxParams {
     #[persist = "patch"]
     pub patch_name: RwLock<String>,
 
+    /// The patch's snapshot this sound started from (`snapshots`); empty = Init (its defaults).
+    #[persist = "snapshot"]
+    pub snapshot: RwLock<String>,
+
     /// Plain values of the patch's free (not macro-driven) params, by param id.
     #[persist = "param-values"]
     pub param_values: RwLock<HashMap<String, f32>>,
@@ -371,6 +396,11 @@ pub struct FxParams {
 
     /// Host-visible names of the macro slots (empty = "Macro N").
     pub macro_names: [Arc<RwLock<String>>; MACRO_SLOTS],
+
+    /// The host's bypass (and the notch's button): the input passes through, delayed by the
+    /// chain's latency so it stays aligned; switching crossfades (`BYPASS_FADE_MS`).
+    #[id = "bypass"]
+    pub bypass: BoolParam,
 }
 
 impl Default for FxParams {
@@ -378,6 +408,7 @@ impl Default for FxParams {
         let macro_names: [Arc<RwLock<String>>; MACRO_SLOTS] = std::array::from_fn(|_| Arc::default());
         Self {
             patch_name: RwLock::new(String::new()),
+            snapshot: RwLock::new(String::new()),
             param_values: RwLock::new(HashMap::new()),
             mod_settings: RwLock::new(HashMap::new()),
             mod_edits: RwLock::new(ModEdits::default()),
@@ -392,6 +423,7 @@ impl Default for FxParams {
                 .with_dynamic_name(macro_names[i].clone()),
             }),
             macro_names,
+            bypass: BoolParam::new("Bypass", false).make_bypass(),
         }
     }
 }
@@ -442,7 +474,17 @@ pub struct ScriptFx {
     peak_decay: f32,
     /// Dev aid: `SCRIPTFX_TEST_INPUT=file.wav` replaces the input with this (looped).
     test_input: Option<(Vec<Frame>, usize)>,
+    /// Bypass: the input's recent frames (a ring, `BYPASS_DELAY` long), to delay the dry signal by
+    /// the chain's latency; where it writes next; how wet the output is now (1 = the chain).
+    dry: Vec<Frame>,
+    dry_pos: usize,
+    wet: f32,
 }
+
+/// The longest latency the bypass can line up with (frames; ≈ 1.4 s at 192 kHz).
+const BYPASS_DELAY: usize = 1 << 18;
+/// The crossfade when bypass switches.
+const BYPASS_FADE_MS: f32 = 10.0;
 
 impl Default for ScriptFx {
     fn default() -> Self {
@@ -467,12 +509,16 @@ impl Default for ScriptFx {
                 listen_state: std::sync::atomic::AtomicU8::new(LISTEN_IDLE),
                 listen_progress: std::sync::atomic::AtomicUsize::new(0),
                 capture: Mutex::new(CaptureBuf { input: Vec::new(), output: Vec::new(), len: 0, target: 0 }),
+                assistant: Mutex::default(),
             }),
             graph: None,
             graph_rx,
             garbage_tx,
             peak_decay: 0.999,
             test_input: None,
+            dry: vec![[0.0; 2]; BYPASS_DELAY],
+            dry_pos: 0,
+            wet: 1.0,
         }
     }
 }
@@ -639,6 +685,27 @@ impl Plugin for ScriptFx {
             if let Some(g) = &mut self.graph {
                 g.process(&macros, &mut frames[..n]);
             }
+            // Bypass: crossfade to the input, delayed by the chain's latency (the graph keeps
+            // running, so tails and LFOs carry on and switching back doesn't jump).
+            let latency = self.graph.as_ref().map_or(0, |g| g.latency()).min(BYPASS_DELAY - 1);
+            let target = if self.params.bypass.value() { 0.0 } else { 1.0 };
+            let step = 1.0 / (BYPASS_FADE_MS / 1000.0 * self.shared.sample_rate().max(1.0));
+            if self.wet == 1.0 && target == 1.0 {
+                for f in input[..n].iter() {
+                    self.dry[self.dry_pos] = *f;
+                    self.dry_pos = (self.dry_pos + 1) % BYPASS_DELAY;
+                }
+            } else {
+                for (f, x) in frames[..n].iter_mut().zip(input[..n].iter()) {
+                    self.dry[self.dry_pos] = *x;
+                    let d = self.dry[(self.dry_pos + BYPASS_DELAY - latency) % BYPASS_DELAY];
+                    self.dry_pos = (self.dry_pos + 1) % BYPASS_DELAY;
+                    self.wet = if target > self.wet { (self.wet + step).min(1.0) } else { (self.wet - step).max(0.0) };
+                    for ch in 0..2 {
+                        f[ch] = self.wet * f[ch] + (1.0 - self.wet) * d[ch];
+                    }
+                }
+            }
             finite &= frames[..n].iter().all(|f| f[0].is_finite() && f[1].is_finite());
             self.shared.capture_block(&input[..n], &frames[..n]);
             for ch in 0..2 {
@@ -680,3 +747,25 @@ impl Vst3Plugin for ScriptFx {
 
 nice_export_clap!(ScriptFx);
 nice_export_vst3!(ScriptFx);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stopping_a_listen_keeps_what_was_recorded() {
+        let shared = ScriptFx::default().shared;
+        shared.allocate_capture(48_000.0);
+        shared.start_listen(10.0);
+        shared.finish_listen();
+        assert!(shared.take_capture().is_none(), "nothing recorded yet");
+        let block = [[0.5; 2]; 64];
+        shared.capture_block(&block, &block);
+        shared.capture_block(&block, &block);
+        shared.finish_listen();
+        assert_eq!(shared.take_capture().unwrap().0.len(), 128);
+        shared.capture_block(&block, &block);
+        shared.finish_listen();
+        assert!(shared.take_capture().is_none(), "finished only once");
+    }
+}

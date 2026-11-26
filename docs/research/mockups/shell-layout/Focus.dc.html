@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Source focus on a block page</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<div style="width: 984px; height: 708px; position: relative; overflow: hidden; background: #0b0b0c; font-family: Inter, system-ui, sans-serif; color: #f4f4f5">
+  <div style="position: absolute; left: 0; top: 0">
+    <dc-import name="TopBar" hint-size="984px,40px"></dc-import>
+  </div>
+
+  <!-- the stage: Chain view, the "tone" block's page -->
+  <div style="position: absolute; left: 12px; top: 44px; width: 960px; height: 540px; background: #161618; border-radius: 12px; overflow: hidden">
+    <div style="position: absolute; left: 20px; top: 16px; display: flex; align-items: center; gap: 10px">
+      <button style="border: 0; background: rgba(255,255,255,0.06); color: #b4b4bc; font: 500 12px Inter; padding: 5px 10px; border-radius: 8px">‹ Chain</button>
+      <span style="font: 600 16px Inter">tone</span>
+      <span style="font: 400 12.5px Inter; color: #9b9ba3">Low pass</span>
+    </div>
+
+    <!-- response, with LFO 1's sweep as a band -->
+    <div style="position: absolute; left: 220px; top: 72px; width: 520px; height: 176px; background: #121214; border-radius: 10px">
+      <svg width="520" height="176" viewBox="0 0 520 176" aria-hidden="true">
+        <g stroke="rgba(255,255,255,0.06)"><line x1="0" y1="48" x2="520" y2="48"/><line x1="0" y1="88" x2="520" y2="88"/><line x1="0" y1="128" x2="520" y2="128"/><line x1="128" y1="0" x2="128" y2="176"/><line x1="260" y1="0" x2="260" y2="176"/><line x1="392" y1="0" x2="392" y2="176"/></g>
+        <path d="M20 88 L340 88 C370 88 386 87 400 96 C414 108 424 140 436 170" fill="none" stroke="rgba(45,212,191,0.3)" stroke-width="7" stroke-linecap="round"/>
+        <path d="M20 88 L316 88 C346 88 362 87 376 96 C390 108 400 140 412 170" fill="none" stroke="#f4f4f5" stroke-width="1.8"/>
+        <text x="128" y="170" fill="#8b8b94" font-family="JetBrains Mono" font-size="9" text-anchor="middle">100</text>
+        <text x="260" y="170" fill="#8b8b94" font-family="JetBrains Mono" font-size="9" text-anchor="middle">1k</text>
+        <text x="392" y="170" fill="#8b8b94" font-family="JetBrains Mono" font-size="9" text-anchor="middle">10k</text>
+      </svg>
+    </div>
+
+    <!-- knobs: only the focused source's ring + meta knob; other routes are small dots -->
+    <div style="position: absolute; left: 316px; top: 276px; display: flex; gap: 8px">
+      <div style="width: 76px; height: 108px; border-radius: 9px; background: rgba(45,212,191,0.07); outline: 1px solid rgba(45,212,191,0.35); position: relative; display: flex; flex-direction: column; align-items: center; padding-top: 24px; box-sizing: border-box">
+        <div style="position: absolute; left: 7px; top: 6px; display: flex; align-items: center; gap: 5px">
+          <svg width="13" height="13" viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="4.6" fill="none" stroke="rgba(45,212,191,0.8)" stroke-width="1.2"/><path d="M6 1.4 A4.6 4.6 0 0 1 10.4 6" fill="none" stroke="#2dd4bf" stroke-width="1.8" stroke-linecap="round"/><circle cx="6" cy="6" r="1.2" fill="#2dd4bf"/></svg>
+          <span style="width: 5px; height: 5px; border-radius: 3px; background: #facc15; opacity: 0.45" title="M1 Character also modulates this"></span>
+        </div>
+        <svg width="58" height="58" viewBox="0 0 52 52" aria-hidden="true">
+          <circle cx="26" cy="26" r="21" fill="none" stroke="#2dd4bf" stroke-width="2" stroke-dasharray="29.69 400" stroke-dashoffset="-46.51" stroke-linecap="round" transform="rotate(135 26 26)"/>
+          <circle cx="26" cy="26" r="15" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="2.5" stroke-dasharray="70.69 400" transform="rotate(135 26 26)"/>
+          <circle cx="26" cy="26" r="15" fill="none" stroke="rgba(255,255,255,0.55)" stroke-width="2.5" stroke-dasharray="43.83 400" transform="rotate(135 26 26)"/>
+          <circle cx="26" cy="26" r="10" fill="#222225"/>
+          <line x1="28.1" y1="22.6" x2="31.9" y2="16.7" stroke="#f4f4f5" stroke-width="1.8" stroke-linecap="round"/>
+          <circle cx="42.99" cy="13.65" r="3.6" fill="rgba(45,212,191,0.25)"/>
+          <circle cx="42.99" cy="13.65" r="1.6" fill="#ffffff"/>
+        </svg>
+        <span style="font: 500 10px 'JetBrains Mono'; color: #2dd4bf; margin-top: 3px">LFO 1 ±15%</span>
+      </div>
+      <div style="width: 76px; height: 108px; border-radius: 9px; background: rgba(255,255,255,0.03); display: flex; flex-direction: column; align-items: center; padding-top: 24px; box-sizing: border-box; opacity: 0.6">
+        <svg width="58" height="58" viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="15" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="2.5" stroke-dasharray="70.69 400" transform="rotate(135 26 26)"/><circle cx="26" cy="26" r="15" fill="none" stroke="rgba(255,255,255,0.55)" stroke-width="2.5" stroke-dasharray="21.2 400" transform="rotate(135 26 26)"/><circle cx="26" cy="26" r="10" fill="#222225"/><line x1="22.76" y1="23.65" x2="17.1" y2="19.5" stroke="#f4f4f5" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <span style="font: 400 10px Inter; color: #b4b4bc; margin-top: 3px">Q</span>
+      </div>
+      <div style="width: 76px; height: 108px; border-radius: 9px; background: rgba(255,255,255,0.03); display: flex; flex-direction: column; align-items: center; padding-top: 24px; box-sizing: border-box; opacity: 0.6">
+        <svg width="58" height="58" viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="15" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="2.5" stroke-dasharray="70.69 400" transform="rotate(135 26 26)"/><circle cx="26" cy="26" r="15" fill="none" stroke="rgba(255,255,255,0.55)" stroke-width="2.5" stroke-dasharray="23.3 400" transform="rotate(135 26 26)"/><circle cx="26" cy="26" r="10" fill="#222225"/><line x1="23.12" y1="23.22" x2="18.09" y2="18.36" stroke="#f4f4f5" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <span style="font: 400 10px Inter; color: #b4b4bc; margin-top: 3px">24 dB/oct</span>
+      </div>
+      <div style="width: 76px; height: 108px; border-radius: 9px; background: rgba(255,255,255,0.03); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; box-sizing: border-box; opacity: 0.6">
+        <div style="display: flex; flex-direction: column; gap: 2px; background: rgba(255,255,255,0.05); border-radius: 6px; padding: 2px">
+          <span style="font: 600 9.5px Inter; color: #0b0b0c; background: #d4d4d8; border-radius: 4px; padding: 3px 8px">Min</span>
+          <span style="font: 500 9.5px Inter; color: #9b9ba3; padding: 3px 8px">Linear</span>
+        </div>
+        <span style="font: 400 10px Inter; color: #b4b4bc">Phase</span>
+      </div>
+    </div>
+
+    <!-- what's off-page: the rest of the chain, as a strip -->
+    <div style="position: absolute; left: 20px; bottom: 16px; display: flex; align-items: center; gap: 6px; font: 500 10.5px Inter; color: #9b9ba3">
+      <span>IN</span><span style="width: 14px; height: 1px; background: #3f3f46"></span>
+      <span style="background: #1f1f22; border-radius: 6px; padding: 3px 8px; display: flex; align-items: center; gap: 5px">tape <span style="width: 5px; height: 5px; border-radius: 3px; background: #facc15; opacity: 0.6"></span></span>
+      <span style="width: 14px; height: 1px; background: #3f3f46"></span>
+      <span style="background: #2a2a2e; color: #f4f4f5; border-radius: 6px; padding: 3px 8px; display: flex; align-items: center; gap: 5px">tone <span style="width: 5px; height: 5px; border-radius: 3px; background: #2dd4bf"></span></span>
+      <span style="width: 14px; height: 1px; background: #3f3f46"></span>
+      <span style="background: #1f1f22; border-radius: 6px; padding: 3px 8px">output</span>
+      <span style="width: 14px; height: 1px; background: #3f3f46"></span><span>OUT</span>
+    </div>
+  </div>
+
+  <div style="position: absolute; left: 362px; top: 44px">
+    <dc-import name="Notch" hint-size="260px,36px"></dc-import>
+  </div>
+  <div style="position: absolute; left: 864px; top: 54px">
+    <dc-import name="ViewTabs" active="Chain" hint-size="98px,34px"></dc-import>
+  </div>
+  <div style="position: absolute; left: 12px; top: 592px">
+    <dc-import name="Dock" selected="lfo1" hint-size="960px,108px"></dc-import>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":984,"height":708}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

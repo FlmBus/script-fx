@@ -6,9 +6,10 @@ Concepts, research and measurements: [`research/`](research/)._
 
 ## Current state
 
-The chain editor is on `main`: the Surface and Chain surfaces with block modals, the macro rail, the
-modulators (Follow, LFO 1–3, Step) with their drawer panels, Serum-style routes with drag & drop
-onto knobs, and the Matrix (every route, add/remove). See
+The chain editor is on `main`: the Surface and Chain surfaces, block modals, the modulators
+(Follow, LFO 1–3, Step), Serum-style routes with drag & drop onto knobs, and the Matrix (every
+route, add/remove). Branch `mod-dock` (2026-11-25): the **mod dock** replaces the macro rail and
+the drawer ([`research/shell-layout.md`](research/shell-layout.md)). See
 [`research/chain-editor.md`](research/chain-editor.md) for the design and remaining deviations.
 Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in a real host.
 
@@ -25,8 +26,8 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
 - **Modulation**: two kinds of route, macro slots (`Patch::modulations`) and modulator
   assignments (`Patch::assignments`), one model for the shell (`patch::routes`: `Route`,
   `RouteSource`, add/remove). Normalized deltas sum onto the knob's base. Drag a macro's grip (the
-  "M3" tag in the rail) or a modulator tab's grip (drawer) onto a block modal's knob, or a modulator
-  onto a macro in the rail; each route is a meta knob in its source's colour (up to 5, then "+N");
+  title bar in the dock) or a modulator's title bar onto a block knob, or a modulator onto a
+  macro in the dock; each route is a meta knob in its source's colour (up to 5, then "+N");
   right-click = menu with Remove. Changing routes or modulator settings rebuilds the graph once
   per frame and the new graph **adopts** the playing one's state (tails, LFO phases:
   `Graph::adopt`), so it doesn't click. Saved with the project: slot settings (`mod-slots`) and
@@ -36,10 +37,42 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
   position (`Graph::modulator_phases`), like Serum: one LFO cycle (`dsp::modulators::morph`, what
   plays) with a dot, Step's bars with the playing step lit. Only Follow is a live trace. A trace
   sampled once per UI frame aliases any LFO above a few Hz into noise (2026-11-21).
-- **Layers:** a press on the surface closes the library, sheets, the drawer, the entry and menus; the macro
-  rail stays (drag a macro onto a knob, then turn it). The drawer opens to 180 px and the block
-  modal moves up above it. The chain ↔ modal blur keeps the notch, the drawer (at its
-  current height) and the rail sharp (`postfx` has three keep rects).
+- **Mod dock** (branch `mod-dock`, `shell/dock.rs`): always below the stage, never over it.
+  Macros 1–8 / 9–16 and the five modulators (live mini displays), each with a title bar in its
+  colour = the drag handle. Click = focus (the hint counts its routes, the others fade), again =
+  its editor: a panel rising from the dock over the stage's lower part (decided 2026-11-25 over
+  scaling the stage, a modal, or growing the window: the stage stays usable, a block modal moves
+  up above it). It stays open while the stage is used and steps aside while a source is dragged.
+  Escape closes the editor, then the focus. Macros (dock and Surface) take modulators and show a
+  meta knob per route. Window 836 × 714 (stage still 816 × 544). Not yet: the knobs' focus rule,
+  collapsing, the mockup's drag tag.
+- **Blur** (branch `mod-dock`): the zoom blur applies to the chain under the camera only, drawn
+  as the renderer's backdrop (`shell/backdrop.rs`); everything drawn after it stays sharp.
+- **Notch** (branch `mod-dock`): one row, reload | snapshots | **bypass** (the host's bypass
+  parameter, `FxParams::bypass`: the input passes through delayed by the chain's latency, 10 ms
+  crossfade; the graph keeps running). The view switch is three icons in the stage's top-right
+  corner (name on hover).
+- **Snapshots** (2026-11-25, `snapshots.rs`, `shell/snapshot_menu.rs`): a snapshot is the whole
+  sound of a patch, everything the project saves for it: macros (by id), every param's value, the
+  meta knobs that differ from the patch, the routing edits. Stored per user, apart from the patch
+  code: `<data dir>/ScriptFX/snapshots/<patch folder>/<name>.json` (`SCRIPTFX_SNAPSHOTS`
+  overrides; atomic writes). "Init" = the patch's defaults, never a file. Values are keyed by id,
+  so a snapshot survives a patch growing or shrinking (missing → default). The notch: ‹ › step
+  through Init and the saved ones (recall replaces the sound), the selector shows the name with a
+  dot while the sound differs from it (compared 5×/s with float tolerance) and opens the menu
+  (recall, Save as new…, Rename…, Revert, Export…, Delete… with a confirmation), Save overwrites
+  the selected one or asks for a name on Init, Load imports a file (one saved from another patch
+  is refused). The library lists Init + the saved ones per patch; a row loads the patch with it.
+  The selection is saved with the project (`FxParams::snapshot`); a snapshot file that's gone
+  falls back to Init. Import/export use native dialogs (`rfd` 0.17, XDG portal on Linux, no GTK;
+  0.18 needs Rust 1.92) on their own thread, modal on macOS (AppKit's main thread). Checked on
+  Xvfb: modified dot, save on Init (naming), invalid name refused, step, recall from the menu and
+  from the library across patches, rename, delete. **Not checked:** the dialogs themselves (no
+  portal on Xvfb; without one, Load silently does nothing: `rfd` reports it as a cancel), Windows,
+  macOS, a host's project save/restore of the selection.
+- **Layers:** a press on the surface closes the library, sheets, the entry and menus; the dock
+  stays. The chain ↔ modal blur keeps the notch, the sheets and the modal sharp (through the
+  stage's scale).
 - **Rates:** LFO and Step have `Hz | sync` (pills on the Rate knob; `sync = "1/8"` in Luau, a note
   length overriding `rate_hz`). Block rates (`sync` on Chorus, Delay, …) are still patch-only.
 - **Blocks (2026-11-21):** one versatile compressor (detector, topology, ratio curve, program,
@@ -48,8 +81,8 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
   ([`research/blocks.md`](research/blocks.md) §4).
 - **Filters:** LowPass/HighPass have a `slope` param (12/24/36/48 dB/oct, cascaded biquads with
   Butterworth stage Q's; `q` = resonance on the steepest stage). Params can be stepped
-  (`ParamSpec::step`: values snap). The Matrix shows each route's source level and the
-  destination's live value.
+  (`ParamSpec::step`: values snap). The Matrix shows each route's source level (a bar) and
+  its curve as a small graph (drag up/down to bend it, as in Serum).
 - **Captures and passive mode (2026-11-25).** Listen writes one folder per capture with a
   subfolder per track (`captures.rs`: `capture.json`, `index.json`, `analysis.json` + the two
   WAVs per track; the last `KEEP` = 20 are kept, and the settings sheet shows the folder's size
@@ -58,10 +91,16 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
   `captures::read(id, track, stream, section)` serves single sections — the query the planned
   `get_analysis` tool will call, tested already. Derived loudness values (crest, PLR, K-system)
   left the JSON and became methods. **Passive mode** works: the switch in the settings sheet
-  (and the card's own button) unloads the patch, disables the library/macros/controls openers
+  (and the card's own button) unloads the patch, disables the library and controls openers (the dock is hidden)
   and fills the window with the passive card; it is saved with the project (`FxParams::passive`).
   The host's track name arrives through `IcedNiceContext::new_track_info()` — no nice-plug patch
   needed — and titles the card.
+- **LLM, layer 1** (2026-11-25, `crates/llm`, `assistant.rs`): chat message + loaded patch +
+  values + attached capture (layer 1 still pastes the full analysis JSON) → reply and a validated patch change (edit or new), at most two repair
+  rounds, Undo. One structured answer instead of tools, the same for both backends. The worker only
+  proposes; the shell commits on the UI thread. An edit keeps the project's values except where a
+  default moved (`Session::change_files`). The chat lives in `Shared`: survives closing the editor,
+  not saved. Verified with the claude CLI in the standalone on Xvfb (edit, create, undo, cancel).
 - **Pointer locking** on X11 was tested; the Windows/macOS implementations now **compile** (the
   CD builds both, 2026-11-23) but have never run.
 - **Diagnostics build** (`--features diagnostics`, `crates/plugin/src/diag.rs`): a log file per
@@ -79,12 +118,15 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
   Ctrl+C in the standalone only sets a flag the GUI checks per frame; close the window instead.
 - **Open details:** macro value text and typed values use the target's default base and only that
   macro's contribution, not the edited base or other macros; beyond five routes a knob shows "+N"
-  (edit those in the Matrix); the block modal's display slides under the notch while the drawer is
-  open; test save/restore in a host and pointer warping under XWayland
+  (edit those in the Matrix); test save/restore in a host and pointer warping under XWayland
   on Hyprland.
 
 ## Next steps (prioritised)
 
+0. **Mod dock, rest** ([`research/shell-layout.md`](research/shell-layout.md) "Open"): the
+   knobs show only the focused source's rings and meta knobs (route dots otherwise), collapsing
+   the dock (window resize), the drag tag. Then decide on the rest of the shell layout (960×540
+   stage, one-row notch, docked columns).
 1. **Modulation, step 4 (polish):** Matrix filtering (by source/destination) and sorting; the
    open modulator's targets glow and chain blocks show dots in their modulators' colours (concept
    §§ drawer/chain); `Hz | sync` pills on block knobs (rates, delay times); a
@@ -92,7 +134,7 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
    round trip (save project, reopen) of routes and modulator edits.
 2. **Surfaces** ([`GLOSSARY.md`](GLOSSARY.md), decided 2026-11-25). Done: the tier is collapsed —
    `shell/viewport.rs` holds `SurfaceId` and the switcher list, the shell's per-view special cases
-   are per-surface traits (`wants_drawer`, `owns_block_modal`), `notch::View` is gone. Remaining:
+   are per-surface traits (`owns_block_modal`), `notch::View` is gone. Remaining:
    **(a)** move the chain's state out of the shell struct (`page`, `motion`, `chain_content`) so
    each surface owns its own — the point of the exercise; **(b)** rename `ui.Panel` → `ui.Surface`
    in the Luau API, `has_panel` → surfaces, and `stage.rs`'s `Panel` with it (breaking, all six
@@ -117,8 +159,8 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
    (live and reopening at ≠ 100 %, host accepts the resize), library wheel scrolling, controls
    sheet (automation gestures, names), hot reload + error card, unload, close/reopen ×10, two
    instances, HiDPI.
-6. **Snapshots** (saved values of a patch): the notch selector/save/load and the library rows are
-   placeholders ("Init" = defaults) until then.
+6. ~~**Snapshots**~~ built 2026-11-25 (see "Snapshots" above). Left: check the native file
+   dialogs on Windows, macOS and in hosts; factory snapshots shipped with patches, if wanted.
 7. **Multi-track Listen** (the real feature, with the chat; all decided 2026-11-25, Flemming).
    Clicking Listen lets the user **choose which instances to record**, default: only the current
    one. Every selected instance contributes its **input and output** with the **full** analysis
@@ -143,19 +185,12 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
    one folder per capture with a subfolder per track, `index.json`, `captures::read(id, track,
    stream, section)`, retention of the last 20), `analysis::digest()` (one line per stream,
    ~30 tokens), and **passive mode** (see below). **Open:** the instance registry, the selector
-   UI, the synchronised record start, and `get_analysis` itself (needs `crates/llm`).
-8. **LLM integration**: chat → patch generation (layer 1 with an attached capture), then layer-2
-   tools (`get_analysis`, `request_listen`). Validate generated patches with the strict loader and
-   `luau-lsp analyze`; feed errors back. Adapter decision (2026-11-19): own `Backend`/tool layer
-   in a new `crates/llm`, in-process HTTP or an installed CLI (`claude -p`, `codex exec`), ACP
-   later; research, candidates, the Claude subscription/ToS caveat:
-   [`research/llm-adapter.md`](research/llm-adapter.md). Still open: which cheap/free models.
-8. **LLM integration**: chat → patch generation (layer 1 with an attached capture), then layer-2
-   tools (`get_analysis`, `request_listen`). Validate generated patches with the strict loader and
-   `luau-lsp analyze`; feed errors back. Adapter decision (2026-11-19): own `Backend`/tool layer
-   in a new `crates/llm`, in-process HTTP or an installed CLI (`claude -p`, `codex exec`), ACP
-   later; research, candidates, the Claude subscription/ToS caveat:
-   [`research/llm-adapter.md`](research/llm-adapter.md). Still open: which cheap/free models.
+   UI, the synchronised record start, and `get_analysis` itself (layer 2 in `crates/llm`).
+8. **LLM integration, rest** (layer 1 built 2026-11-25, see above): layer-2 tools (`get_analysis`,
+   `request_listen`), streaming replies, saved/shared global chats, a diff view, Codex/ACP
+   ([`research/llm-adapter.md`](research/llm-adapter.md)). Check in a host, with a real API
+   provider (only tested against a fake server) and the keychain on all three platforms.
+   Still open: which cheap/free models.
 
 ## Vision
 
@@ -261,6 +296,13 @@ loads only safe data and shows a generic UI. See the research for the threat mod
   knob groups/choices the big blocks need are next steps 3 and 4. **Still to design:** switches
   (bypass, ping-pong), choices (filter type, LFO shape), maybe steppers — and `ms | sync` on block
   times.
+- **Chat: more feedback, rich elements** (Flemming, 2026-11-25; open what exactly). Candidates:
+  steps of a running turn (thinking → checking → repairing, with what failed), a change card (which
+  blocks/macros/values changed, code diff), before/after capture card instead of the table, A/B
+  between the versions, the panel's render as a thumbnail.
+- **Chat as a main view instead of a sheet** (Flemming, 2026-11-25: contemplating). More room; but the
+  sheet keeps the panel in sight. Proposal: a fourth stage view, conversation left, the turn's rich
+  elements right, the dock below stays playable. Mockup first.
 - **Global chats** (decided 2026-11-19): share chats between instances and persist them in the user
   data dir, with one default and optional additional chats. Today each shell has one in-memory
   "Main" chat. Store model auth/config as planned in `research/llm-adapter.md` (keys in the OS
@@ -283,8 +325,8 @@ Principle (Flemming, 2026-11-19): patches are isolated from the shell and from e
   (patch folder + content hash), so they can't restyle the shell or each other (fixed 2026-11-19).
 - **Not yet:** chat logs and attached captures are in memory per plugin instance (sharing and
   persistence: "Global chats" above). Captures use one shared folder and second-resolution names, so
-  concurrent captures can collide. Param values and slot settings are dropped on patch switch;
-  per-patch state is needed once snapshots exist.
+  concurrent captures can collide. Param values and slot settings are dropped on patch switch
+  (save a snapshot to keep them).
 - **Backlog: assets as a manifest** (discussed 2026-11-19, parked: the attack surface is small,
   patches can only load files from their own folder). Idea: `Font.new(id, path)` /
   `Image.new(id, path, { columns, frames })` objects, declarable in any patch file but only while

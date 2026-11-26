@@ -8,13 +8,13 @@
 use nice_plug_iced::iced::{Color, Point};
 use patch::{ModDestination, ModulatorId, Patch, Route, RouteSource};
 
-use super::{drawer, knob};
+use super::{dock, knob};
 
 /// The source's colour (fixed, never a patch colour).
 pub fn colour(source: RouteSource) -> Color {
     match source {
         RouteSource::Macro(_) => knob::MACRO,
-        RouteSource::Modulator(id) => drawer::MODULATORS[id.index()].1,
+        RouteSource::Modulator(id) => dock::MODULATORS[id.index()].1,
     }
 }
 
@@ -27,7 +27,7 @@ pub fn name(patch: &Patch, source: RouteSource) -> &str {
 }
 
 pub fn modulator_name(id: ModulatorId) -> &'static str {
-    drawer::MODULATORS[id.index()].0
+    dock::MODULATORS[id.index()].0
 }
 
 /// "Heat → Drive", "LFO 2 → Character" (a macro destination).
@@ -53,22 +53,67 @@ pub fn metas(patch: &Patch, param: usize) -> (Vec<Route>, Vec<knob::Meta<'_>>) {
         .unzip()
 }
 
-/// A source being dragged: from a macro's grip or a modulator tab's grip.
+/// Macro `slot`'s routes (modulators on the macro) and a meta knob for each (same order).
+pub fn macro_metas(patch: &Patch, slot: usize) -> (Vec<Route>, Vec<knob::Meta<'_>>) {
+    let Some(id) = patch.macros.get(slot).map(|m| &m.id) else { return (Vec::new(), Vec::new()) };
+    patch
+        .routes()
+        .into_iter()
+        .filter(|r| matches!(patch.route_destination(*r), Some(ModDestination::Macro(m)) if &m == id))
+        .filter_map(|r| {
+            let source = patch.route_source(r)?;
+            let settings = patch.route_settings(r)?;
+            Some((r, knob::Meta { name: name(patch, source), settings, colour: colour(source) }))
+        })
+        .unzip()
+}
+
+/// Macro `slot`'s value now, after the modulators on it (normalized, clamped): its base plus
+/// each route's delta at its source's live level, as the audio thread sums them.
+pub fn macro_effective(patch: &Patch, values: &patch::Values, slot: usize) -> f32 {
+    let Some(id) = patch.macros.get(slot).map(|m| &m.id) else { return 0.0 };
+    let base = values.macros[slot];
+    let delta: f32 = patch
+        .routes()
+        .into_iter()
+        .filter(|r| matches!(patch.route_destination(*r), Some(ModDestination::Macro(m)) if &m == id))
+        .filter_map(|r| {
+            let level = match patch.route_source(r)? {
+                RouteSource::Modulator(m) => values.modulators[m.index()],
+                RouteSource::Macro(s) => values.macros[s],
+            };
+            Some(patch.route_settings(r)?.delta(level))
+        })
+        .sum();
+    (base + delta).clamp(0.0, 1.0)
+}
+
+/// A source being dragged: from its title bar in the dock.
 #[derive(Debug, Clone, Copy)]
 pub struct SourceDrag {
     pub source: RouteSource,
+    /// Where the title bar was pressed (window coordinates).
+    pub start: Point,
     /// The pointer (window coordinates); `None` until it moves.
     pub at: Option<Point>,
 }
 
+/// How far the pointer must move before a press on a title bar is a drag, not a click.
+const DRAG_SLOP: f32 = 4.0;
+
 impl SourceDrag {
+    /// The pointer has left the press point: a drag (a release in place is a click).
+    pub fn moved(&self) -> bool {
+        self.at.is_some_and(|p| (p.x - self.start.x).hypot(p.y - self.start.y) > DRAG_SLOP)
+    }
+
     /// The colour a param knob shows while this drag runs (every param can take every source).
     pub fn param_drop(&self) -> Option<Color> {
-        Some(colour(self.source))
+        self.moved().then(|| colour(self.source))
     }
 
     /// The colour a macro cell shows: modulators can drive macros, macros can't drive macros.
     pub fn macro_drop(&self) -> Option<Color> {
-        matches!(self.source, RouteSource::Modulator(_)).then(|| colour(self.source))
+        (self.moved() && matches!(self.source, RouteSource::Modulator(_))).then(|| colour(self.source))
     }
 }

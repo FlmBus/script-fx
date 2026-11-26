@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Layout map</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<div style="width: 984px; height: 708px; position: relative; overflow: hidden; background: #0b0b0c; font-family: Inter, system-ui, sans-serif; color: #f4f4f5">
+  <div style="position: absolute; left: 24px; top: 22px">
+    <div style="font: 600 18px Inter">Layout map</div>
+    <div style="font: 400 12px Inter; color: #9b9ba3; margin-top: 4px">The 984 × 708 window at 55 %: what lives where. Nothing but the notch and the view switch sits on the stage.</div>
+  </div>
+
+  <!-- wireframe (window 984 × 708 at 0.55) -->
+  <div style="position: absolute; left: 24px; top: 80px; width: 541px; height: 389px; border: 1px solid rgba(255,255,255,0.14); border-radius: 8px; box-sizing: border-box"></div>
+  <div style="position: absolute; left: 25px; top: 81px; width: 539px; height: 21px; background: rgba(255,255,255,0.06); border-radius: 7px 7px 0 0; display: flex; align-items: center; justify-content: space-between; padding: 0 8px; box-sizing: border-box; font: 500 9px Inter; color: #d4d4d8"><span>① ScriptFX · Patches · patch ⟳</span><span>Chat · ⚙</span></div>
+  <div style="position: absolute; left: 31px; top: 104px; width: 528px; height: 297px; background: rgba(255,138,61,0.08); border: 1px solid rgba(255,138,61,0.5); border-radius: 7px; box-sizing: border-box; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 4px">
+    <span style="font: 600 13px Inter; color: #fdba74">④ Stage</span>
+    <span style="font: 400 10px Inter; color: #d4d4d8">the patch's ControlPanel · Chain · Matrix</span>
+    <span style="font: 400 10px Inter; color: #9b9ba3">960 × 540 (16:9), drawn 1:1; scales down when something docks</span>
+  </div>
+  <div style="position: absolute; left: 39px; top: 132px; width: 132px; height: 240px; border: 1px dashed rgba(255,255,255,0.3); border-radius: 6px; box-sizing: border-box; display: flex; align-items: flex-end; justify-content: center; padding-bottom: 8px; font: 400 9px Inter; color: #b4b4bc; text-align: center">⑥ library<br>docks here</div>
+  <div style="position: absolute; left: 393px; top: 132px; width: 158px; height: 240px; border: 1px dashed rgba(255,255,255,0.3); border-radius: 6px; box-sizing: border-box; display: flex; align-items: flex-end; justify-content: center; padding-bottom: 8px; font: 400 9px Inter; color: #b4b4bc; text-align: center">⑥ chat, settings<br>dock here</div>
+  <div style="position: absolute; left: 224px; top: 104px; width: 143px; height: 20px; background: #0b0b0c; border: 1px solid rgba(255,255,255,0.3); border-top: 0; border-radius: 0 0 7px 7px; box-sizing: border-box; display: flex; align-items: center; justify-content: center; font: 500 9px Inter; color: #d4d4d8">② ‹ Init › · save · load</div>
+  <div style="position: absolute; left: 499px; top: 110px; width: 54px; height: 19px; background: #0b0b0c; border: 1px solid rgba(255,255,255,0.3); border-radius: 6px; box-sizing: border-box; display: flex; align-items: center; justify-content: center; font: 500 9px Inter; color: #d4d4d8">③ ▢ ⇢ ▦</div>
+  <div style="position: absolute; left: 31px; top: 406px; width: 528px; height: 59px; background: rgba(45,212,191,0.07); border: 1px solid rgba(45,212,191,0.45); border-radius: 7px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 10px">
+    <span style="font: 600 11px Inter; color: #5eead4">⑤ Mod dock</span>
+    <span style="font: 400 9.5px Inter; color: #d4d4d8">macros 1–8 / 9–16 · Follow · LFO 1–3 · Step · ⌄ collapse</span>
+  </div>
+
+  <!-- legend -->
+  <div style="position: absolute; left: 596px; top: 80px; width: 364px; display: flex; flex-direction: column; gap: 12px">
+    <div><div style="font: 600 12px Inter">① Top bar · 40 px</div><div style="font: 400 11px Inter; color: #b4b4bc; margin-top: 3px; line-height: 1.45">Wordmark, Patches, the patch name with reload and its sync dot; Chat and Settings on the right.</div></div>
+    <div><div style="font: 600 12px Inter">② Notch · one row</div><div style="font: 400 11px Inter; color: #b4b4bc; margin-top: 3px; line-height: 1.45">Snapshots only: previous / next, the selector, save, load. Hangs from the top bar, centred on the stage.</div></div>
+    <div><div style="font: 600 12px Inter">③ View switch</div><div style="font: 400 11px Inter; color: #b4b4bc; margin-top: 3px; line-height: 1.45">Surface · Chain · Matrix as icons, floating in the stage's top-right corner; the label on hover.</div></div>
+    <div><div style="font: 600 12px Inter">④ Stage · 960 × 540</div><div style="font: 400 11px Inter; color: #b4b4bc; margin-top: 3px; line-height: 1.45">16:9, the patch's own canvas, drawn 1:1 (a 12-column grid of 80 px). Never covered by panels. Knobs show small route dots; the selected source's rings and meta knobs appear on demand.</div></div>
+    <div><div style="font: 600 12px Inter">⑤ Mod dock · 108 px</div><div style="font: 400 11px Inter; color: #b4b4bc; margin-top: 3px; line-height: 1.45">Always there unless collapsed (32 px strip, window 984 × 632). Click a source: focus its routes. Click again: its editor, the dock grows and the stage shrinks.</div></div>
+    <div><div style="font: 600 12px Inter">⑥ Side columns</div><div style="font: 400 11px Inter; color: #b4b4bc; margin-top: 3px; line-height: 1.45">Library left, chat and settings right: docked, the stage scales to fit beside them (74 % / 69 %).</div></div>
+  </div>
+
+  <!-- what goes away -->
+  <div style="position: absolute; left: 24px; top: 500px; width: 936px; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 14px; display: flex; flex-direction: column; gap: 8px">
+    <div style="font: 600 12px Inter">Gone</div>
+    <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 20px; font: 400 11px Inter; color: #b4b4bc; line-height: 1.45">
+      <span><span style="color: #f4f4f5">Macros button + macro rail</span> → macros live in the dock</span>
+      <span><span style="color: #f4f4f5">Drawer</span> → the dock (static, below the stage)</span>
+      <span><span style="color: #f4f4f5">Controls sheet</span> → macros in the dock, params on block pages</span>
+      <span><span style="color: #f4f4f5">The two-row notch</span> → one row; views moved to the stage corner</span>
+      <span><span style="color: #f4f4f5">Sheets over the panel</span> → docked columns</span>
+      <span><span style="color: #f4f4f5">Meta knobs everywhere</span> → only for the selected source</span>
+      <span><span style="color: #f4f4f5">840 × 560 panel, shown at 97 %</span> → 960 × 540, drawn 1:1</span>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":984,"height":708}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

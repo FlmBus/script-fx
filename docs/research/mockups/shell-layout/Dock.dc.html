@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mod dock</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<div style="width: 960px; height: {{height}}; background: #0b0b0c; box-sizing: border-box; padding: 6px 2px; font-family: Inter, system-ui, sans-serif; color: #f4f4f5; display: flex; flex-direction: column; gap: 10px">
+
+  <!-- collapsed: one slim strip, a button to bring the dock back -->
+  <sc-if value="{{collapsed}}" hint-placeholder-val="{{false}}">
+    <div style="height: 20px; display: flex; align-items: center; justify-content: center">
+      <button style="height: 20px; display: flex; align-items: center; gap: 8px; border: 0; border-radius: 6px; background: none; color: #9b9ba3; font: 500 10px Inter; padding: 0 8px" aria-label="Show macros and modulators">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg>
+        Macros &amp; modulators
+        <span style="display: flex; gap: 4px">
+          <sc-for list="{{mods}}" as="d" hint-placeholder-count="5">
+            <span style="width: 5px; height: 5px; border-radius: 3px; background: {{d.colour}}; opacity: {{d.opacity}}"></span>
+          </sc-for>
+        </span>
+      </button>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{open}}" hint-placeholder-val="{{true}}">
+  <!-- the strip: macros | modulators -->
+  <div style="display: flex; gap: 10px; height: 90px">
+    <!-- macros -->
+    <div style="display: flex; flex-direction: column; gap: 4px">
+      <div style="display: flex; align-items: center; justify-content: space-between; height: 12px">
+        <span style="font: 600 9.5px Inter; letter-spacing: 0.8px; color: #8b8b94">MACROS</span>
+        <span style="font: 500 9.5px Inter; color: #8b8b94"><span style="color: #d4d4d8">1–8</span> · 9–16</span>
+      </div>
+      <div style="display: flex; gap: 4px">
+        <sc-for list="{{macros}}" as="m" hint-placeholder-count="8">
+          <div style="width: 58px; height: 74px; border-radius: 8px; background: {{m.bg}}; outline: {{m.outline}}; display: flex; flex-direction: column; align-items: center; box-sizing: border-box; opacity: {{m.opacity}}; overflow: hidden">
+            <!-- the title bar is the drag handle (the knob below turns the macro) -->
+            <button style="width: 100%; height: 16px; flex: none; border: 0; border-radius: 0; background: {{m.barBg}}; color: {{m.barInk}}; display: flex; align-items: center; justify-content: space-between; padding: 0 5px; box-sizing: border-box; cursor: grab" aria-label="Drag {{m.name}} onto a knob">
+              <span style="font: 600 8.5px Inter; white-space: nowrap; overflow: hidden">{{m.name}}</span>
+              <span style="opacity: {{m.gripOpacity}}; display: flex"><svg width="9" height="8" viewBox="0 0 9 8" aria-hidden="true"><path d="M0.5 1.5h8M0.5 4h8M0.5 6.5h8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg></span>
+            </button>
+            <svg style="margin-top: 7px" width="30" height="30" viewBox="0 0 28 28" aria-hidden="true"><circle cx="14" cy="14" r="10" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="2.5" stroke-dasharray="47.12 100" transform="rotate(135 14 14)"/><circle cx="14" cy="14" r="10" fill="none" stroke="#facc15" stroke-width="2.5" stroke-dasharray="{{m.arc}} 100" stroke-linecap="round" transform="rotate(135 14 14)"/><circle cx="14" cy="14" r="6.5" fill="#222225"/></svg>
+            <div style="width: 48px; margin-top: 5px; display: flex; justify-content: space-between; font: 500 8.5px 'JetBrains Mono'"><span style="color: rgba(250,204,21,0.75)">{{m.slot}}</span><span style="color: #b4b4bc">{{m.value}}</span></div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+
+    <span style="width: 1px; background: rgba(255,255,255,0.07)"></span>
+
+    <!-- modulators -->
+    <div style="display: flex; flex-direction: column; gap: 4px; flex: 1">
+      <div style="display: flex; align-items: center; justify-content: space-between; height: 12px">
+        <span style="font: 600 9.5px Inter; letter-spacing: 0.8px; color: #8b8b94">MODULATORS</span>
+        <div style="display: flex; align-items: center; gap: 6px">
+          <span style="font: 500 9.5px Inter; color: {{hintInk}}">{{hint}}</span>
+          <button style="width: 18px; height: 14px; border: 0; border-radius: 4px; background: rgba(255,255,255,0.06); color: #b4b4bc; display: flex; align-items: center; justify-content: center; padding: 0" aria-label="Collapse the dock">
+            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+        </div>
+      </div>
+      <div style="display: flex; gap: 4px">
+        <sc-for list="{{mods}}" as="d" hint-placeholder-count="5">
+          <div style="width: 84px; height: 74px; border-radius: 8px; background: {{d.bg}}; outline: {{d.outline}}; display: flex; flex-direction: column; align-items: center; gap: 5px; box-sizing: border-box; opacity: {{d.opacity}}; overflow: hidden">
+            <!-- the title bar is the drag handle; a click on the tile focuses its routes -->
+            <button style="width: 100%; height: 16px; flex: none; border: 0; border-radius: 0; background: {{d.barBg}}; color: {{d.colour}}; display: flex; align-items: center; justify-content: space-between; padding: 0 6px; box-sizing: border-box; cursor: grab" aria-label="Drag {{d.name}} onto a knob">
+              <span style="font: 600 9px Inter">{{d.name}}</span>
+              <span style="display: flex"><svg width="9" height="8" viewBox="0 0 9 8" aria-hidden="true"><path d="M0.5 1.5h8M0.5 4h8M0.5 6.5h8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg></span>
+            </button>
+            <svg width="50" height="26" viewBox="0 0 50 26" aria-hidden="true"><rect x="0" y="0" width="50" height="26" rx="4" fill="rgba(255,255,255,0.04)"/><path d="{{d.path}}" fill="none" stroke="{{d.colour}}" stroke-width="1.5"/><circle cx="{{d.dotX}}" cy="{{d.dotY}}" r="2" fill="#ffffff"/></svg>
+            <span style="font: 500 9px 'JetBrains Mono'; color: #b4b4bc">{{d.value}}</span>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </div>
+
+  <!-- the open modulator's editor (the dock grows for it) -->
+  <sc-if value="{{expanded}}" hint-placeholder-val="{{false}}">
+    <div style="flex: 1; display: flex; gap: 10px; padding-top: 6px">
+      <div style="display: flex; flex-direction: column; gap: 8px; flex: 1">
+        <div style="display: flex; align-items: center; gap: 8px">
+          <span style="font: 600 11.5px Inter; color: #2dd4bf">LFO 1</span>
+          <div style="display: flex; gap: 2px; background: rgba(255,255,255,0.05); border-radius: 6px; padding: 2px">
+            <span style="font: 500 10px Inter; color: #0b0b0c; background: #2dd4bf; border-radius: 4px; padding: 2px 7px">Free</span>
+            <span style="font: 500 10px Inter; color: #b4b4bc; padding: 2px 7px">Trig</span>
+            <span style="font: 500 10px Inter; color: #b4b4bc; padding: 2px 7px">Env</span>
+          </div>
+          <span style="font: 500 10px Inter; color: #b4b4bc; background: rgba(255,255,255,0.05); border-radius: 6px; padding: 3px 8px">Shape: Custom</span>
+          <span style="font: 500 10px Inter; color: #b4b4bc; background: rgba(255,255,255,0.05); border-radius: 6px; padding: 3px 8px">Grid 8</span>
+          <span style="flex: 1"></span>
+          <button style="border: 0; background: rgba(255,255,255,0.06); color: #d4d4d8; font: 500 10.5px Inter; border-radius: 6px; padding: 3px 9px">Done</button>
+        </div>
+        <svg width="560" height="132" viewBox="0 0 560 132" aria-hidden="true">
+          <rect x="0" y="0" width="560" height="132" rx="8" fill="rgba(255,255,255,0.04)"/>
+          <g stroke="rgba(255,255,255,0.07)"><line x1="70" y1="0" x2="70" y2="132"/><line x1="140" y1="0" x2="140" y2="132"/><line x1="210" y1="0" x2="210" y2="132"/><line x1="280" y1="0" x2="280" y2="132"/><line x1="350" y1="0" x2="350" y2="132"/><line x1="420" y1="0" x2="420" y2="132"/><line x1="490" y1="0" x2="490" y2="132"/><line x1="0" y1="38" x2="560" y2="38"/><line x1="0" y1="94" x2="560" y2="94"/></g>
+          <line x1="0" y1="66" x2="560" y2="66" stroke="rgba(255,255,255,0.16)"/>
+          <path d="M8 122 Q46 22 172 10 L253 10 Q350 10 388 100 L552 122 L8 122 Z" fill="rgba(45,212,191,0.12)"/>
+          <path d="M8 122 Q46 22 172 10 L253 10 Q350 10 388 100 L552 122" fill="none" stroke="#2dd4bf" stroke-width="2"/>
+          <g fill="#0b0b0c" stroke="#2dd4bf" stroke-width="1.6"><circle cx="8" cy="122" r="4"/><circle cx="172" cy="10" r="4"/><circle cx="253" cy="10" r="4"/><circle cx="388" cy="100" r="4"/><circle cx="552" cy="122" r="4"/></g>
+          <g fill="rgba(45,212,191,0.6)"><rect x="65" y="40" width="7" height="7" transform="rotate(45 68.5 43.5)"/><rect x="331" y="27" width="7" height="7" transform="rotate(45 334.5 30.5)"/></g>
+          <line x1="322" y1="0" x2="322" y2="132" stroke="rgba(255,255,255,0.35)"/>
+          <circle cx="322" cy="24" r="6" fill="rgba(45,212,191,0.3)"/>
+          <circle cx="322" cy="24" r="3" fill="#ffffff"/>
+        </svg>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; align-content: start; padding-top: 30px">
+        <sc-for list="{{lfoKnobs}}" as="k" hint-placeholder-count="5">
+          <div style="width: 104px; height: 56px; border-radius: 8px; background: rgba(255,255,255,0.04); display: flex; align-items: center; gap: 6px; padding: 0 8px; box-sizing: border-box">
+            <svg width="36" height="36" viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="15" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="3" stroke-dasharray="70.69 400" transform="rotate(135 26 26)"/><circle cx="26" cy="26" r="15" fill="none" stroke="#2dd4bf" stroke-width="3" stroke-dasharray="{{k.arc}} 400" transform="rotate(135 26 26)"/><circle cx="26" cy="26" r="10" fill="#222225"/><line x1="{{k.x1}}" y1="{{k.y1}}" x2="{{k.x2}}" y2="{{k.y2}}" stroke="#2dd4bf" stroke-width="2" stroke-linecap="round"/></svg>
+            <div><div style="font: 500 10.5px 'JetBrains Mono'">{{k.value}}</div><div style="font: 400 9.5px Inter; color: #9b9ba3">{{k.label}}</div></div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </sc-if>
+  </sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"selected":{"editor":"enum","options":["","follow","lfo1","lfo2","lfo3","step","m1"],"default":""},"expanded":{"editor":"boolean","default":false},"collapsed":{"editor":"boolean","default":false},"$preview":{"width":960,"height":108}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const sel = this.props.selected ?? '';
+    const expanded = this.props.expanded ?? false;
+    const collapsed = this.props.collapsed ?? false;
+    const focus = sel !== '';
+    const knob = (v, label, value) => {
+      const a = (135 + 270 * v) * Math.PI / 180;
+      const c = Math.cos(a), s = Math.sin(a), f = (n) => n.toFixed(2);
+      return { label, value, arc: f(70.69 * v), x1: f(26 + 4 * c), y1: f(26 + 4 * s), x2: f(26 + 11 * c), y2: f(26 + 11 * s) };
+    };
+    const macroDefs = [
+      ['M1', 'Character', 0.3], ['M2', 'Mix', 1.0], ['M3', 'Output', 0.5],
+      ['M4', '', 0], ['M5', '', 0], ['M6', '', 0], ['M7', '', 0], ['M8', '', 0],
+    ];
+    const macros = macroDefs.map(([slot, name, v], i) => {
+      const empty = name === '';
+      const picked = sel === 'm' + (i + 1);
+      return {
+        slot, name: empty ? 'empty' : name, arc: (47.12 * v).toFixed(2),
+        value: empty ? '' : Math.round(v * 100) + '%',
+        barBg: empty ? 'rgba(255,255,255,0.04)' : picked ? 'rgba(250,204,21,0.32)' : 'rgba(250,204,21,0.16)',
+        barInk: empty ? '#8b8b94' : '#fde68a',
+        gripOpacity: empty ? 0 : 0.8,
+        bg: picked ? 'rgba(250,204,21,0.1)' : empty ? 'rgba(255,255,255,0.02)' : 'rgba(250,204,21,0.04)',
+        outline: picked ? '1.5px solid #facc15' : 'none',
+        opacity: empty ? 0.4 : focus && !picked ? 0.55 : 1,
+      };
+    });
+    const modDefs = [
+      { id: 'follow', name: 'Follow', colour: '#60a5fa', path: 'M3 22 L8 5 Q15 10 22 17 L25 7 Q33 13 47 19', dotX: 18, dotY: 13, value: '−18 dB' },
+      { id: 'lfo1', name: 'LFO 1', colour: '#2dd4bf', path: 'M3 22 Q7 5 17 3 L23 3 Q31 3 33 18 L47 22', dotX: 29, dotY: 8, value: '1/4' },
+      { id: 'lfo2', name: 'LFO 2', colour: '#f472b6', path: 'M3 13 L14 3 L36 23 L47 13', dotX: 20, dotY: 8.5, value: '0.13 Hz' },
+      { id: 'lfo3', name: 'LFO 3', colour: '#a78bfa', path: 'M3 4 L25 4 L25 22 L47 22', dotX: 12, dotY: 4, value: 'no routes', unused: true },
+      { id: 'step', name: 'Step', colour: '#a3e635', path: 'M3 15 H8 V6 H14 V15 H19 V21 H25 V4 H30 V12 H36 V17 H41 V9 H47', dotX: 27, dotY: 4, value: '1/16' },
+    ];
+    const mods = modDefs.map((d) => {
+      const picked = sel === d.id;
+      return {
+        ...d,
+        barBg: d.unused ? 'rgba(255,255,255,0.05)' : d.colour + (picked ? '52' : '29'),
+        bg: picked ? d.colour + '24' : 'rgba(255,255,255,0.03)',
+        outline: picked ? '1.5px solid ' + d.colour : 'none',
+        opacity: d.unused ? 0.5 : focus && !picked ? 0.55 : 1,
+      };
+    });
+    const hints = {
+      '': 'click a source to see its routes · drag its title bar onto a knob',
+      lfo1: 'LFO 1 · 1 route shown · click again to edit · Esc clears',
+    };
+    return {
+      height: collapsed ? '32px' : expanded ? '300px' : '108px',
+      expanded: expanded && !collapsed,
+      collapsed,
+      open: !collapsed,
+      macros,
+      mods,
+      hint: expanded ? 'editing LFO 1 · the stage makes room' : (hints[sel] ?? ''),
+      hintInk: focus ? '#2dd4bf' : '#8b8b94',
+      lfoKnobs: [knob(0.44, 'Rate · sync', '1/4'), knob(0.2, 'Rise', '0.4 s'), knob(0, 'Delay', 'off'), knob(0.1, 'Smooth', '5 ms'), knob(0, 'Phase', '0°')],
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Source handles: title bars</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<div style="width: 984px; height: 708px; position: relative; overflow: hidden; background: #0b0b0c; font-family: Inter, system-ui, sans-serif; color: #f4f4f5">
+  <div style="position: absolute; left: 24px; top: 22px; width: 936px">
+    <div style="font: 600 18px Inter">Source handles: title bars</div>
+    <div style="font: 400 12px Inter; color: #9b9ba3; margin-top: 4px">Every source has a title bar in its colour: its name and a grip. Grab the bar, it lifts off as a tag, drop the tag on a knob. Circles stay reserved for knobs and meta knobs.</div>
+  </div>
+
+  <!-- states, macros (1.6 ×) -->
+  <div style="position: absolute; left: 24px; top: 100px; width: 120px; font: 600 11.5px Inter; color: #d4d4d8">Macro cell<div style="font: 400 10.5px Inter; color: #9b9ba3; margin-top: 4px; line-height: 1.4">the bar drags; the knob turns the macro</div></div>
+  <div style="position: absolute; left: 170px; top: 86px; display: flex; gap: 60px">
+    <sc-for list="{{macroStates}}" as="s" hint-placeholder-count="4">
+      <div style="display: flex; flex-direction: column; align-items: center; gap: 10px">
+        <div style="width: 93px; height: 118px; position: relative">
+          <div style="width: 58px; height: 74px; transform: scale(1.6); transform-origin: 0 0; position: relative">
+            <div style="width: 58px; height: 74px; border-radius: 8px; background: {{s.bg}}; display: flex; flex-direction: column; align-items: center; overflow: hidden; opacity: {{s.opacity}}">
+              <div style="width: 100%; height: 16px; background: {{s.bar}}; color: {{s.ink}}; display: flex; align-items: center; justify-content: space-between; padding: 0 5px; box-sizing: border-box">
+                <span style="font: 600 8.5px Inter">{{s.name}}</span>
+                <svg style="opacity: {{s.grip}}" width="9" height="8" viewBox="0 0 9 8" aria-hidden="true"><path d="M0.5 1.5h8M0.5 4h8M0.5 6.5h8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+              </div>
+              <svg style="margin-top: 7px" width="30" height="30" viewBox="0 0 28 28" aria-hidden="true"><circle cx="14" cy="14" r="10" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="2.5" stroke-dasharray="47.12 100" transform="rotate(135 14 14)"/><circle cx="14" cy="14" r="10" fill="none" stroke="#facc15" stroke-width="2.5" stroke-dasharray="{{s.arc}} 100" stroke-linecap="round" transform="rotate(135 14 14)"/><circle cx="14" cy="14" r="6.5" fill="#222225"/></svg>
+              <div style="width: 48px; margin-top: 5px; display: flex; justify-content: space-between; font: 500 8.5px 'JetBrains Mono'"><span style="color: rgba(250,204,21,0.75)">{{s.slot}}</span><span style="color: #b4b4bc">{{s.value}}</span></div>
+            </div>
+            <sc-if value="{{s.drag}}" hint-placeholder-val="{{false}}">
+              <svg style="position: absolute; left: 0; top: -40px; overflow: visible" width="120" height="50" viewBox="0 0 120 50" aria-hidden="true"><path d="M29 48 C 34 30, 60 20, 78 16" fill="none" stroke="#facc15" stroke-opacity="0.7" stroke-width="1.4" stroke-linecap="round"/></svg>
+              <span style="position: absolute; left: 66px; top: -36px; display: flex; align-items: center; gap: 4px; background: #facc15; color: #1a1405; border-radius: 4px; padding: 2px 6px; font: 600 8.5px Inter; box-shadow: 0 4px 10px rgba(0,0,0,0.5); white-space: nowrap">Character</span>
+            </sc-if>
+            <sc-if value="{{s.tip}}" hint-placeholder-val="{{false}}">
+              <span style="position: absolute; left: 30px; top: -20px; white-space: nowrap; background: #1f1f23; border-radius: 5px; padding: 2px 6px; font: 500 7px Inter; color: #f4f4f5">Drag onto a knob</span>
+            </sc-if>
+          </div>
+        </div>
+        <div style="font: 500 10.5px Inter; color: #d4d4d8">{{s.label}}</div>
+      </div>
+    </sc-for>
+  </div>
+
+  <!-- states, modulators (1.6 ×) -->
+  <div style="position: absolute; left: 24px; top: 268px; width: 120px; font: 600 11.5px Inter; color: #d4d4d8">Modulator tile<div style="font: 400 10.5px Inter; color: #9b9ba3; margin-top: 4px; line-height: 1.4">the bar drags; a click on the tile focuses its routes</div></div>
+  <div style="position: absolute; left: 170px; top: 254px; display: flex; gap: 30px">
+    <sc-for list="{{modStates}}" as="s" hint-placeholder-count="4">
+      <div style="display: flex; flex-direction: column; align-items: center; gap: 10px">
+        <div style="width: 134px; height: 118px; position: relative">
+          <div style="width: 84px; height: 74px; transform: scale(1.6); transform-origin: 0 0; position: relative">
+            <div style="width: 84px; height: 74px; border-radius: 8px; background: {{s.bg}}; display: flex; flex-direction: column; align-items: center; gap: 5px; overflow: hidden; opacity: {{s.opacity}}">
+              <div style="width: 100%; height: 16px; background: {{s.bar}}; color: #f472b6; display: flex; align-items: center; justify-content: space-between; padding: 0 6px; box-sizing: border-box">
+                <span style="font: 600 9px Inter">LFO 2</span>
+                <svg width="9" height="8" viewBox="0 0 9 8" aria-hidden="true"><path d="M0.5 1.5h8M0.5 4h8M0.5 6.5h8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+              </div>
+              <svg width="50" height="26" viewBox="0 0 50 26" aria-hidden="true"><rect x="0" y="0" width="50" height="26" rx="4" fill="rgba(255,255,255,0.04)"/><path d="M3 13 L14 3 L36 23 L47 13" fill="none" stroke="#f472b6" stroke-width="1.5"/><circle cx="20" cy="8.5" r="2" fill="#ffffff"/></svg>
+              <span style="font: 500 9px 'JetBrains Mono'; color: #b4b4bc">{{s.value}}</span>
+            </div>
+            <sc-if value="{{s.drag}}" hint-placeholder-val="{{false}}">
+              <svg style="position: absolute; left: 0; top: -40px; overflow: visible" width="140" height="50" viewBox="0 0 140 50" aria-hidden="true"><path d="M42 48 C 48 30, 76 20, 96 16" fill="none" stroke="#f472b6" stroke-opacity="0.7" stroke-width="1.4" stroke-linecap="round"/></svg>
+              <span style="position: absolute; left: 84px; top: -36px; display: flex; align-items: center; gap: 4px; background: #f472b6; color: #2a0b19; border-radius: 4px; padding: 2px 6px; font: 600 8.5px Inter; box-shadow: 0 4px 10px rgba(0,0,0,0.5); white-space: nowrap">LFO 2</span>
+            </sc-if>
+            <sc-if value="{{s.tip}}" hint-placeholder-val="{{false}}">
+              <span style="position: absolute; left: 22px; top: -20px; white-space: nowrap; background: #1f1f23; border-radius: 5px; padding: 2px 6px; font: 500 7px Inter; color: #f4f4f5">Drag onto a knob · click to focus</span>
+            </sc-if>
+          </div>
+        </div>
+        <div style="font: 500 10.5px Inter; color: #d4d4d8">{{s.label}}</div>
+      </div>
+    </sc-for>
+  </div>
+
+  <!-- patching scene -->
+  <div style="position: absolute; left: 24px; top: 424px; font: 600 11.5px Inter; color: #d4d4d8">Patching: LFO 2 onto a compressor's Threshold</div>
+  <div style="position: absolute; left: 24px; top: 448px; width: 936px; height: 244px; border-radius: 12px; overflow: hidden">
+    <div style="position: absolute; left: 0; top: 0; width: 936px; height: 150px; background: #161618"></div>
+    <sc-for list="{{knobs}}" as="k" hint-placeholder-count="3">
+      <div style="position: absolute; left: {{k.left}}; top: 22px; width: 76px; height: 108px; border-radius: 9px; background: {{k.bg}}; outline: {{k.outline}}; display: flex; flex-direction: column; align-items: center; padding-top: 24px; box-sizing: border-box">
+        <svg width="58" height="58" viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="21" fill="none" stroke="#f472b6" stroke-opacity="{{k.preview}}" stroke-width="2" stroke-dasharray="49.48 400" stroke-dashoffset="-34.64" stroke-linecap="round" transform="rotate(135 26 26)"/><circle cx="26" cy="26" r="15" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="2.5" stroke-dasharray="70.69 400" transform="rotate(135 26 26)"/><circle cx="26" cy="26" r="15" fill="none" stroke="rgba(255,255,255,0.55)" stroke-width="2.5" stroke-dasharray="{{k.arc}} 400" transform="rotate(135 26 26)"/><circle cx="26" cy="26" r="10" fill="#222225"/></svg>
+        <span style="font: 400 10px Inter; color: #d4d4d8; margin-top: 3px">{{k.label}}</span>
+      </div>
+    </sc-for>
+    <span style="position: absolute; left: 640px; top: 34px; width: 270px; font: 400 10.5px Inter; color: #9b9ba3; line-height: 1.5">Knobs that can take LFO 2 get a dashed outline in its colour. Over Threshold the outline turns solid and the ring previews the route (±25 %). Release: the tag drops in, the cable fades, a pink meta knob is left. Esc or a release elsewhere: the tag flies back to its bar.</span>
+    <div style="position: absolute; left: 0; top: 158px; width: 936px; height: 86px; background: #0b0b0c"></div>
+    <sc-for list="{{tiles}}" as="t" hint-placeholder-count="3">
+      <div style="position: absolute; left: {{t.left}}; top: 166px; width: 84px; height: 70px; border-radius: 8px; background: {{t.bg}}; display: flex; flex-direction: column; align-items: center; gap: 5px; overflow: hidden">
+        <div style="width: 100%; height: 16px; background: {{t.bar}}; color: {{t.colour}}; display: flex; align-items: center; justify-content: space-between; padding: 0 6px; box-sizing: border-box">
+          <span style="font: 600 9px Inter">{{t.name}}</span>
+          <svg width="9" height="8" viewBox="0 0 9 8" aria-hidden="true"><path d="M0.5 1.5h8M0.5 4h8M0.5 6.5h8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+        </div>
+        <svg width="50" height="26" viewBox="0 0 50 26" aria-hidden="true"><rect x="0" y="0" width="50" height="26" rx="4" fill="rgba(255,255,255,0.04)"/><path d="{{t.path}}" fill="none" stroke="{{t.colour}}" stroke-width="1.5"/></svg>
+      </div>
+    </sc-for>
+    <!-- the tag on its way, tied to LFO 2's bar by a thin cable -->
+    <svg style="position: absolute; left: 0; top: 0" width="936" height="244" viewBox="0 0 936 244" aria-hidden="true">
+      <path d="M426 170 C 430 110, 330 100, 296 66" fill="none" stroke="#f472b6" stroke-opacity="0.7" stroke-width="1.6" stroke-linecap="round"/>
+    </svg>
+    <span style="position: absolute; left: 262px; top: 52px; display: flex; align-items: center; gap: 5px; background: #f472b6; color: #2a0b19; border-radius: 5px; padding: 3px 8px; font: 600 11px Inter; box-shadow: 0 6px 14px rgba(0,0,0,0.55)">LFO 2</span>
+    <svg style="position: absolute; left: 300px; top: 66px" width="14" height="18" viewBox="0 0 14 18" aria-hidden="true"><path d="M1 1 L1 15 L4.5 11.5 L7 17 L9.5 16 L7 10.5 L12 10.5 Z" fill="#f4f4f5" stroke="#0b0b0c" stroke-width="1"/></svg>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":984,"height":708}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const m = { slot: 'M1', name: 'Character', value: '30%', arc: '14.14', ink: '#fde68a', grip: 0.8, opacity: 1, tip: false, drag: false };
+    const d = { value: '0.13 Hz', opacity: 1, tip: false, drag: false };
+    return {
+      macroStates: [
+        { ...m, label: 'Idle', bg: 'rgba(250,204,21,0.04)', bar: 'rgba(250,204,21,0.16)' },
+        { ...m, label: 'Hover the bar', bg: 'rgba(250,204,21,0.04)', bar: 'rgba(250,204,21,0.3)', tip: true },
+        { ...m, label: 'Dragging', bg: 'rgba(250,204,21,0.04)', bar: 'rgba(250,204,21,0.08)', ink: 'rgba(253,230,138,0.45)', drag: true },
+        { ...m, label: 'Empty slot', slot: 'M4', name: 'empty', value: '', arc: '0', ink: '#8b8b94', grip: 0, bg: 'rgba(255,255,255,0.02)', bar: 'rgba(255,255,255,0.04)', opacity: 0.6 },
+      ],
+      modStates: [
+        { ...d, label: 'Idle', bg: 'rgba(255,255,255,0.03)', bar: '#f472b629' },
+        { ...d, label: 'Hover the bar', bg: 'rgba(255,255,255,0.03)', bar: '#f472b64d', tip: true },
+        { ...d, label: 'Dragging', bg: 'rgba(255,255,255,0.03)', bar: '#f472b614', drag: true },
+        { ...d, label: 'No routes yet', value: 'no routes', bg: 'rgba(255,255,255,0.03)', bar: 'rgba(255,255,255,0.05)', opacity: 0.6 },
+      ],
+      knobs: [
+        { left: '236px', label: 'Threshold', arc: '42.41', bg: 'rgba(244,114,182,0.12)', outline: '1.5px solid #f472b6', preview: 0.7 },
+        { left: '328px', label: 'Ratio', arc: '27.57', bg: 'rgba(255,255,255,0.03)', outline: '1.5px dashed rgba(244,114,182,0.5)', preview: 0 },
+        { left: '420px', label: 'Release', arc: '46.66', bg: 'rgba(255,255,255,0.03)', outline: '1.5px dashed rgba(244,114,182,0.5)', preview: 0 },
+      ],
+      tiles: [
+        { left: '200px', name: 'Follow', colour: '#60a5fa', bar: '#60a5fa29', bg: 'rgba(255,255,255,0.03)', path: 'M3 22 L8 5 Q15 10 22 17 L25 7 Q33 13 47 19' },
+        { left: '292px', name: 'LFO 1', colour: '#2dd4bf', bar: '#2dd4bf29', bg: 'rgba(255,255,255,0.03)', path: 'M3 22 Q7 5 17 3 L23 3 Q31 3 33 18 L47 22' },
+        { left: '384px', name: 'LFO 2', colour: '#f472b6', bar: '#f472b614', bg: 'rgba(244,114,182,0.08)', path: 'M3 13 L14 3 L36 23 L47 13' },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>
