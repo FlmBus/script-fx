@@ -71,7 +71,7 @@ return Patch.new("Bass Helper", {
   -- order = host automation slots
   macros = { transients, stabilize, drive, tone.boom, tone.boxy, tone.click, output_macro },
   theme  = { colors = { accent = "#f2c14e", bg = "#101418" }, images = { logo = Image.new("logo.svg") } },
-  panel  = ui.Panel.new({
+  surface  = ui.Surface.new({
     transients = transients, stabilize = stabilize, drive = drive,
     boom = tone.boom, boxy = tone.boxy, click = tone.click, output = output_macro,
     xover = bands.params.crossovers[1], grit_mix = grit_bus.params.mix,

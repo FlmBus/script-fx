@@ -7,11 +7,11 @@ local Lamp = require("@self/lamp")
 local ChickenKnob = require("@self/chicken_knob")
 
 -- The patch's init.luau passes the three macros in.
-export type PanelProps = { gain: Macro, presence: Macro, master: Macro }
+export type SurfaceProps = { gain: Macro, presence: Macro, master: Macro }
 
-local Panel = Component.define {
-  name = "Panel",
-  render = function(p: Props<PanelProps>)
+local Surface = Component.define {
+  name = "Surface",
+  render = function(p: Props<SurfaceProps>)
     return {
       Wood.new {},
       Logo.new { x = 30, y = 26 },
@@ -23,4 +23,4 @@ local Panel = Component.define {
   end,
 }
 
-return { Panel = Panel }
+return { Surface = Surface }

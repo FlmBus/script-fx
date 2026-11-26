@@ -1,4 +1,4 @@
--- Panel -> Section -> Strip -> Knob (4 levels). Dragging a knob must not
+-- Surface -> Section -> Strip -> Knob (4 levels). Dragging a knob must not
 -- re-render any of its ancestors.
 local params = {}
 for _, k in { "low1", "low2", "low3", "low4", "high1", "high2", "high3", "high4" } do
@@ -39,8 +39,8 @@ local Section = Component.define {
   end,
 }
 
-local Panel = Component.define {
-  name = "Panel",
+local Surface = Component.define {
+  name = "Surface",
   render = function(p)
     return {
       SVG.rect { x = 0, y = 0, w = p.width, h = p.height, fill = "#1d1f23" },
@@ -50,4 +50,4 @@ local Panel = Component.define {
   end,
 }
 
-return Patch.new("fixture", { panel = Panel.new { theme = { accent = "#f2c14e" } } })
+return Patch.new("fixture", { surface = Surface.new { theme = { accent = "#f2c14e" } } })

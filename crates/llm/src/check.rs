@@ -27,8 +27,8 @@ pub fn check(dir: &Path, cancel: &Cancel) -> Problems {
     match Patch::load(dir) {
         Err(e) => p.errors.push(e.to_string()),
         Ok(patch) => {
-            if patch.has_panel {
-                p.errors.extend(panel(dir));
+            if patch.has_surface {
+                p.errors.extend(surface(dir));
             }
             p.errors.extend(sound(&patch));
         }
@@ -48,10 +48,10 @@ pub fn check(dir: &Path, cancel: &Cancel) -> Problems {
     p
 }
 
-fn panel(dir: &Path) -> Vec<String> {
+fn surface(dir: &Path) -> Vec<String> {
     let mut ui = match Ui::load(dir) {
         Ok(ui) => ui,
-        Err(e) => return vec![format!("panel: {e}")],
+        Err(e) => return vec![format!("surface: {e}")],
     };
     let mut out = Vec::new();
     for v in [0.0, 0.5, 1.0] {
@@ -61,7 +61,7 @@ fn panel(dir: &Path) -> Vec<String> {
             1.0,
         );
         for e in ui.errors() {
-            let e = format!("panel: {e}");
+            let e = format!("surface: {e}");
             if !out.contains(&e) {
                 out.push(e);
             }

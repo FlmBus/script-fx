@@ -178,7 +178,7 @@ fn main() {
     composite(&ui, 1.0).save_png(out_dir.join("grid.png")).unwrap();
 
     // ------------------------------------------------------------ nesting
-    println!("\nnesting Panel > Section > Strip > Knob");
+    println!("\nnesting Surface > Section > Strip > Knob");
     let mut ui = Ui::load(&root.join("fixtures/nested")).unwrap();
     let mut w = World::default();
     for k in ["low1", "low2", "low3", "low4", "high1", "high2", "high3", "high4"] {

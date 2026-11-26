@@ -13,7 +13,7 @@ use nice_plug_iced::iced::{
 // Two palettes with the same tokens (the design system's "dark" and "light" themes); sections
 // read the current one through `c()`, so a mode switch restyles everything on the next frame.
 // The sheets ("paper": chat, controls) follow the mode like everything else.
-// Patch-owned colours (library cards, ControlPanels) don't change with the mode.
+// Patch-owned colours (library cards, patch surfaces) don't change with the mode.
 
 pub struct Palette {
     pub frame: Color,
@@ -227,9 +227,9 @@ pub const SIZE_CONTROL: f32 = 30.0;
 /// The mod dock below the stage: macros and modulators in one strip.
 pub const SIZE_DOCK: f32 = 108.0;
 
-/// The stage (the patch window) at rest = the ControlPanel's area: the editor minus top bar,
-/// gutters and the dock. The sizes are chosen so this is exactly the ControlPanel's 3:2
-/// (816×544): no letterbox bars around the panel (`stage_fits_the_panel` checks it). The notch
+/// The stage (the patch window) at rest = a patch surface's area: the editor minus top bar,
+/// gutters and the dock. The sizes are chosen so this is exactly the surface's 3:2
+/// (816×544): no letterbox bars around the surface (`stage_fits_the_surface` checks it). The notch
 /// hangs into it; the dock has a row of its own below it.
 pub fn stage_size() -> (f32, f32) {
     let (w, h) = crate::WINDOW_SIZE;
@@ -630,8 +630,8 @@ pub fn paper_scrollbar(t: &Theme, s: scrollable::Status) -> scrollable::Style {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn stage_fits_the_panel() {
+    fn stage_fits_the_surface() {
         let (w, h) = super::stage_size();
-        assert_eq!(w * ui_components::HEIGHT, h * ui_components::WIDTH, "stage {w}×{h} isn't the panel's aspect ratio");
+        assert_eq!(w * ui_components::HEIGHT, h * ui_components::WIDTH, "stage {w}×{h} isn't the surface's aspect ratio");
     }
 }

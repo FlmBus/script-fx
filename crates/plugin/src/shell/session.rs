@@ -1,5 +1,5 @@
 //! The patch session behind the shell: the library (patch folders), the loaded patch and its
-//! ControlPanel, loading/reloading/unloading, hot reload, and the per-frame values the UI
+//! patch surface, loading/reloading/unloading, hot reload, and the per-frame values the UI
 //! reads. No UI code here.
 
 use std::path::{Path, PathBuf};
@@ -11,7 +11,7 @@ use nice_plug_iced::iced::Color;
 use patch::{MACRO_SLOTS, ModDestination, ModSettings, ModulatorSpec, Patch, Route, RouteSource, Values};
 
 use super::brand::{self, Brand};
-use super::stage::Panel;
+use super::stage::Surface;
 use crate::snapshots::{self, Snapshot};
 use crate::{FxParams, Shared, patches_root};
 
@@ -35,7 +35,7 @@ pub struct Loaded {
     pub folder: String,
     pub dir: PathBuf,
     pub patch: Patch,
-    pub panel: Option<Panel>,
+    pub surface: Option<Surface>,
     mtime: Option<SystemTime>,
 }
 
@@ -114,18 +114,18 @@ impl Session {
                 return;
             }
         };
-        // ControlPanel: reuse the running one on hot reload so local component state survives.
-        let panel = if patch.has_panel {
-            let previous = self.current.as_mut().filter(|c| c.folder == folder).and_then(|c| c.panel.take());
+        // The patch's surface: reuse the running one on hot reload so component state survives.
+        let surface = if patch.has_surface {
+            let previous = self.current.as_mut().filter(|c| c.folder == folder).and_then(|c| c.surface.take());
             let built = match previous {
                 Some(mut p) => p.reload().map(|_| p),
-                None => Panel::load(&dir),
+                None => Surface::load(&dir),
             };
             match built {
                 Ok(p) => Some(p),
                 Err(e) => {
-                    self.error = Some(format!("{folder} (panel): {e}").replace('\t', "  "));
-                    nice_log!("panel error: {folder}: {e}");
+                    self.error = Some(format!("{folder} (surface): {e}").replace('\t', "  "));
+                    nice_log!("surface error: {folder}: {e}");
                     return;
                 }
             }
@@ -162,7 +162,7 @@ impl Session {
         ctx.rescan_param_info();
 
         nice_log!("loaded patch '{folder}' (reset={reset})");
-        self.current = Some(Loaded { folder: folder.to_string(), mtime: patch_mtime(&dir), dir, patch, panel });
+        self.current = Some(Loaded { folder: folder.to_string(), mtime: patch_mtime(&dir), dir, patch, surface });
         self.error = None;
         self.refresh_baseline(params);
     }

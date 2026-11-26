@@ -1,4 +1,4 @@
--- Neon Saturator: four saturation stages in series. The control panel is the
+-- Neon Saturator: four saturation stages in series. Its surface is the
 -- component UI in ui/ (one file per component).
 
 local ui = require("@self/ui")
@@ -25,5 +25,5 @@ return Patch.new("Neon Saturator", {
   chain = chain,
   macros = { macros.tape, macros.tube, macros.diode, macros.soft_clip },
   theme = { colors = { accent = "#ff6fbf", bg = "#0d0820" }, fonts = { title = Font.new("fonts/Orbitron-ExtraBold.ttf") } },
-  panel = ui.Panel.new(macros),
+  surface = ui.Surface.new(macros),
 })

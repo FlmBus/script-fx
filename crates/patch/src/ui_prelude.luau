@@ -5,8 +5,8 @@
 --   Knob.new({ bind = drive_macro, x = 10, y = 20 })      -- an instance
 --
 -- UI files are modules that init.luau requires; the root instance goes into
--- Patch.new(..., { panel = Panel.new({ ... }) }) and always covers the whole
--- ControlPanel, UI.WIDTH x UI.HEIGHT. `bind` takes a Macro or Param, `source`
+-- Patch.new(..., { surface = Surface.new({ ... }) }) and always covers the whole
+-- surface, UI.WIDTH x UI.HEIGHT. `bind` takes a Macro or Param, `source`
 -- a metered block or Meters.IN / Meters.OUT.
 --
 -- render(p) returns SVG strings, nested lists of them, and child instances.

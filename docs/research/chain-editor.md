@@ -33,6 +33,10 @@ Related: [`../STATUS.md`](../STATUS.md) ("Open directions", decision "Patch kind
 >   type). §4's "page" text and E1/E2 below are the older design.
 > - Build order (§10): steps 1–5 done; glow/dots on targets and blocks, Matrix filtering and
 >   step 6 remain open.
+> - **Vocabulary (2026-11-25):** this doc's "views" and "pages" are both **surfaces** now, and the
+>   viewport shows one of them — the chain and the Matrix are surfaces exactly as a patch's own UI
+>   is. Read it with [`../GLOSSARY.md`](../GLOSSARY.md) beside it; "page" survives only for a block
+>   modal's knob groups.
 
 ## 0. Screenshots of the mockup
 

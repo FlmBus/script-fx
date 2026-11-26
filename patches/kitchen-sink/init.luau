@@ -1,6 +1,6 @@
 -- Kitchen Sink: every block in the catalogue (51), wired as one plausible chain, plus every
 -- modulator. With the macros at their defaults it is a gentle mix-bus chain; the macros bring the
--- wilder sections in. No ControlPanel: the shell shows the macros as the surface.
+-- wilder sections in. No surface of its own: the shell shows the macros as the default surface.
 --
 --   input → tone → dynamics → band-split colour → mangle (crossfade) → movement → stereo →
 --   space → master

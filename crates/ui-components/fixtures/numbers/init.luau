@@ -8,4 +8,4 @@ local N = Component.define {
     }
   end,
 }
-return Patch.new("fixture", { panel = N.new {} })
+return Patch.new("fixture", { surface = N.new {} })

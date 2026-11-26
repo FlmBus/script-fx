@@ -1,12 +1,12 @@
 -- Clean Gain: one big fader between an input and an output meter.
--- The patch's init.luau passes the gain macro in: ui.Panel.new({ gain = gain })
+-- The patch's init.luau passes the gain macro in: ui.Surface.new({ gain = gain })
 
 local Background = require("@self/background")
 local Fader = require("@self/fader")
 local Meter = require("@self/meter")
 
-local Panel = Component.define {
-  name = "Panel",
+local Surface = Component.define {
+  name = "Surface",
   render = function(p: Props<{ gain: Macro }>)
     return {
       Background.new {},
@@ -17,4 +17,4 @@ local Panel = Component.define {
   end,
 }
 
-return { Panel = Panel }
+return { Surface = Surface }

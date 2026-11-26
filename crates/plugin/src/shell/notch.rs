@@ -1,12 +1,13 @@
 //! The control notch: a tab of frame material hanging from the window's top edge, joined to
 //! it by concave flares. One row: reload (+ sync LED) | snapshot selector, save, load | bypass.
 //!
-//! The view switch (Surface · Chain · Matrix) floats in the stage's top-right corner as three
-//! icons ([`view_switch`]); the sheet openers (controls, chat, settings) live in the top bar.
+//! The surface switcher floats in the stage's top-right corner as one icon per surface
+//! ([`surface_switch`]); the sheet openers (controls, chat, settings) live in the top bar.
 //! Stateless: the shell owns everything it shows. Snapshots: ‹ › step through Init and the saved
 //! ones, the selector opens the snapshot menu (`snapshot_menu`), Save stores the sound (a name is
 //! asked for on Init), Load imports a snapshot file.
 
+use super::viewport::{self, SurfaceId};
 use super::{icons, tabs, theme};
 use nice_plug_iced::iced::{
     Border, Center, Element, Fill, Padding, Point, Rectangle, Renderer, Shadow, Theme, Vector,
@@ -17,7 +18,8 @@ use nice_plug_iced::iced::{
 #[derive(Debug, Clone)]
 pub enum Message {
     Reload,
-    View(View),
+    /// Switch the viewport to another surface.
+    Surface(SurfaceId),
     /// The bypass button: the plugin's (host) bypass on or off.
     Bypass(bool),
     /// ‹ ›: the previous / next snapshot.
@@ -27,37 +29,6 @@ pub enum Message {
     Save,
     /// Load: import a snapshot file.
     Import,
-}
-
-/// What the patch window shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum View {
-    /// The patch's ControlPanel, or without one its macros (`surface`).
-    Surface,
-    /// The audio tree (blocks, containers with slots).
-    Chain,
-    /// The patch's existing macro-to-parameter modulation slots.
-    Matrix,
-}
-
-impl View {
-    const ALL: [View; 3] = [View::Surface, View::Chain, View::Matrix];
-
-    fn label(self) -> &'static str {
-        match self {
-            View::Surface => "Surface",
-            View::Chain => "Chain",
-            View::Matrix => "Matrix",
-        }
-    }
-
-    fn icon(self) -> &'static str {
-        match self {
-            View::Surface => icons::VIEW_SURFACE,
-            View::Chain => icons::VIEW_CHAIN,
-            View::Matrix => icons::VIEW_MATRIX,
-        }
-    }
 }
 
 /// The patch file's state, shown by the LED on Reload.
@@ -210,23 +181,24 @@ const TOOLS_WIDTH: f32 = theme::SIZE_CONTROL
     + 4.0 * theme::SPACE_HAIR
     + 3.0 * theme::SIZE_CONTROL;
 
-/// Surface · Chain · Matrix as three icons in a small frame-coloured group (floating in the
-/// stage's top-right corner); the highlight slides between them, the name shows on hover.
-pub fn view_switch<'a>(current: View) -> Element<'a, Message> {
-    let segment = |v: View, on: bool| -> Element<'a, Message> {
+/// One icon per surface in a small frame-coloured group (floating in the stage's top-right
+/// corner); the highlight slides between them, the name shows on hover. Driven by the list, so a
+/// patch adding a surface needs no change here.
+pub fn surface_switch<'a>(entries: &[viewport::Entry], current: SurfaceId) -> Element<'a, Message> {
+    let segment = |e: viewport::Entry, on: bool| -> Element<'a, Message> {
         let ink = if on { theme::c().on_frame_invert } else { theme::c().frame_ink_2 };
-        let b = button(container(icons::icon(v.icon(), 14.0, 2.0, ink)).center(Fill))
-            .on_press_maybe((v != current).then_some(Message::View(v)))
+        let b = button(container(icons::icon(e.icon, 14.0, 2.0, ink)).center(Fill))
+            .on_press_maybe((e.id != current).then_some(Message::Surface(e.id)))
             .width(30)
             .height(26)
             .padding(0)
             .style(tabs::style(on, theme::frame_switch(on)));
         // The labels only on the layer under the highlight's (one tooltip per button).
-        if on { b.into() } else { tooltip(b, v.label()) }
+        if on { b.into() } else { tooltip(b, e.label) }
     };
-    let off = row(View::ALL.into_iter().map(|v| segment(v, false))).spacing(2);
-    let on = row(View::ALL.into_iter().map(|v| segment(v, true))).spacing(2);
-    let selected = View::ALL.iter().position(|v| *v == current);
+    let off = row(entries.iter().map(|e| segment(*e, false))).spacing(2);
+    let on = row(entries.iter().map(|e| segment(*e, true))).spacing(2);
+    let selected = entries.iter().position(|e| e.id == current);
     let pill = tabs::Pill {
         background: theme::c().frame_invert,
         radius: 7.0,

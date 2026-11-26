@@ -1,8 +1,8 @@
 //! Reactive UI components: Lua `render(props)` → SVG → one cached image per component.
 //!
-//! The UI is the `panel` of the patch: `init.luau` requires its UI files and
-//! passes `Patch.new(..., { panel = Panel.new({ ... }) })`, wiring macros, params
-//! and metered blocks into the components as props. Every ControlPanel has the
+//! The UI is the `surface` of the patch: `init.luau` requires its UI files and
+//! passes `Patch.new(..., { surface = Surface.new({ ... }) })`, wiring macros, params
+//! and metered blocks into the components as props. Every patch surface has the
 //! same logical size, [`WIDTH`] × [`HEIGHT`]; the shell scales it to the window.
 //! Every frame the shell calls [`Ui::update`] with the current inputs (bound
 //! parameter values, meters, hover/drag, time). Each component instance is
@@ -32,7 +32,7 @@ use resvg::{tiny_skia, usvg};
 pub use tiny_skia::Pixmap;
 
 
-/// Logical size of every ControlPanel (fixed, so all patches look alike in the shell).
+/// Logical size of every patch surface (fixed, so all patches look alike in the shell).
 pub const WIDTH: f32 = 840.0;
 pub const HEIGHT: f32 = 560.0;
 
@@ -236,7 +236,7 @@ fn error_svg(w: f32, h: f32, msg: &str) -> String {
 
 impl Ui {
     /// Loads `<dir>/ui.lua`.
-    /// Loads the patch in `dir` and builds its `panel`.
+    /// Loads the patch in `dir` and builds its `surface`.
     pub fn load(dir: &Path) -> Result<Self, String> {
         let rt = patch::runtime::Runtime::new(dir).map_err(|e| e.to_string())?;
         let lua = rt.lua.clone();
@@ -264,12 +264,12 @@ impl Ui {
     pub fn reload(&mut self) -> Result<(), String> {
         let _c = patch::locale::CNumeric::enter();
         let patch = self.rt.eval_patch().map_err(|e| e.to_string())?;
-        let root: Value = patch.get("panel").map_err(|e| e.to_string())?;
+        let root: Value = patch.get("surface").map_err(|e| e.to_string())?;
         if root.is_nil() {
-            return Err("the patch has no panel: pass `panel = <Root>.new({ ... })` to Patch.new".into());
+            return Err("the patch has no surface: pass `surface = <Root>.new({ ... })` to Patch.new".into());
         }
         let (def, props) =
-            descriptor(&root).ok_or("`panel` must be a component instance (<Root>.new({ ... }))")?;
+            descriptor(&root).ok_or("`surface` must be a component instance (<Root>.new({ ... }))")?;
         let frame = Rect { x: 0.0, y: 0.0, w: WIDTH, h: HEIGHT };
         let root = match self.root.take() {
             Some(mut old) => {
@@ -544,7 +544,7 @@ impl Ui {
         // and soft shadows naturally reach past it (a dragged Neon knob's glow was cut at the
         // top), and authors shouldn't have to pad every component for them. The cap keeps a
         // runaway component from producing a huge layer. Hit testing stays the component box.
-        // Never past the panel's own edges, though: a full-size background with blur or shadow
+        // Never past the surface's own edges, though: a full-size background with blur or shadow
         // filters (Junkyard) would otherwise smear outside the panel, over the shell.
         const OVERFLOW: f32 = 32.0;
         let (left, top) = ((-OVERFLOW).max(-n.abs.x), (-OVERFLOW).max(-n.abs.y));

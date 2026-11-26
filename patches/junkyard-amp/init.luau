@@ -25,5 +25,5 @@ return Patch.new("Junkyard Amp", {
   chain = chain,
   macros = { macros.gain, macros.presence, macros.master },
   theme = { colors = { accent = "#d9472b", bg = "#4a2e1a" }, fonts = { title = Font.new("fonts/label-tape.fnt") } },
-  panel = ui.Panel.new(macros),
+  surface = ui.Surface.new(macros),
 })
