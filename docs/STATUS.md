@@ -132,13 +132,16 @@ Tested off-screen in the standalone (unit tests + Xvfb walkthrough), not yet in 
    §§ drawer/chain); `Hz | sync` pills on block knobs (rates, delay times); a
    route's meta knob focused right after a drop; modulators onto Surface macros. Then a host
    round trip (save project, reopen) of routes and modulator edits.
-2. **Surfaces** ([`GLOSSARY.md`](GLOSSARY.md), decided 2026-11-25). Done: the tier is collapsed —
-   `shell/viewport.rs` holds `SurfaceId` and the switcher list, the shell's per-view special cases
-   are per-surface traits (`owns_block_modal`), `notch::View` is gone. Remaining:
-   **(a)** move the chain's state out of the shell struct (`page`, `motion`, `chain_content`) so
-   each surface owns its own — the point of the exercise; **(b)** rename `ui.Panel` → `ui.Surface`
-   in the Luau API, `has_panel` → surfaces, and `stage.rs`'s `Panel` with it (breaking, all six
-   patches); **(c)** let a patch declare 0..n surfaces, which the switcher then lists.
+2. **Surfaces** ([`GLOSSARY.md`](GLOSSARY.md), decided 2026-11-25). Done: the tier is collapsed
+   (`shell/viewport.rs` holds `SurfaceId` and the switcher list, `notch::View` is gone); the chain
+   surface owns its own state (`shell/chain_surface.rs`: the modal, the camera, `chain_content`);
+   and the Luau API renamed (**breaking, 2026-11-26**, no users yet): `panel = ui.Panel.new{…}` →
+   `surface = ui.Surface.new{…}`, `Patch::has_panel` → `has_surface`, `stage::Panel` →
+   `stage::Surface`, `shell/surface.rs` → `default_surface.rs`, and "ControlPanel" is gone from the
+   code. **Deferred (Flemming, 2026-11-26):** a patch still declares at most *one* surface. The
+   shell side is already plural (the switcher is driven by `viewport::surfaces()`), so only the
+   Luau side would change; the shape for naming several (component names vs explicit `name`/`ui`
+   pairs) is better decided when a patch actually wants a second one.
 3. **Block modals:** build the displays designed in
    [`research/mockups/block-displays.html`](research/mockups/block-displays.html), in the order of
    [`research/block-displays.md`](research/block-displays.md) (steps 1 and 2 done: the `dsp::preview`
@@ -255,7 +258,7 @@ and the knob cell: [`research/chain-editor.md`](research/chain-editor.md)** (tre
 slots, not a free graph). Still open from the list below: the file format, panels for graph patches,
 what the LLM writes:
 - format and where it lives (a Luau table of data, or JSON; a file in the patch folder);
-- how the two kinds relate: can a graph patch have a coded ControlPanel, or does it always get a
+- how the two kinds relate: can a graph patch have a coded surface, or does it always get a
   generic one? Can a Luau patch be converted to a graph (only when it has no logic)?
 - macros/params in the graph (nodes, or a side panel);
 - what the LLM writes for which kind; the graph is easier to validate and diff;
@@ -334,7 +337,7 @@ Principle (Flemming, 2026-11-19): patches are isolated from the shell and from e
   family names), loaders accept registered files only. Patch files stay free-form (one file for a
   minimal patch, `require`d modules for bigger ones); no JSON (no references, no types).
 - Patch fonts beyond TTF/OTF: SVG fonts and BMFont image fonts work for the library title (and
-  the macro surface's title); ControlPanel text in them is next
+  the default surface's title); patch-surface text in them is next
   ([`research/patch-fonts.md`](research/patch-fonts.md)).
 
 ### DSP / chain

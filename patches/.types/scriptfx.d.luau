@@ -3,7 +3,7 @@
 --
 -- A patch folder has:
 --   init.luau   the entry point (or init.lua): the patch folder as a Luau module, returning
---               Patch.new(name, { chain, macros, theme, panel }). Everything else is up to the
+--               Patch.new(name, { chain, macros, theme, surface }). Everything else is up to the
 --               author: one file for a simple patch, or parts in their own modules. Luau's rule
 --               for init files: inside init.luau the patch's own files are "@self/...":
 --               `theme = require("@self/theme")`, `require("@self/ui")`. Other files use "./x".
@@ -16,7 +16,7 @@
 ---------------------------------------------------------------- patch
 
 -- A block's knob ("<block id>.<setting>"; no Param.new: every param belongs to a block).
--- Drive it with a macro (macro:drives(echo.params.feedback)) or bind it in the panel; otherwise
+-- Drive it with a macro (macro:drives(echo.params.feedback)) or bind it on the surface; otherwise
 -- it's free: its value is saved with the project.
 declare extern type Param with
   id: string
@@ -429,7 +429,7 @@ declare extern type Image with
 end
 declare Image: { new: (path: string) -> Image }
 
---- The patch's design tokens, shared by the library card and the ControlPanel (`p.theme`).
+--- The patch's design tokens, shared by the library card and the patch's surface (`p.theme`).
 --- `colors` / `fonts` / `images`: the patch's own names. The shell uses `colors.accent`, `.bg`,
 --- `.ink`, `fonts.title` and `images.logo` (the card shows the logo instead of the title);
 --- `library` overrides them for the library card only. Colours are "#rrggbb".
@@ -458,10 +458,10 @@ export type ModAssignment = {
 }
 
 declare Patch: {
-  -- macros: order = host automation slots 1..16; panel: the ControlPanel's root instance
+  -- macros: order = host automation slots 1..16; surface: the patch surface's root instance
   new: (name: string, o: { author: string?, chain: Chain?, macros: { Macro }?,
                            modulators: { ModulatorConfig }?, assignments: { ModAssignment }?,
-                           theme: Theme?, panel: ComponentInstance? }?) -> Patch,
+                           theme: Theme?, surface: ComponentInstance? }?) -> Patch,
 }
 
 ---------------------------------------------------------------- UI
@@ -522,7 +522,7 @@ declare Component: {
   }) -> Component<P>,
 }
 
--- The ControlPanel's fixed logical size (the root always covers it).
+-- The patch surface's fixed logical size (the root always covers it).
 declare UI: { WIDTH: number, HEIGHT: number }
 
 export type Stop = { any }                    -- { offset 0..1, colour, opacity? }

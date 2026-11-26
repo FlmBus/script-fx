@@ -21,5 +21,5 @@ return Patch.new("Tape Glow", {
   chain = chain,
   macros = { character, mix_macro, output_macro },
   theme = { colors = { accent = "#ff8a3d", bg = "#17141c" }, fonts = { title = Font.new("fonts/PlayfairDisplay-SemiBoldItalic.ttf") } },
-  panel = ui.Panel.new({ character = character, mix = mix_macro, output = output_macro, drive = tape.params.amount, tone = tone.params.freq }),
+  surface = ui.Surface.new({ character = character, mix = mix_macro, output = output_macro, drive = tape.params.amount, tone = tone.params.freq }),
 })

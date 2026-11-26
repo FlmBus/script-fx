@@ -1,6 +1,6 @@
 -- Bass Helper: signal-flow strip with live block meters on top, the three big
 -- macros in the middle, tone/output/crossover below, in/out meters at the sides.
--- The patch's init.luau passes the macros, params and metered blocks in (see PanelProps).
+-- The patch's init.luau passes the macros, params and metered blocks in (see SurfaceProps).
 
 local style = require("@self/style")
 local Background = require("@self/background")
@@ -15,16 +15,16 @@ local function meter_at(b: Box, comp: Component<{}>, source: MeteredBlock): Comp
   return comp.new { key = b.label, source = source, x = b.x + 8, y = b.y + 44, w = b.w - 16, h = 32 }
 end
 
-export type PanelProps = {
+export type SurfaceProps = {
   transients: Macro, stabilize: Macro, drive: Macro,
   boom: Macro, boxy: Macro, click: Macro, output: Macro,
   xover: Param, grit_mix: Param,
   punch: TransientBlock, fet: FETCompressorBlock, opto: OptoCompressorBlock, rider: RiderBlock,
 }
 
-local Panel = Component.define {
-  name = "Panel",
-  render = function(p: Props<PanelProps>)
+local Surface = Component.define {
+  name = "Surface",
+  render = function(p: Props<SurfaceProps>)
     local items = {
       Background.new {},
       meter_at(BOXES.punch, GainMeter, p.punch),
@@ -59,4 +59,4 @@ local Panel = Component.define {
   end,
 }
 
-return { Panel = Panel }
+return { Surface = Surface }

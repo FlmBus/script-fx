@@ -31,8 +31,10 @@ Why it is one tier:
 - Each surface **owns its state and messages**. The block modal and its camera belong to the chain
   surface, not to the shell; the add row belongs to the Matrix. The shell does not know what a
   block is.
-- A patch may declare **more than one surface** (no factory patch does, but nothing stops it), and
-  the switcher just grows an entry.
+- The shell side is **already plural**: the switcher is whatever `viewport::surfaces()` returns, so
+  a second surface costs no notch or shell change. The Luau API stays **singular** for now
+  (`surface = ui.Surface.new{…}`, deferred 2026-11-26) — the naming shape for several is better
+  decided when a patch wants one.
 - What used to be per-view special cases in the shell become **per-surface metadata**:
   `owns_block_modal` (only the chain has blocks to zoom into), and which surface is the default
   (where passive mode and a patch load land).
@@ -54,8 +56,8 @@ type called `View` rendered by a method called `view()` is permanent noise.
 | **Stage** | the patch window above the dock, in which the viewport sits | `shell/stage.rs` |
 | **Viewport** | the stage's content area; shows one surface at a time | `shell/mod.rs` |
 | **Surface** | one thing the viewport can show: the chain, the Matrix, or a patch's own UI | `shell/viewport.rs` |
-| **Patch surface** | a patch's own UI: reactive Luau components, fixed 840×560 | ⟳ today `ControlPanel` / `ui.Panel`, `ui_components::Ui`, `shell/stage.rs` |
-| **Default surface** | the shell's own macro surface (the macros as knobs, in the patch's theme), shown when a patch declares none | `shell/surface.rs` |
+| **Patch surface** | a patch's own UI: reactive Luau components, fixed 840×560; the `surface` of `Patch.new` | `ui.Surface`, `ui_components::Ui`, `shell/stage.rs` |
+| **Default surface** | the shell's own macro surface (the macros as knobs, in the patch's theme), shown when a patch declares none | `shell/default_surface.rs` |
 | **Component** | one visual part of a patch surface; each instance is a cached layer | `Component.define`, `X.new {}` |
 | **Chain / Block** | DSP description / one **building block**: the unit patches build professional effect chains from, so it exposes every parameter it can ([`research/blocks.md`](research/blocks.md)) (`Chain.new`, `Blocks.<Type>.new(id, {...})`) | `patch::chain`, `BlockSpec` |
 | **Chain surface / Block modal** | the surface showing the chain's tree / one block's modal (display + knobs), zoomed into from its node | `shell/chain_view.rs`, `shell/block_modal.rs`, `shell/motion.rs` |

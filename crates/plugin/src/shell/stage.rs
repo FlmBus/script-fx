@@ -1,4 +1,4 @@
-//! The stage: the patch window. Shows the patch's ControlPanel (component layers, rendered on
+//! The stage: the patch window. Shows the patch's own surface (component layers, rendered on
 //! the CPU by `ui_components`, one image per layer) scaled into the window, and turns pointer
 //! input into param changes (knob drag and scroll, Shift = fine, button click, double-click
 //! reset, right-click = type a value). The window's
@@ -21,10 +21,10 @@ use ui_components::{Bound, Hit, Inputs};
 
 use super::{pointer_lock, theme};
 
-/// A ControlPanel and its interaction state.
-pub struct Panel {
+/// A patch's own surface and its interaction state.
+pub struct Surface {
     ui: ui_components::Ui,
-    /// One image per layer, in draw order (logical rect inside the 840×560 panel).
+    /// One image per layer, in draw order (logical rect inside the 840×560 surface).
     layers: Vec<(u64, ui_components::Rect, image::Handle)>,
     hover: Option<Hit>,
     active: Option<u64>,
@@ -46,38 +46,38 @@ struct Drag {
     drag: pointer_lock::Drag,
 }
 
-/// What the panel wants changed; the shell applies it (host params need the GUI context).
+/// What the surface wants changed; the shell applies it (host params need the GUI context).
 pub enum Change {
     BeginMacro(usize),
     SetMacro(usize, f32),
     EndMacro(usize),
     /// Free param, plain value.
     SetFree(usize, f32),
-    /// Right-click on a control: ask for a typed value (`at`: panel coordinates).
+    /// Right-click on a control: ask for a typed value (`at`: surface coordinates).
     OpenEntry { target: Target, at: Point },
 }
 
-/// Pointer input over the panel, in panel coordinates (logical, 840×560).
+/// Pointer input over the surface, in surface coordinates (logical, 840×560).
 #[derive(Debug, Clone)]
 pub enum Pointer {
     Moved(Point),
     Pressed(Point),
     RightPressed(Point),
-    /// Wheel over the panel: notches (up = positive).
+    /// Wheel over the surface: notches (up = positive).
     Scrolled(Point, f32),
     Released,
     Left,
     Fine(bool),
 }
 
-/// Pixels of drag (panel units) for the full 0..1 range.
+/// Pixels of drag (surface units) for the full 0..1 range.
 const DRAG_RANGE: f32 = 200.0;
 /// Value change per wheel notch (50 notches for the full range).
 const SCROLL_STEP: f32 = 0.02;
 /// Shift: drag and scroll this much finer.
 const FINE: f32 = 0.2;
 
-impl Panel {
+impl Surface {
     pub fn load(dir: &std::path::Path) -> Result<Self, String> {
         Ok(Self {
             ui: ui_components::Ui::load(dir)?,
@@ -97,7 +97,7 @@ impl Panel {
         Ok(())
     }
 
-    /// Re-renders changed components at `scale` (device pixels per panel unit) and refreshes
+    /// Re-renders changed components at `scale` (device pixels per surface unit) and refreshes
     /// the layer images.
     pub fn update(&mut self, patch: &Patch, values: &Values, scale: f32) {
         let bound = |b: &str| -> Option<Bound> {
@@ -108,7 +108,7 @@ impl Panel {
                 }
                 Source::Param(i) => {
                     // A modulated param stays editable: the knob drags its base value. The text
-                    // says what's heard (after modulation): panels can't show the range arc or
+                    // says what's heard (after modulation): surfaces can't show the range arc or
                     // the live dot, the shell never draws on patch art.
                     let v = values.base(i);
                     let heard = values.params.get(i).copied().unwrap_or(v);
@@ -285,30 +285,30 @@ pub(super) fn unpremultiply(data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Size of the stage (the patch window) and where the 840×560 panel sits in it.
-pub fn panel_fit() -> (f32, Vector) {
+/// Size of the stage (the patch window) and where the 840×560 surface sits in it.
+pub fn surface_fit() -> (f32, Vector) {
     let (w, h) = theme::stage_size();
     let s = (w / ui_components::WIDTH).min(h / ui_components::HEIGHT);
     (s, Vector::new((w - ui_components::WIDTH * s) / 2.0, (h - ui_components::HEIGHT * s) / 2.0))
 }
 
-/// The patch window. `bg`: the patch's background colour (fills around the panel).
-pub fn view<'a>(panel: &'a Panel, bg: Color) -> Element<'a, Pointer> {
-    let (s, offset) = panel_fit();
+/// The patch window. `bg`: the patch's background colour (fills around the surface).
+pub fn view<'a>(surface: &'a Surface, bg: Color) -> Element<'a, Pointer> {
+    let (s, offset) = surface_fit();
     let ground = container(column![]).width(Fill).height(Fill).style(move |_: &Theme| container::Style {
         background: Some(bg.into()),
         ..Default::default()
     });
 
     let mut layers = stack![].width(Fill).height(Fill);
-    for (_, r, handle) in &panel.layers {
+    for (_, r, handle) in &surface.layers {
         layers = layers.push(
             pin(image(handle.clone()).width(r.w * s).height(r.h * s).content_fit(ContentFit::Fill))
                 .x(offset.x + r.x * s)
                 .y(offset.y + r.y * s),
         );
     }
-    layers = layers.push(PointerArea { scale: s, offset, cursor: panel.cursor() });
+    layers = layers.push(PointerArea { scale: s, offset, cursor: surface.cursor() });
 
     stack![ground, layers, corners()].width(Fill).height(Fill).into()
 }
@@ -350,9 +350,9 @@ impl<M> canvas::Program<M> for Corners {
     }
 }
 
-// ---- pointer input over the panel ---------------------------------------------------------------
+// ---- pointer input over the surface -------------------------------------------------------------
 
-/// Transparent, fills the stage, reports pointer input in panel coordinates.
+/// Transparent, fills the stage, reports pointer input in surface coordinates.
 struct PointerArea {
     scale: f32,
     offset: Vector,
@@ -397,7 +397,7 @@ impl Widget<Pointer, Theme, Renderer> for PointerArea {
     ) {
         let state = tree.state.downcast_mut::<PointerState>();
         let bounds = layout.bounds();
-        let to_panel = |p: Point| {
+        let to_surface = |p: Point| {
             Point::new((p.x - bounds.x - self.offset.x) / self.scale, (p.y - bounds.y - self.offset.y) / self.scale)
         };
         match event {
@@ -405,7 +405,7 @@ impl Widget<Pointer, Theme, Renderer> for PointerArea {
                 // `position_over` is None while a layer above (a sheet) covers the point.
                 let inside = cursor.position_over(bounds).is_some();
                 if inside || state.pressed {
-                    shell.publish(Pointer::Moved(to_panel(*position)));
+                    shell.publish(Pointer::Moved(to_surface(*position)));
                 } else if state.inside {
                     shell.publish(Pointer::Left);
                 }
@@ -418,13 +418,13 @@ impl Widget<Pointer, Theme, Renderer> for PointerArea {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if let Some(p) = cursor.position_over(bounds) {
                     state.pressed = true;
-                    shell.publish(Pointer::Pressed(to_panel(p)));
+                    shell.publish(Pointer::Pressed(to_surface(p)));
                     shell.capture_event();
                 }
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
                 if let Some(p) = cursor.position_over(bounds) {
-                    shell.publish(Pointer::RightPressed(to_panel(p)));
+                    shell.publish(Pointer::RightPressed(to_surface(p)));
                     shell.capture_event();
                 }
             }
@@ -435,7 +435,7 @@ impl Widget<Pointer, Theme, Renderer> for PointerArea {
                         mouse::ScrollDelta::Lines { x, y } => if y != 0.0 { y } else { x },
                         mouse::ScrollDelta::Pixels { x, y } => (if y != 0.0 { y } else { x }) / 40.0,
                     };
-                    shell.publish(Pointer::Scrolled(to_panel(p), notches));
+                    shell.publish(Pointer::Scrolled(to_surface(p), notches));
                     shell.capture_event();
                 }
             }
@@ -463,15 +463,15 @@ impl<'a> From<PointerArea> for Element<'a, Pointer> {
 mod tests {
     use super::*;
 
-    /// Neon Saturator's Tape knob (macro slot 0) sits around (165, 388) in the panel.
-    fn neon() -> (Patch, Panel, Values) {
+    /// Neon Saturator's Tape knob (macro slot 0) sits around (165, 388) in the surface.
+    fn neon() -> (Patch, Surface, Values) {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../patches/neon-saturator");
         let patch = Patch::load(&dir).unwrap();
-        let mut panel = Panel::load(&dir).unwrap();
+        let mut surface = Surface::load(&dir).unwrap();
         let mut values = Values { params: vec![0.0; patch.params.len()], ..Default::default() };
         values.macros[0] = 0.5;
-        panel.update(&patch, &values, 1.0);
-        (patch, panel, values)
+        surface.update(&patch, &values, 1.0);
+        (patch, surface, values)
     }
 
     fn set_macro(changes: &[Change]) -> Option<f32> {
@@ -480,21 +480,21 @@ mod tests {
 
     #[test]
     fn wheel_turns_a_knob_shift_finer() {
-        let (patch, mut panel, values) = neon();
+        let (patch, mut surface, values) = neon();
         let at = Point::new(165.0, 388.0);
-        let coarse = set_macro(&panel.pointer(Pointer::Scrolled(at, 1.0), &patch, &values)).expect("scroll changes Tape");
+        let coarse = set_macro(&surface.pointer(Pointer::Scrolled(at, 1.0), &patch, &values)).expect("scroll changes Tape");
         assert!((coarse - (0.5 + SCROLL_STEP)).abs() < 1e-6);
-        panel.pointer(Pointer::Fine(true), &patch, &values);
-        let fine = set_macro(&panel.pointer(Pointer::Scrolled(at, -1.0), &patch, &values)).unwrap();
+        surface.pointer(Pointer::Fine(true), &patch, &values);
+        let fine = set_macro(&surface.pointer(Pointer::Scrolled(at, -1.0), &patch, &values)).unwrap();
         assert!((fine - (0.5 - SCROLL_STEP * FINE)).abs() < 1e-6);
-        // Wheel over empty panel space changes nothing.
-        assert!(panel.pointer(Pointer::Scrolled(Point::new(5.0, 5.0), 1.0), &patch, &values).is_empty());
+        // Wheel over empty surface space changes nothing.
+        assert!(surface.pointer(Pointer::Scrolled(Point::new(5.0, 5.0), 1.0), &patch, &values).is_empty());
     }
 
     #[test]
     fn right_click_asks_for_a_value() {
-        let (patch, mut panel, values) = neon();
-        let out = panel.pointer(Pointer::RightPressed(Point::new(165.0, 388.0)), &patch, &values);
+        let (patch, mut surface, values) = neon();
+        let out = surface.pointer(Pointer::RightPressed(Point::new(165.0, 388.0)), &patch, &values);
         assert!(matches!(out.as_slice(), [Change::OpenEntry { target: Target::Macro(0), .. }]));
     }
 }
@@ -509,13 +509,13 @@ mod advanced_tab {
     fn neon_advanced_tab_renders() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../patches/neon-saturator");
         let patch = Patch::load(&dir).unwrap();
-        let mut panel = Panel::load(&dir).unwrap();
+        let mut surface = Surface::load(&dir).unwrap();
         let values = Values { params: vec![0.0; patch.params.len()], ..Default::default() };
-        panel.update(&patch, &values, 1.0);
+        surface.update(&patch, &values, 1.0);
         let at = Point::new(470.0, 304.0);
-        panel.pointer(Pointer::Pressed(at), &patch, &values);
-        panel.pointer(Pointer::Released, &patch, &values);
-        panel.update(&patch, &values, 1.0);
-        assert_eq!(panel.ui.errors(), Vec::<String>::new());
+        surface.pointer(Pointer::Pressed(at), &patch, &values);
+        surface.pointer(Pointer::Released, &patch, &values);
+        surface.update(&patch, &values, 1.0);
+        assert_eq!(surface.ui.errors(), Vec::<String>::new());
     }
 }

@@ -52,7 +52,7 @@ fn broken_components_are_isolated() {
     assert!(errors.iter().any(|e| e.contains("memory")));
     assert!(errors.iter().any(|e| e.contains("invalid SVG")));
     let healthy = ui.layers().iter().filter(|l| l.pixmap.is_some() && l.error.is_none()).count();
-    assert_eq!(healthy, 3, "panel + both 'fine' components");
+    assert_eq!(healthy, 3, "surface + both 'fine' components");
 }
 
 #[test]
@@ -71,8 +71,8 @@ fn local_state_and_reload() {
     assert!(ui.hit(165.0, 390.0).is_none(), "tab state survives a reload");
 }
 
-/// Layers may overflow their component (glows), never the panel: Junkyard's filtered full-size
-/// background once smeared outside the panel over the shell.
+/// Layers may overflow their component (glows), never the surface: Junkyard's filtered full-size
+/// background once smeared outside the surface over the shell.
 #[test]
 fn no_layer_leaves_the_panel() {
     let patches = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../patches");
@@ -86,7 +86,7 @@ fn no_layer_leaves_the_panel() {
                 let r = l.rect;
                 assert!(
                     r.x >= 0.0 && r.y >= 0.0 && r.x + r.w <= ui_components::WIDTH && r.y + r.h <= ui_components::HEIGHT,
-                    "{name} @{scale}x: layer {:?} at {r:?} leaves the 840×560 panel",
+                    "{name} @{scale}x: layer {:?} at {r:?} leaves the 840×560 surface",
                     l.kind
                 );
             }

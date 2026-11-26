@@ -20,7 +20,7 @@
 //! [`KnobEvent::Drop`]. A macro cell's title bar is its grip: pressing it starts dragging the
 //! macro ([`KnobEvent::Grab`]) instead of turning the knob.
 //!
-//! Input, as on the ControlPanel: drag up/down (200 px = full range), Shift = fine, wheel steps,
+//! Input, as on a patch surface: drag up/down (200 px = full range), Shift = fine, wheel steps,
 //! double-click = default, right-click = type a value. While dragging, the value replaces the
 //! label.
 

@@ -10,5 +10,5 @@ return Patch.new("Clean Gain", {
   chain = Chain.new({ out }),
   macros = { gain },
   theme = { colors = { accent = "#4fd1c5", bg = "#0f1a1d" }, fonts = { title = Font.new("fonts/clean-line.svg") } },
-  panel = ui.Panel.new({ gain = gain }),
+  surface = ui.Surface.new({ gain = gain }),
 })

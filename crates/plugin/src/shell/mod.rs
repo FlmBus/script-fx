@@ -1,16 +1,16 @@
 //! The shell: the plugin's own UI (iced), in the "ScriptFX Shell" design system.
-//! Top bar over the stage (the patch window: ControlPanel, chain or Matrix, the notch hanging
+//! Top bar over the stage (the patch window: a patch surface, the chain or the Matrix; the notch hanging
 //! into it, sheets floating over it on both sides), the mod dock below it.
 //!
 //! One module per section, each with its own state, `Message`, `update` and `view`:
 //! - `top_bar`      the wordmark, sheet openers (library left; controls, chat, settings right)
 //! - `library`      the patch library (sheet, left)
-//! - `notch`        view switch (Panel | Chain | Matrix); reload / snapshot selector, save, load
+//! - `notch`        reload / snapshot selector, save, load, bypass (the surface switcher floats)
 //! - `snapshot_menu` the notch's snapshot menu (recall, save as, rename, revert, export, delete)
 //! - `dock`         below the stage: macros, modulators (live mini displays), focus, and a
 //!                  modulator's editor (a panel rising over the stage's lower part)
-//! - `stage`        the patch window: the ControlPanel and its pointer input
-//! - `chain_view`   the audio tree (notch: Chain), in place of the ControlPanel
+//! - `stage`        the patch window: a patch's own surface and its pointer input
+//! - `chain_view`   the audio tree, drawn by the `chain_surface`
 //! - `matrix`       every modulation route as a table, add/remove (notch: Matrix)
 //! - `routing`      how routes look (source names, colours, meta knobs) and the source drag
 //! - `block_modal`  a block's modal (click a block in the chain; `motion` + `zoom` + the renderer's blur)
@@ -61,7 +61,7 @@ mod settings;
 mod sheet;
 mod slide;
 mod stage;
-mod surface;
+mod default_surface;
 mod tabs;
 mod top_bar;
 mod viewport;
@@ -200,7 +200,7 @@ pub enum Message {
     Pointer(iced::Point),
     /// The left button went up somewhere: no drag runs any more.
     Released,
-    Surface(surface::Message),
+    DefaultSurface(default_surface::Message),
     Notch(notch::Message),
     Matrix(matrix::Message),
     Chain(chain_surface::Message),
@@ -210,7 +210,7 @@ pub enum Message {
     Settings(settings::Message),
     Empty(empty::Message),
     Passive(passive::Message),
-    Panel(stage::Pointer),
+    PatchSurface(stage::Pointer),
     DismissError,
     Entry(entry::Message),
     /// Escape anywhere (also when a text field has the focus).
@@ -411,11 +411,11 @@ impl Shell {
                     self.tasks.push(iced::widget::operation::snap_to_end(chat::Chat::log_id()));
                 }
                 icons::set_scale(self.ctx.window_size().scale_factor as f32);
-                let scale = stage::panel_fit().0 * self.ctx.window_size().scale_factor as f32;
+                let scale = stage::surface_fit().0 * self.ctx.window_size().scale_factor as f32;
                 let Session { current, values, .. } = &mut self.session;
                 if let Some(cur) = current {
-                    if let Some(panel) = &mut cur.panel {
-                        panel.update(&cur.patch, values, scale);
+                    if let Some(surface) = &mut cur.surface {
+                        surface.update(&cur.patch, values, scale);
                     }
                 }
             }
@@ -506,7 +506,7 @@ impl Shell {
                     d.at = Some(p);
                 }
             }
-            Message::Surface(surface::Message::Macro(slot, e)) => self.macro_knob(slot, e, &params, &shared),
+            Message::DefaultSurface(default_surface::Message::Macro(slot, e)) => self.macro_knob(slot, e, &params, &shared),
             Message::Chat(msg) => match self.chat.update(msg) {
                 Some(chat::Event::Close) => self.open_sheet(None),
                 Some(chat::Event::Send(text)) => {
@@ -603,10 +603,10 @@ impl Shell {
                     }
                 }
             }
-            Message::Panel(ev) => {
+            Message::PatchSurface(ev) => {
                 let Some(cur) = &mut self.session.current else { return };
-                let Some(panel) = &mut cur.panel else { return };
-                let changes = panel.pointer(ev, &cur.patch, &self.session.values);
+                let Some(surface) = &mut cur.surface else { return };
+                let changes = surface.pointer(ev, &cur.patch, &self.session.values);
                 for c in changes {
                     match c {
                         stage::Change::OpenEntry { target, at } => self.open_entry(target, at),
@@ -819,7 +819,7 @@ impl Shell {
                     self.apply(c, params, shared);
                 }
             }
-            knob::KnobEvent::Entry(at) => self.open_entry(stage::Target::Macro(slot), window_to_panel(at)),
+            knob::KnobEvent::Entry(at) => self.open_entry(stage::Target::Macro(slot), window_to_surface(at)),
             knob::KnobEvent::Grab(at) => self.start_source_drag(patch::RouteSource::Macro(slot), at),
             // A modulator dropped on the macro: it modulates the macro (and so all it drives).
             knob::KnobEvent::Drop => {
@@ -849,7 +849,7 @@ impl Shell {
             // Free params aren't host parameters: no automation gesture to open or close.
             knob::KnobEvent::Begin => self.dragging = true,
             knob::KnobEvent::End => self.dragging = false,
-            knob::KnobEvent::Entry(at) => self.open_entry(stage::Target::Param(i), window_to_panel(at)),
+            knob::KnobEvent::Entry(at) => self.open_entry(stage::Target::Param(i), window_to_surface(at)),
             knob::KnobEvent::Meta(k, ev) => {
                 // The knob's k-th meta knob is its k-th route (`routing::metas`).
                 let Some(p) = self.session.current.as_ref().map(|c| &c.patch) else { return };
@@ -1208,8 +1208,8 @@ impl Shell {
         .map(Message::TopBar);
         let window = container(column![top_bar, main]).style(theme::frame).width(Fill).height(Fill);
         // While a knob, fader or meta knob drags, the cursor is hidden everywhere.
-        let panel_drag = s.current.as_ref().and_then(|c| c.panel.as_ref()).is_some_and(|p| p.dragging());
-        let window = hide_cursor::hide_cursor(window, self.dragging || panel_drag, Message::Released);
+        let surface_drag = s.current.as_ref().and_then(|c| c.surface.as_ref()).is_some_and(|p| p.dragging());
+        let window = hide_cursor::hide_cursor(window, self.dragging || surface_drag, Message::Released);
         match self.drag_chip() {
             Some(chip) => stack![window, chip].into(),
             None => window.into(),
@@ -1276,11 +1276,11 @@ impl Shell {
             }
             viewport::SurfaceId::Matrix => (self.matrix.view(&cur.patch, &self.session.values).map(Message::Matrix), theme::c().frame_raised),
             // A patch surface: the patch's own, or the shell's default macro surface.
-            viewport::SurfaceId::Patch(_) => match &cur.panel {
-                Some(panel) => (stage::view(panel, bg).map(Message::Panel), bg),
+            viewport::SurfaceId::Patch(_) => match &cur.surface {
+                Some(surface) => (stage::view(surface, bg).map(Message::PatchSurface), bg),
                 None => {
                     let brand = self.session.library.iter().find(|p| p.folder == cur.folder).map(|p| &p.brand);
-                    (surface::view(&cur.patch, brand, &self.session.values, self.source_drag.as_ref().and_then(routing::SourceDrag::macro_drop)).map(Message::Surface), bg)
+                    (default_surface::view(&cur.patch, brand, &self.session.values, self.source_drag.as_ref().and_then(routing::SourceDrag::macro_drop)).map(Message::DefaultSurface), bg)
                 }
             },
         };
@@ -1288,7 +1288,7 @@ impl Shell {
         let mut stage = stack![press::on_any_press(content, Message::Dismiss)].width(Fill).height(Fill);
         if let Some(e) = &self.entry {
             // Right of the click point, clamped into the stage.
-            let (s, offset) = stage::panel_fit();
+            let (s, offset) = stage::surface_fit();
             let (w, h) = theme::stage_size();
             let x = (offset.x + e.at.x * s + 14.0).min(w - entry::SIZE.0 - 8.0).max(8.0);
             let y = (offset.y + e.at.y * s - entry::SIZE.1 / 2.0).min(h - entry::SIZE.1 - 8.0).max(8.0);
@@ -1451,9 +1451,9 @@ impl Shell {
         let f = iced_wgpu::frame_stats::get();
         let gpu = f.gpu_ms.map_or("n/a".to_string(), |g| format!("{g:.2}"));
         let mut s = format!("{:.0} fps · render cpu {:.2} ms · gpu {gpu} ms", f.fps, f.render_ms);
-        if let Some(p) = self.session.current.as_ref().and_then(|c| c.panel.as_ref()) {
+        if let Some(p) = self.session.current.as_ref().and_then(|c| c.surface.as_ref()) {
             let st = p.stats();
-            s += &format!(" · panel {:.2} ms, {} components, {} rasters", st.total_us / 1000.0, st.nodes, st.rasters);
+            s += &format!(" · surface {:.2} ms, {} components, {} rasters", st.total_us / 1000.0, st.nodes, st.rasters);
         }
         container(text(s).size(10.5).font(theme::font::MONO).color(theme::alpha(theme::c().frame_ink, 0.7)))
             .width(Fill)
@@ -1476,10 +1476,10 @@ fn apply_theme(mode: user_settings::ThemeMode) {
 }
 
 
-/// A window point → panel coordinates (where the value entry is placed): minus the patch
-/// window's origin, minus the panel's offset, unscaled.
-fn window_to_panel(at: iced::Point) -> iced::Point {
-    let (s, offset) = stage::panel_fit();
+/// A window point → patch-surface coordinates (where the value entry is placed): minus the patch
+/// window's origin, minus the surface's offset, unscaled.
+fn window_to_surface(at: iced::Point) -> iced::Point {
+    let (s, offset) = stage::surface_fit();
     let p = at - iced::Vector::new(theme::SPACE_GUTTER, theme::SIZE_TOP_BAR + theme::SPACE_GUTTER);
     iced::Point::new((p.x - offset.x) / s, (p.y - offset.y) / s)
 }

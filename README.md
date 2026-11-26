@@ -15,7 +15,7 @@ crates/patch         patch model (params, macros + modulation slots, chain), san
 crates/dsp           native DSP: compiles a patch's chain into a graph (no alloc/locks/Lua on the audio thread); `preview` = curves for the UI
 crates/analysis      offline analysis of a capture → LLM-friendly JSON (loudness/LUFS, spectrum, dynamics, stereo, pitch)
 crates/llm           the chat's LLM: backends (claude CLI, OpenAI-compatible API), prompt, staging + checks, commit/undo
-crates/ui-components reactive Luau components → SVG → one cached layer per component (a patch's ControlPanel)
+crates/ui-components reactive Luau components → SVG → one cached layer per component (a patch's own surface)
 crates/plugin        package `scriptfx`: nice-plug plugin (VST3/CLAP/standalone) + the iced shell (src/shell/, one module per section)
 crates/xtask         `cargo xtask bundle` (nice-plug-xtask)
 vendor/nice-plug*    patched nice-plug (runtime parameter names), see vendor/nice-plug/PATCHES.md
@@ -23,7 +23,7 @@ vendor/baseview      patched baseview (X11 frame pacing, app resize), see vendor
 vendor/iced_wgpu     patched iced_wgpu (frame timing, post-process pass for the zoom blur), see vendor/iced_wgpu/PATCHES.md
 patches/             factory patches: tape-glow, clean-gain, bass-helper (band split, live block meters),
                      neon-saturator, junkyard-amp (component UI stress/fire tests), kitchen-sink (every
-                     block, every modulator, 12 macros; no ControlPanel)
+                     block, every modulator, 12 macros; no surface of its own)
 patches/.types       Luau type definitions (scriptfx.d.luau) → type checking + autocomplete; doubles as API spec for an LLM
 ```
 
@@ -145,7 +145,7 @@ return Patch.new("Tape Glow", {
   panel = ui.Panel.new({ character = character, drive = tape.params.amount, gr = comp }),
 })
 ```
-**Theme** = the patch's design tokens, shared by the library card and the ControlPanel (`p.theme`):
+**Theme** = the patch's design tokens, shared by the library card and the patch's surface (`p.theme`):
 `colors` (`"#rrggbb"`), `fonts` (`Font.new(path)`: .ttf/.otf, .svg SVG font, .fnt BMFont image font)
 and `images` (`Image.new(path)`: .svg/.png) with the patch's own names. The shell uses
 `colors.accent/bg/ink`, `fonts.title` and `images.logo` (shown instead of the title); `library = { accent,
@@ -223,7 +223,7 @@ return { Panel = Panel }
     Drive aliasing at 10.5 kHz (7.5 kHz, +24 dB): −25 dB → −65 dB.
 - UI: `Component.define`, instances via `X.new(...)`, drawing via `SVG.*`. `bind` takes a Macro or
   Param, `source` a metered block (compressors, rider, transient) or `Meters.IN/OUT`. Every
-  ControlPanel is 840×560 logical units (`UI.WIDTH/HEIGHT`), scaled by the shell. A patch without
+  patch surface is 840×560 logical units (`UI.WIDTH/HEIGHT`), scaled by the shell. A patch without
   one shows its macros as plain knobs in its theme (the shell's Surface view). Planned: this
   becomes the default panel, and panels get renamed to surfaces.
 - **Two layers of checking:**

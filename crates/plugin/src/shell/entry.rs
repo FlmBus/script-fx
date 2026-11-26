@@ -16,7 +16,7 @@ pub const SIZE: (f32, f32) = (200.0, 86.0);
 
 pub struct Entry {
     pub target: Target,
-    /// Where the right-click happened, in panel coordinates.
+    /// Where the right-click happened, in surface coordinates.
     pub at: Point,
     pub label: String,
     pub text: String,
@@ -75,7 +75,7 @@ impl Entry {
             shadow: Shadow { color: theme::shadow(0.45), offset: Vector::new(0.0, 10.0), blur_radius: 28.0 },
             ..Default::default()
         });
-        // Occupies the pointer like a sheet: a click on the card isn't a click on the panel.
+        // Occupies the pointer like a sheet: a click on the card isn't a click on the surface.
         mouse_area(card).interaction(mouse::Interaction::Idle).into()
     }
 }

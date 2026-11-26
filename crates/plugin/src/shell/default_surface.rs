@@ -1,6 +1,6 @@
-//! The surface (notch: **Surface** | Chain | Matrix) of a patch without a ControlPanel: its
-//! macros, large, in rows of four. A panel is mostly a pretty face for the macros, so this is the
-//! plain one. (With a panel, the surface is the panel: `stage`.)
+//! The **default surface**: what the viewport shows for a patch that declares no surface of its
+//! own — its macros, large, in rows of four. A patch surface is mostly a pretty face for the
+//! macros, so this is the plain one. (With one of its own, `stage` draws it.)
 //!
 //! The cells are plain knob cells (`knob::Param`, no macro yellow: here the macros are simply the
 //! patch's controls), scaled up; input as everywhere (drag, Shift, wheel, double-click,
@@ -10,8 +10,6 @@
 //! the lit ticks and pointers, `colors.ink` the labels (else a light tint of the accent), the
 //! title is the patch's logo or its name in `fonts.title`.
 //!
-//! Later this becomes the generic panel for patches without their own (and panels get renamed
-//! to surfaces).
 
 use patch::{Patch, Values};
 
@@ -55,7 +53,7 @@ pub fn view<'a>(patch: &'a Patch, brand: Option<&'a Brand>, values: &'a Values, 
     };
 
     let body: Element<'a, Message> = if patch.macros.is_empty() {
-        text("This patch has no macros. Its knobs are on the block pages (Chain).").size(12.5).color(theme::alpha(ink, 0.6)).into()
+        text("This patch has no macros. Its knobs are on the blocks (Chain).").size(12.5).color(theme::alpha(ink, 0.6)).into()
     } else {
         // Up to two rows at 1.6×; more (up to 16 macros = four rows) smaller.
         let scale = if patch.macros.len() <= 2 * PER_ROW { 1.6 } else { 1.05 };

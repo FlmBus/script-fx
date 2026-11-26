@@ -9,4 +9,4 @@ local Bg = Component.define {
       SVG.rect { x = 0, y = 0, w = p.width, h = p.height, fill = "url(#" .. g .. ")" } }
   end,
 }
-return Patch.new("fixture", { panel = Bg.new {} })
+return Patch.new("fixture", { surface = Bg.new {} })

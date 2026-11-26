@@ -1,4 +1,4 @@
-//! The chain view (notch: Panel | **Chain** | Matrix): the patch's audio tree on a dotted ground.
+//! The chain's audio tree on a dotted ground, drawn for the `chain_surface`.
 //!
 //! IN → blocks → OUT on one wire that snakes through rows (left to right, down, right to left,
 //! down, …) when the chain is wider than the window. **Containers are blocks with slots** (band

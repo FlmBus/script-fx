@@ -4,7 +4,7 @@
 --   local sat = Blocks.Drive.new("sat", { amount = 6 })            -- its knobs: sat.params.amount, sat.params.mix
 --   local amount = Macro.new("amount", "Amount"):drives(sat.params.amount, { from = 0, to = 24 })
 --   local chain = Chain.new({ sat })
---   return Patch.new("My Patch", { chain = chain, macros = { amount }, panel = ui.Panel.new({ amount = amount }) })
+--   return Patch.new("My Patch", { chain = chain, macros = { amount }, surface = ui.Surface.new({ amount = amount }) })
 --
 -- Constructors take the identity positionally (id, display name) and every
 -- setting by name in an options table. A block's numeric settings are its knobs (Params,
@@ -124,7 +124,7 @@ local KINDS = {
   chain    = { function(v) return is(v, Chain) end, "a Chain" },
   chains   = { list_of(function(v) return is(v, Chain) end), "a non-empty list of Chains" },
   macros   = { list_of(function(v) return is(v, Macro) end), "a non-empty list of Macros" },
-  panel    = { function(v) return type(v) == "table" and type(v.__component) == "table" end, "a component instance (Panel.new(...))" },
+  surface  = { function(v) return type(v) == "table" and type(v.__component) == "table" end, "a component instance (Surface.new(...))" },
   theme    = { function(v) return type(v) == "table" and getmetatable(v) == nil end, "a table (colors, fonts, images, library)" },
   modulators = { list_of(function(v) return type(v) == "table" and getmetatable(v) == nil end), "a non-empty list of modulator tables" },
   assignments = { list_of(function(v) return type(v) == "table" and getmetatable(v) == nil end), "a non-empty list of assignment tables" },
@@ -209,7 +209,7 @@ end
 Param.__index = Param
 Param.__name = "Param"
 
--- Narrows the knob to lo..hi within the block type's range (the knob, the panel and typed values
+-- Narrows the knob to lo..hi within the block type's range (the knob, the surface and typed values
 -- stay in there; a macro's from/to default to it). The start value must be inside.
 function Param:range(lo, hi)
   if not is(self, Param) then fail("use param:range(lo, hi) with a colon", 2) end
@@ -574,7 +574,7 @@ strict("Blocks", Blocks)
 
 ---------------------------------------------------------------- Assets
 -- Font.new(path) / Image.new(path): files from the patch folder, used as tokens in the theme
--- (and later by panels). Paths are relative to the patch folder; the loader checks they exist.
+-- (and later by surfaces). Paths are relative to the patch folder; the loader checks they exist.
 Font.__index, Font.__name = Font, "Font"
 Image.__index, Image.__name = Image, "Image"
 
@@ -674,7 +674,7 @@ Patch.__name = "Patch"
 
 Patch.__is_patch = true
 
-local PATCH_FIELDS = parse_fields { "author:string", "chain:chain", "macros:macros", "modulators:modulators", "assignments:assignments", "theme:theme", "panel:panel" }
+local PATCH_FIELDS = parse_fields { "author:string", "chain:chain", "macros:macros", "modulators:modulators", "assignments:assignments", "theme:theme", "surface:surface" }
 
 local MOD_FOLLOW_FIELDS = parse_fields { "id:string!", "attack_ms:number", "release_ms:number" }
 -- sync (a note length, "1/8") overrides rate_hz: the LFO cycle / one step lasts that long at the host tempo.
@@ -750,7 +750,7 @@ function Patch.new(name, o)
   local assignments = o.assignments and check_assignments(o.assignments, what, 2) or {}
   return setmetatable({ name = name, author = o.author, chain = o.chain, macros = o.macros or {},
                         modulators = modulators, assignments = assignments, theme = o.theme,
-                        panel = o.panel }, Patch)
+                        surface = o.surface }, Patch)
 end
 
 ---------------------------------------------------------------- Meters

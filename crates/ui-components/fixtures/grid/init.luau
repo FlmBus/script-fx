@@ -27,4 +27,4 @@ local Grid = Component.define {
   end,
 }
 
-return Patch.new("fixture", { panel = Grid.new {} })
+return Patch.new("fixture", { surface = Grid.new {} })

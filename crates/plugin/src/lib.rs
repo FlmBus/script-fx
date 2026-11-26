@@ -1,6 +1,6 @@
 //! ScriptFX PoC plugin: 16 generic macro slots + a native DSP graph compiled from
 //! the patch's declarative `chain`. A Lua patch decides what the macros mean (and
-//! are called), which params they drive, the chain and how the panel looks.
+//! are called), which params they drive, the chain and how the surface looks.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -43,7 +43,7 @@ pub struct CaptureBuf {
 }
 
 /// Editor window size (logical px), fixed.
-/// 836 × 714: the patch window is exactly the 840×560 panel's 3:2 at 816×544 (see
+/// 836 × 714: the patch window is exactly the 840×560 surface's 3:2 at 816×544 (see
 /// `theme::stage_size`), the mod dock (108) below it. The library floats over it as a sheet, so
 /// it takes no column; the notch hangs into it, so it takes no row.
 pub const WINDOW_SIZE: (f32, f32) = (836.0, 714.0);

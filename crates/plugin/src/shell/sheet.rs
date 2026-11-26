@@ -17,7 +17,7 @@ pub fn frame<'a, M: Clone + 'a>(content: impl Into<Element<'a, M>>) -> Element<'
 /// The paper card at another width (the library).
 pub fn frame_width<'a, M: Clone + 'a>(content: impl Into<Element<'a, M>>, width: f32) -> Element<'a, M> {
     // `Idle` marks the sheet as occupied, so the stack doesn't pass clicks on its blank space
-    // through to the panel below (a click on the panel closes the sheets).
+    // through to the surface below (a click on the surface closes the sheets).
     mouse_area(container(content).width(width).height(Fill).clip(true).style(theme::paper_sheet))
         .interaction(mouse::Interaction::Idle)
         .into()

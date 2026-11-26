@@ -1,4 +1,4 @@
--- Neon Saturator: the whole control panel as reactive components.
+-- Neon Saturator: the whole surface as reactive components.
 -- Each component's render(p) returns SVG; the shell caches one image per
 -- component and re-renders only when that component's inputs change.
 
@@ -12,11 +12,11 @@ local TabBar = require("@self/tabs")
 local Spectrum = require("@self/spectrum")
 
 -- The patch's init.luau passes the four macros in.
-export type PanelProps = { tape: Macro, tube: Macro, diode: Macro, soft_clip: Macro }
+export type SurfaceProps = { tape: Macro, tube: Macro, diode: Macro, soft_clip: Macro }
 
-local Panel = Component.define {
-  name = "Panel",
-  render = function(p: Props<PanelProps>)
+local Surface = Component.define {
+  name = "Surface",
+  render = function(p: Props<SurfaceProps>)
     local tab = p.state.tab or 1
     local items = {
       Background.new {},
@@ -44,4 +44,4 @@ local Panel = Component.define {
   end,
 }
 
-return { Panel = Panel }
+return { Surface = Surface }

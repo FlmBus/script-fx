@@ -14,8 +14,8 @@
 //!   all others are free and keep their own value (persisted with the host project).
 //! - `Chain.new { Blocks.<Type>.new(id, {...}), ... }`: the effect chain (see [`chain`]),
 //!   compiled to native DSP by the `dsp` crate. Lua never runs on the audio thread.
-//! - `Patch.new(name, { chain, macros, theme, author, panel })` is what `init.luau` returns;
-//!   `panel` is the root component instance of the ControlPanel.
+//! - `Patch.new(name, { chain, macros, theme, author, surface })` is what `init.luau` returns;
+//!   `surface` is the root component instance of the patch's own surface.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -546,8 +546,8 @@ pub struct Patch {
     /// Ids of metered chain blocks (compressors/rider/transient), in DSP meter-slot order.
     pub meters: Vec<String>,
     pub theme: Theme,
-    /// `Patch.new` got a `panel` (the component UI, built by `ui_components::Ui`).
-    pub has_panel: bool,
+    /// `Patch.new` got a `surface` (the patch's own UI, built by `ui_components::Ui`).
+    pub has_surface: bool,
 }
 
 impl Patch {
@@ -565,7 +565,7 @@ impl Patch {
             chain: Vec::new(),
             meters: Vec::new(),
             theme: Theme::default(),
-            has_panel: false,
+            has_surface: false,
         }
     }
 
@@ -579,7 +579,7 @@ impl Patch {
         let root = rt.export(&patch)?;
         let lua = &rt.lua;
 
-        let has_panel = !patch.get::<mlua::Value>("panel")?.is_nil();
+        let has_surface = !patch.get::<mlua::Value>("surface")?.is_nil();
         let name: String = root.get("name")?;
         let author: Option<String> = root.get("author")?;
         let params: Vec<ParamSpec> = opt_from_lua(lua, root.get("params")?)?;
@@ -599,7 +599,7 @@ impl Patch {
         validate_assignments(&assignments, &params, &macros)?;
         let chain: Vec<BlockSpec> = opt_from_lua(lua, root.get("chain")?)?;
         let meters = chain::validate(&chain, &params)?;
-        Ok(Patch { name, author, dir, params, macros, modulations, modulators, assignments, chain, meters, theme, has_panel })
+        Ok(Patch { name, author, dir, params, macros, modulations, modulators, assignments, chain, meters, theme, has_surface })
     }
 
     pub fn macro_index(&self, id: &str) -> Option<usize> {
@@ -1445,14 +1445,14 @@ mod tests {
              local out = Blocks.Gain.new('out', { db = 0 })
              local m = Macro.new('m', 'M'):drives(out.params.db)
              return Patch.new('T', { chain = Chain.new({ out }), macros = { m },
-                                     panel = ui.Panel.new({ gain = m }) })",
+                                     surface = ui.Surface.new({ gain = m }) })",
         );
         std::fs::create_dir_all(d.0.join("components")).unwrap();
         std::fs::write(
             d.0.join("ui.luau"),
             "local Knob = require('./components/knob')
              local M = {}
-             M.Panel = Component.define({ name = 'Panel', render = function(p) return Knob.new({ bind = p.gain }) end })
+             M.Surface = Component.define({ name = 'Surface', render = function(p) return Knob.new({ bind = p.gain }) end })
              return M",
         )
         .unwrap();
@@ -1468,7 +1468,7 @@ mod tests {
         std::fs::write(
             d.0.join("ui.luau"),
             "local M = {}
-             M.Panel = Component.define({ name = 'Panel', render = function(p) return '' end })
+             M.Surface = Component.define({ name = 'Surface', render = function(p) return '' end })
              local K = Component.define({ name = 'K', render = function(p) return '' end })
              K.new({ bind = 'macro.m' })
              return M",

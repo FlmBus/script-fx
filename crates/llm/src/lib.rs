@@ -5,7 +5,7 @@
 //! - `http`       backend: any OpenAI-compatible API
 //! - `prompt`     what the model is told, and the shape of its answer
 //! - `workspace`  patch files: reading, staging, committing with a backup, undo
-//! - `check`      is a staged patch good? (loader, panel render, DSP, luau-lsp)
+//! - `check`      is a staged patch good? (loader, surface render, DSP, luau-lsp)
 //! - `turn`       ask → stage → check → feed errors back
 //!
 //! Everything blocks: run a turn on a worker thread. Nothing here writes to the patches folder
